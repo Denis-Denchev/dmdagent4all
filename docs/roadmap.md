@@ -19,7 +19,7 @@
 - approval queue with approve-and-execute: started
 - memory viewer/editor API
 - local workspace file tools
-- web dashboard shell
+- web dashboard shell: started
 
 ## Milestone 2: Connectors
 

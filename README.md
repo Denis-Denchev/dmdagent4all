@@ -43,6 +43,7 @@ This repository is in early foundation stage. The first public milestone focuses
 - CLI install wizard
 - local Ollama planner loop
 - approval queue basics
+- React web dashboard MVP
 - FastAPI backend skeleton
 
 High-risk connectors such as terminal, browser automation, email sending, deployment, SSH, and production access are disabled by default.
@@ -65,6 +66,20 @@ Run the API:
 
 ```bash
 dmdagent serve
+```
+
+Run the web dashboard:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5174
 ```
 
 ## CLI

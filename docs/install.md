@@ -78,3 +78,28 @@ Health check:
 ```bash
 curl http://127.0.0.1:8765/health
 ```
+
+## Web Dashboard
+
+Start the API in one terminal:
+
+```bash
+source .venv/bin/activate
+dmdagent serve
+```
+
+Start the dashboard in another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5174
+```
+
+The dashboard includes chat, tools, approvals, memory, audit logs, and model settings.
