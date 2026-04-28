@@ -16,7 +16,7 @@
 
 - chat endpoint connected to Ollama: started
 - structured tool-call parsing: started
-- approval queue: started
+- approval queue with approve-and-execute: started
 - memory viewer/editor API
 - local workspace file tools
 - web dashboard shell

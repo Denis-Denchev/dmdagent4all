@@ -20,6 +20,8 @@ class PermissionEngine:
         self,
         request: ToolRequest,
         context: PermissionContext | None = None,
+        *,
+        approval_granted: bool = False,
     ) -> PermissionDecision:
         context = context or PermissionContext()
         manifest = self._manifests.get(request.tool)
@@ -51,19 +53,20 @@ class PermissionEngine:
             context.cloud_model_active
             and not manifest.cloud_allowed
             and not context.cloud_context_approved
+            and not approval_granted
         ):
             return PermissionDecision.require_approval(
                 "This tool may expose private context to a cloud model.",
                 risk=manifest.risk,
             )
 
-        if manifest.approval_required:
+        if manifest.approval_required and not approval_granted:
             return PermissionDecision.require_approval(
                 "Tool manifest requires approval.",
                 risk=manifest.risk,
             )
 
-        if int(manifest.risk) >= context.approval_risk_threshold:
+        if int(manifest.risk) >= context.approval_risk_threshold and not approval_granted:
             return PermissionDecision.require_approval(
                 f"Risk level {int(manifest.risk)} requires approval.",
                 risk=manifest.risk,

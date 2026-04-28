@@ -381,9 +381,10 @@ def command_approvals(args: argparse.Namespace) -> int:
     store = AuditStore(paths.audit_db)
 
     if args.approvals_command == "approve":
-        changed = store.set_approval_status(args.approval_id, "approved")
-        print("Approval updated." if changed else "No pending approval found.")
-        return 0 if changed else 1
+        core = build_agent_core()
+        response = core.approve_and_execute(args.approval_id)
+        _print_agent_response(response.status, response.message, response.data)
+        return 0 if response.status == "ok" else 1
 
     if args.approvals_command == "deny":
         changed = store.set_approval_status(args.approval_id, "denied")

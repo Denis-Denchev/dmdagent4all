@@ -60,4 +60,4 @@ def _memory_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
         raise ValueError("metadata must be an object when provided")
     manager = MemoryManager(context.memory_root)
     written = manager.write(path, body, metadata=metadata)
-    return {"path": str(written.relative_to(context.memory_root))}
+    return {"path": str(written.relative_to(context.memory_root.resolve()))}

@@ -37,6 +37,18 @@ The backend decides whether the request is allowed.
 - Risk 3+ requires approval by default.
 - Risk 5 tools are disabled by default.
 
+## Approval Flow
+
+When a tool requires approval, the backend stores the exact pending request:
+
+```text
+dmdagent approvals list
+dmdagent approvals approve <id>
+dmdagent approvals deny <id>
+```
+
+Approving a request executes that stored request once. Approval does not bypass tool enablement or missing connector permissions.
+
 ## Terminal
 
 Terminal access is disabled by default.

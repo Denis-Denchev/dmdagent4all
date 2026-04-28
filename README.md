@@ -78,6 +78,7 @@ dmdagent tools list
 dmdagent memory path
 dmdagent memory list
 dmdagent approvals list
+dmdagent approvals approve <id>
 ```
 
 ## Local Chat

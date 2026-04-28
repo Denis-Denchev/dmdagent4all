@@ -151,22 +151,88 @@ class AgentCore:
                 data={"missing_permissions": list(decision.missing_permissions)},
             )
 
+        return self._execute_tool_request(
+            request,
+            risk=None if decision.risk is None else int(decision.risk),
+        )
+
+    def approve_and_execute(self, approval_id: int) -> AgentResponse:
+        approval = self.audit_store.get_approval(approval_id)
+        if approval is None:
+            return AgentResponse(
+                status="not_found",
+                message=f"Approval not found: {approval_id}",
+            )
+        if approval["status"] != "pending":
+            return AgentResponse(
+                status="denied",
+                message=f"Approval is not pending. Current status: {approval['status']}",
+                data={"approval_id": approval_id},
+            )
+
+        request = ToolRequest(
+            tool=str(approval["tool"]),
+            args=dict(approval["args"]),
+            reason=str(approval.get("request_reason") or "Approved by user."),
+        )
+        decision = self.permission_engine.evaluate(
+            request,
+            self.permission_context,
+            approval_granted=True,
+        )
+        self.audit_store.record_tool_call(
+            tool=request.tool,
+            risk=None if decision.risk is None else int(decision.risk),
+            args=request.args,
+            decision=f"approved:{decision.reason}",
+            result_status="blocked" if not decision.allowed else None,
+        )
+        if not decision.allowed:
+            return AgentResponse(
+                status="denied",
+                message=decision.reason,
+                data={
+                    "approval_id": approval_id,
+                    "missing_permissions": list(decision.missing_permissions),
+                },
+            )
+
+        self.audit_store.set_approval_status(approval_id, "approved")
+        response = self._execute_tool_request(
+            request,
+            risk=None if decision.risk is None else int(decision.risk),
+            approval_id=approval_id,
+        )
+        self.audit_store.set_approval_status(
+            approval_id,
+            "executed" if response.status == "ok" else "failed",
+        )
+        return response
+
+    def _execute_tool_request(
+        self,
+        request: ToolRequest,
+        *,
+        risk: int | None,
+        approval_id: int | None = None,
+    ) -> AgentResponse:
         try:
             result = self.tool_registry.execute(
                 request.tool,
                 request.args,
                 self.runtime_context,
             )
-        except ToolExecutionError as exc:
+        except (ToolExecutionError, ValueError, OSError) as exc:
             return AgentResponse(status="error", message=str(exc))
 
         self.audit_store.record_event(
             AuditEvent(
                 event_type="tool_call",
                 tool=request.tool,
-                risk=None if decision.risk is None else int(decision.risk),
+                risk=risk,
                 approved=True,
                 result_status="success",
+                metadata={} if approval_id is None else {"approval_id": approval_id},
             )
         )
         return AgentResponse(status="ok", message="Tool executed.", data=result)
@@ -192,6 +258,16 @@ def _route_without_llm(text: str) -> ToolRequest | None:
 
 def _answer_without_llm(text: str) -> str | None:
     normalized = text.lower().strip()
+    if normalized in {"как си", "здравей", "здрасти"}:
+        return (
+            "Добре съм. Работя локално, пазя действията зад permission engine, "
+            "и мога да помагам с memory, tools и бъдещи connectors."
+        )
+    if normalized in {"hello", "hi", "hey", "how are you"}:
+        return (
+            "I am running locally and ready. I can help with memory, tools, "
+            "and connector-driven tasks once you enable them."
+        )
     if normalized in {"help", "/help"} or "what can you do" in normalized:
         return (
             "I can chat through a local model, list and read local Markdown memory, "

@@ -208,15 +208,44 @@ class AuditStore:
             for row in rows
         ]
 
-    def set_approval_status(self, approval_id: int, status: str) -> bool:
-        if status not in {"approved", "denied", "cancelled"}:
-            raise ValueError("Approval status must be approved, denied, or cancelled.")
+    def get_approval(self, approval_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
-            cursor = connection.execute(
+            row = connection.execute(
                 """
+                SELECT id, created_at, tool, risk, status, reason, expires_at,
+                       args_json, request_reason, decision_reason
+                FROM approvals
+                WHERE id = ?
+                """,
+                (approval_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "created_at": row[1],
+            "tool": row[2],
+            "risk": row[3],
+            "status": row[4],
+            "reason": row[5],
+            "expires_at": row[6],
+            "args": json.loads(row[7] or "{}"),
+            "request_reason": row[8],
+            "decision_reason": row[9],
+        }
+
+    def set_approval_status(self, approval_id: int, status: str) -> bool:
+        if status not in {"approved", "denied", "cancelled", "executed", "failed"}:
+            raise ValueError(
+                "Approval status must be approved, denied, cancelled, executed, or failed."
+            )
+        with self._connect() as connection:
+            status_filter = "('pending', 'approved')" if status in {"executed", "failed"} else "('pending')"
+            cursor = connection.execute(
+                f"""
                 UPDATE approvals
                 SET status = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND status IN {status_filter}
                 """,
                 (status, approval_id),
             )

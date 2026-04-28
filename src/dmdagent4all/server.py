@@ -57,6 +57,25 @@ def create_app() -> FastAPI:
     def approvals(status: str | None = "pending", limit: int = 50) -> list[dict[str, Any]]:
         return AuditStore(paths.audit_db).list_approvals(status=status, limit=limit)
 
+    @app.post("/v1/approvals/{approval_id}/approve")
+    def approve(approval_id: int) -> dict[str, Any]:
+        return asdict(core.approve_and_execute(approval_id))
+
+    @app.post("/v1/approvals/{approval_id}/deny")
+    def deny(approval_id: int) -> dict[str, Any]:
+        changed = AuditStore(paths.audit_db).set_approval_status(approval_id, "denied")
+        if not changed:
+            return {
+                "status": "not_found",
+                "message": "No pending approval found.",
+                "data": {"approval_id": approval_id},
+            }
+        return {
+            "status": "ok",
+            "message": "Approval denied.",
+            "data": {"approval_id": approval_id},
+        }
+
     return app
 
 
