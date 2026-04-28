@@ -76,6 +76,17 @@ export type ModelsResponse = {
   modes: ModelMode[]
 }
 
+export type PermissionItem = {
+  name: string
+  granted: boolean
+  tools: string[]
+}
+
+export type PermissionsResponse = {
+  granted: string[]
+  available: PermissionItem[]
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -104,6 +115,12 @@ export const api = {
   setTool: (tool: string, enabled: boolean) =>
     request<AgentResponse>(`/v1/tools/${encodeURIComponent(tool)}/${enabled ? 'enable' : 'disable'}`, {
       method: 'POST',
+    }),
+  permissions: () => request<PermissionsResponse>('/v1/permissions'),
+  setPermission: (permission: string, granted: boolean) =>
+    request<AgentResponse>(`/v1/permissions/${granted ? 'grant' : 'revoke'}`, {
+      method: 'POST',
+      body: JSON.stringify({ permission }),
     }),
   approvals: () => request<Approval[]>('/v1/approvals?status=pending&limit=50'),
   approve: (id: number) =>

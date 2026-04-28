@@ -6,11 +6,12 @@ import {
   api,
   type MemoryFile,
   type ModelMode,
+  type PermissionItem,
   type Status,
   type Tool,
 } from './api'
 
-type View = 'chat' | 'approvals' | 'tools' | 'memory' | 'audit' | 'models'
+type View = 'chat' | 'approvals' | 'tools' | 'permissions' | 'memory' | 'audit' | 'models'
 
 type ChatMessage = {
   role: 'user' | 'agent'
@@ -22,6 +23,7 @@ const views: Array<{ key: View; label: string }> = [
   { key: 'chat', label: 'Chat' },
   { key: 'approvals', label: 'Approvals' },
   { key: 'tools', label: 'Tools' },
+  { key: 'permissions', label: 'Permissions' },
   { key: 'memory', label: 'Memory' },
   { key: 'audit', label: 'Audit' },
   { key: 'models', label: 'Models' },
@@ -31,6 +33,7 @@ export function App() {
   const [activeView, setActiveView] = useState<View>('chat')
   const [status, setStatus] = useState<Status | null>(null)
   const [tools, setTools] = useState<Tool[]>([])
+  const [permissions, setPermissions] = useState<PermissionItem[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
   const [memoryFiles, setMemoryFiles] = useState<string[]>([])
@@ -59,10 +62,19 @@ export function App() {
   }, [])
 
   async function refreshAll() {
-    const [statusResult, toolsResult, approvalsResult, auditResult, memoryResult, modelsResult] =
+    const [
+      statusResult,
+      toolsResult,
+      permissionsResult,
+      approvalsResult,
+      auditResult,
+      memoryResult,
+      modelsResult,
+    ] =
       await Promise.all([
         api.status(),
         api.tools(),
+        api.permissions(),
         api.approvals(),
         api.audit(),
         api.memory(),
@@ -70,6 +82,7 @@ export function App() {
       ])
     setStatus(statusResult)
     setTools(toolsResult)
+    setPermissions(permissionsResult.available)
     setApprovals(approvalsResult)
     setAudit(auditResult)
     setMemoryFiles(memoryResult.files)
@@ -269,6 +282,34 @@ export function App() {
                     aria-pressed={tool.enabled}
                   >
                     {tool.enabled ? 'Enabled' : 'Disabled'}
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'permissions' ? (
+          <section className="panel">
+            <div className="table-list">
+              {permissions.map((permission) => (
+                <article className="permission-row" key={permission.name}>
+                  <div>
+                    <strong>{permission.name}</strong>
+                    <span>{permission.tools.join(', ')}</span>
+                  </div>
+                  <button
+                    className={permission.granted ? 'toggle toggle-on' : 'toggle'}
+                    type="button"
+                    onClick={() =>
+                      void runAction(
+                        () => api.setPermission(permission.name, !permission.granted),
+                        `${permission.name} ${permission.granted ? 'revoked' : 'granted'}.`,
+                      )
+                    }
+                    aria-pressed={permission.granted}
+                  >
+                    {permission.granted ? 'Granted' : 'Not Granted'}
                   </button>
                 </article>
               ))}

@@ -296,6 +296,7 @@ textarea:focus {
 }
 
 .approval-row,
+.permission-row,
 .audit-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -311,8 +312,14 @@ textarea:focus {
   grid-template-columns: 170px minmax(0, 1fr) minmax(160px, auto);
 }
 
+.permission-row {
+  min-height: 78px;
+}
+
 .approval-row strong,
 .approval-row span,
+.permission-row strong,
+.permission-row span,
 .audit-row strong,
 .audit-row span {
   display: block;
@@ -472,6 +479,7 @@ textarea {
   }
 
   .approval-row,
+  .permission-row,
   .audit-row,
   .model-current {
     grid-template-columns: 1fr;

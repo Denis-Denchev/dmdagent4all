@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, Callable
 
 import yaml
 
 from dmdagent4all.app_paths import AppPaths
+
+
+_CONFIG_LOCK = RLock()
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -82,11 +86,12 @@ def write_default_config(path: Path | None = None) -> Path:
     paths = AppPaths.default()
     paths.ensure()
     config_path = path or paths.config
-    if not config_path.exists():
-        config_path.write_text(
-            yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False),
-            encoding="utf-8",
-        )
+    with _CONFIG_LOCK:
+        if not config_path.exists():
+            config_path.write_text(
+                yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False),
+                encoding="utf-8",
+            )
     return config_path
 
 
@@ -99,6 +104,20 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         encoding="utf-8",
     )
     return config_path
+
+
+def update_config(
+    mutator: Callable[[dict[str, Any]], None],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    paths = AppPaths.default()
+    paths.ensure()
+    config_path = path or paths.config
+    with _CONFIG_LOCK:
+        config = load_config(config_path)
+        mutator(config)
+        save_config(config, config_path)
+    return config
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

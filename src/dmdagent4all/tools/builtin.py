@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
 from typing import Any
 
 from dmdagent4all.memory import MemoryManager
@@ -13,6 +14,11 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("memory.list", _memory_list)
     registry.register_handler("memory.read", _memory_read)
     registry.register_handler("memory.write", _memory_write)
+    registry.register_handler("browser.open", _browser_not_implemented)
+    registry.register_handler("browser.extract_text", _browser_not_implemented)
+    registry.register_handler("browser.click", _browser_not_implemented)
+    registry.register_handler("browser.fill_form", _browser_not_implemented)
+    registry.register_handler("browser.submit", _browser_not_implemented)
     return registry
 
 
@@ -61,3 +67,24 @@ def _memory_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
     manager = MemoryManager(context.memory_root)
     written = manager.write(path, body, metadata=metadata)
     return {"path": str(written.relative_to(context.memory_root.resolve()))}
+
+
+def _browser_not_implemented(
+    args: dict[str, Any],
+    context: ToolRuntimeContext,
+) -> dict[str, Any]:
+    del context
+    url = args.get("url")
+    if isinstance(url, str) and url:
+        parsed = urlparse(url if "://" in url else f"https://{url}")
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("browser tools require a valid http or https URL")
+        url = parsed.geturl()
+    return {
+        "status": "not_implemented",
+        "message": (
+            "Browser sandbox execution is not implemented yet. "
+            "The request passed tool and permission policy, but no browser session was started."
+        ),
+        "url": url,
+    }

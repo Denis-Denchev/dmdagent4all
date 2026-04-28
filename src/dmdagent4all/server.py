@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from dmdagent4all.app_paths import AppPaths
 from dmdagent4all.audit import AuditStore
-from dmdagent4all.config import load_config, save_config, write_default_config
+from dmdagent4all.config import load_config, update_config, write_default_config
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.memory.manager import MemoryPathError
 from dmdagent4all.model_presets import MODEL_MODES
@@ -33,6 +33,10 @@ class ModelModeRequest(BaseModel):
 
 class ModelRequest(BaseModel):
     model: str
+
+
+class PermissionRequest(BaseModel):
+    permission: str
 
 
 def create_app() -> FastAPI:
@@ -81,6 +85,41 @@ def create_app() -> FastAPI:
     @app.post("/v1/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
         return asdict(build_agent_core().handle_text(request.message))
+
+    @app.get("/v1/permissions")
+    def permissions() -> dict[str, Any]:
+        config = load_config(paths.config)
+        granted = sorted(config.get("permissions", {}).get("granted", []))
+        required = sorted(
+            {
+                permission
+                for manifest in registry.manifests.values()
+                for permission in manifest.permissions
+            }
+        )
+        return {
+            "granted": granted,
+            "available": [
+                {
+                    "name": permission,
+                    "granted": permission in granted,
+                    "tools": [
+                        manifest.name
+                        for manifest in registry.manifests.values()
+                        if permission in manifest.permissions
+                    ],
+                }
+                for permission in required
+            ],
+        }
+
+    @app.post("/v1/permissions/grant")
+    def grant_permission(request: PermissionRequest) -> dict[str, Any]:
+        return _set_permission(paths, request.permission, True)
+
+    @app.post("/v1/permissions/revoke")
+    def revoke_permission(request: PermissionRequest) -> dict[str, Any]:
+        return _set_permission(paths, request.permission, False)
 
     @app.get("/v1/audit")
     def audit(limit: int = 20) -> list[dict[str, Any]]:
@@ -181,11 +220,15 @@ def create_app() -> FastAPI:
                 "message": f"Unknown model mode: {request.mode}",
                 "data": None,
             }
-        config = load_config(paths.config)
-        config.setdefault("llm", {})["mode"] = selected.key
-        config["llm"]["model"] = selected.default_model
-        config["llm"]["planner_model"] = selected.default_model
-        save_config(config, paths.config)
+        config = update_config(
+            lambda current: _set_model_config(
+                current,
+                mode=selected.key,
+                model=selected.default_model,
+                planner_model=selected.default_model,
+            ),
+            paths.config,
+        )
         return {
             "status": "ok",
             "message": f"Model mode set to {selected.label}.",
@@ -194,11 +237,15 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/models/model")
     def set_model(request: ModelRequest) -> dict[str, Any]:
-        config = load_config(paths.config)
-        config.setdefault("llm", {})["mode"] = "custom"
-        config["llm"]["model"] = request.model
-        config["llm"]["planner_model"] = request.model
-        save_config(config, paths.config)
+        config = update_config(
+            lambda current: _set_model_config(
+                current,
+                mode="custom",
+                model=request.model,
+                planner_model=request.model,
+            ),
+            paths.config,
+        )
         return {
             "status": "ok",
             "message": f"Model set to {request.model}.",
@@ -216,14 +263,67 @@ def _set_tool_enabled(paths: AppPaths, tool_name: str, enabled: bool) -> dict[st
             "message": f"Unknown tool: {tool_name}",
             "data": None,
         }
-    config = load_config(paths.config)
-    config.setdefault("tools", {}).setdefault(tool_name, {})["enabled"] = enabled
-    save_config(config, paths.config)
+    update_config(
+        lambda config: config.setdefault("tools", {}).setdefault(tool_name, {}).__setitem__(
+            "enabled",
+            enabled,
+        ),
+        paths.config,
+    )
     return {
         "status": "ok",
         "message": f"Tool {tool_name} {'enabled' if enabled else 'disabled'}.",
         "data": {"tool": tool_name, "enabled": enabled},
     }
+
+
+def _set_permission(paths: AppPaths, permission: str, granted: bool) -> dict[str, Any]:
+    registry = build_builtin_registry()
+    known_permissions = {
+        item
+        for manifest in registry.manifests.values()
+        for item in manifest.permissions
+    }
+    if permission not in known_permissions:
+        return {
+            "status": "error",
+            "message": f"Unknown permission: {permission}",
+            "data": None,
+        }
+    update_config(
+        lambda config: _set_permission_config(config, permission, granted),
+        paths.config,
+    )
+    return {
+        "status": "ok",
+        "message": f"Permission {permission} {'granted' if granted else 'revoked'}.",
+        "data": {"permission": permission, "granted": granted},
+    }
+
+
+def _set_model_config(
+    config: dict[str, Any],
+    *,
+    mode: str,
+    model: str,
+    planner_model: str,
+) -> None:
+    config.setdefault("llm", {})["mode"] = mode
+    config["llm"]["model"] = model
+    config["llm"]["planner_model"] = planner_model
+
+
+def _set_permission_config(
+    config: dict[str, Any],
+    permission: str,
+    granted: bool,
+) -> None:
+    permissions = set(config.setdefault("permissions", {}).setdefault("granted", []))
+    if granted:
+        permissions.add(permission)
+    else:
+        permissions.discard(permission)
+    config["permissions"]["granted"] = sorted(permissions)
 
 
 app = create_app()

@@ -225,6 +225,13 @@ class AgentCore:
         except (ToolExecutionError, ValueError, OSError) as exc:
             return AgentResponse(status="error", message=str(exc))
 
+        if result.get("status") == "not_implemented":
+            return AgentResponse(
+                status="not_implemented",
+                message=str(result.get("message", "Tool is not implemented yet.")),
+                data=result,
+            )
+
         self.audit_store.record_event(
             AuditEvent(
                 event_type="tool_call",
