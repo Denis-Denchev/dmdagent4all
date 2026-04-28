@@ -15,8 +15,18 @@ class CloudProviderStub:
     model: str
     is_local: bool = False
 
-    def chat(self, messages: list[LLMMessage]) -> LLMResponse:
+    def chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        think: bool | None = None,
+    ) -> LLMResponse:
         del messages
+        del max_tokens
+        del temperature
+        del think
         raise CloudProviderNotConfigured(
             f"{self.provider_name} is not configured. Cloud providers require explicit setup and privacy approval."
         )

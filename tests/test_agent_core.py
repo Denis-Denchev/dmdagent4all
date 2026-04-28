@@ -19,6 +19,12 @@ class FakePlanner:
         return self.result
 
 
+class ExplodingPlanner:
+    def plan(self, **kwargs) -> PlanResult:
+        del kwargs
+        raise AssertionError("planner should not be called")
+
+
 class AgentCoreTest(unittest.TestCase):
     def test_planner_final_response_is_returned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -48,6 +54,20 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(response.status, "ok")
             self.assertIn("files", response.data)
 
+    def test_obvious_memory_list_request_does_not_need_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), ExplodingPlanner())
+            response = core.handle_text("Show my local memory files")
+            self.assertEqual(response.status, "ok")
+            self.assertIn("files", response.data)
+
+    def test_help_request_does_not_need_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), ExplodingPlanner())
+            response = core.handle_text("Hello, what can you do?")
+            self.assertEqual(response.status, "ok")
+            self.assertIn("permission engine", response.message)
+
     def test_approval_required_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -74,7 +94,7 @@ class AgentCoreTest(unittest.TestCase):
 
 def _build_core(
     root: Path,
-    planner: FakePlanner,
+    planner,
     audit: AuditStore | None = None,
 ) -> AgentCore:
     registry = build_builtin_registry()

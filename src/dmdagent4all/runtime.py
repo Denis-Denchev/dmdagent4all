@@ -61,9 +61,10 @@ def _provider_from_config(config: dict[str, Any]):
     llm = config.get("llm", {})
     provider = str(llm.get("provider", "ollama")).lower()
     model = str(llm.get("model", "qwen3:8b"))
+    planner_model = llm.get("planner_model") or model
     if provider in {"ollama", "local"}:
         return OllamaProvider(
-            model=model,
+            model=str(planner_model),
             base_url=str(llm.get("base_url", "http://localhost:11434")),
         )
-    return CloudProviderStub(provider_name=provider, model=model)
+    return CloudProviderStub(provider_name=provider, model=str(planner_model))

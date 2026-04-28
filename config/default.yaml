@@ -1,8 +1,12 @@
 llm:
   provider: ollama
   model: qwen3:8b
+  planner_model:
   mode: fast
   response_language: auto
+  planner_max_tokens: 192
+  planner_temperature: 0.0
+  planner_think: false
 
 privacy:
   local_first: true

@@ -16,7 +16,14 @@ class OllamaProvider:
     provider_name: str = "ollama"
     is_local: bool = True
 
-    def chat(self, messages: list[LLMMessage]) -> LLMResponse:
+    def chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        think: bool | None = None,
+    ) -> LLMResponse:
         payload = {
             "model": self.model,
             "messages": [
@@ -25,6 +32,15 @@ class OllamaProvider:
             ],
             "stream": False,
         }
+        options = {}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
+        if temperature is not None:
+            options["temperature"] = temperature
+        if options:
+            payload["options"] = options
+        if think is not None:
+            payload["think"] = think
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}/api/chat",
             data=json.dumps(payload).encode("utf-8"),

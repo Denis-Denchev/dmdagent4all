@@ -13,8 +13,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "provider": "ollama",
         "model": "qwen3:8b",
+        "planner_model": None,
         "mode": "fast",
         "response_language": "auto",
+        "planner_max_tokens": 192,
+        "planner_temperature": 0.0,
+        "planner_think": False,
     },
     "privacy": {
         "local_first": True,

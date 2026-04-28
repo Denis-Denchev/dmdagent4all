@@ -73,6 +73,7 @@ dmdagent serve
 dmdagent status
 dmdagent wizard
 dmdagent chat "Show my local memory files"
+dmdagent models list
 dmdagent tools list
 dmdagent memory path
 dmdagent memory list
@@ -95,6 +96,15 @@ dmdagent chat "Show my local memory files"
 ```
 
 The model can only propose a structured tool request. The backend still validates the tool, risk level, permissions, approval requirement, and cloud-context policy before anything runs.
+
+For slower machines, switch to Light Mode:
+
+```bash
+dmdagent models set-mode light
+ollama pull qwen3:4b
+```
+
+This also switches the planner model to the selected lightweight model.
 
 ## Model Presets
 

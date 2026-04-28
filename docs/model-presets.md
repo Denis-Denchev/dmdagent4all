@@ -26,3 +26,28 @@ The install wizard recommends a model based on the user's machine. The recommend
 The product interface, installer, terminal output, approval dialogs, and docs are English by default.
 
 The assistant response language defaults to `auto`. It can answer in any language supported by the selected model.
+
+## CLI
+
+List modes:
+
+```bash
+dmdagent models list
+```
+
+Switch modes:
+
+```bash
+dmdagent models set-mode light
+dmdagent models set-mode fast
+dmdagent models set-mode balanced
+dmdagent models set-mode power
+```
+
+Changing mode updates both the default assistant model and the planner model. This keeps tool routing fast on smaller machines.
+
+Set a custom model:
+
+```bash
+dmdagent models set phi4-mini
+```

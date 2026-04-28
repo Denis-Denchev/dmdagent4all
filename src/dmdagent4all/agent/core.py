@@ -46,6 +46,16 @@ class AgentCore:
                     reason="User requested enabled tools.",
                 )
             )
+        routed = _route_without_llm(stripped)
+        if routed is not None:
+            return self.handle_tool_request(routed)
+        fast_answer = _answer_without_llm(stripped)
+        if fast_answer is not None:
+            return AgentResponse(
+                status="ok",
+                message=fast_answer,
+                data={"planner": "deterministic"},
+            )
         if stripped.startswith("{"):
             try:
                 payload = json.loads(stripped)
@@ -72,13 +82,14 @@ class AgentCore:
             )
 
         try:
+            llm_config = self.runtime_context.config.get("llm", {})
             plan = self.planner.plan(
                 user_message=text,
                 manifests=self.tool_registry.manifests,
-                response_language=self.runtime_context.config.get("llm", {}).get(
-                    "response_language",
-                    "auto",
-                ),
+                response_language=llm_config.get("response_language", "auto"),
+                max_tokens=int(llm_config.get("planner_max_tokens", 192)),
+                temperature=float(llm_config.get("planner_temperature", 0.0)),
+                think=bool(llm_config.get("planner_think", False)),
             )
         except (PlannerError, OSError, RuntimeError) as exc:
             return AgentResponse(
@@ -159,3 +170,33 @@ class AgentCore:
             )
         )
         return AgentResponse(status="ok", message="Tool executed.", data=result)
+
+
+def _route_without_llm(text: str) -> ToolRequest | None:
+    normalized = text.lower().strip()
+    if normalized in {"/memory", "memory list", "list memory"}:
+        return ToolRequest(
+            tool="memory.list",
+            args={},
+            reason="User requested local memory files.",
+        )
+    if "memory files" in normalized or "local memory" in normalized:
+        if any(word in normalized for word in {"show", "list", "see", "display"}):
+            return ToolRequest(
+                tool="memory.list",
+                args={},
+                reason="User requested local memory files.",
+            )
+    return None
+
+
+def _answer_without_llm(text: str) -> str | None:
+    normalized = text.lower().strip()
+    if normalized in {"help", "/help"} or "what can you do" in normalized:
+        return (
+            "I can chat through a local model, list and read local Markdown memory, "
+            "show enabled tools, and route tool requests through the permission engine. "
+            "Gmail, Calendar, Browser, and Terminal tools exist as manifests but are "
+            "disabled until explicitly configured."
+        )
+    return None

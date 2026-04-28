@@ -22,5 +22,12 @@ class LLMProvider(Protocol):
     model: str
     is_local: bool
 
-    def chat(self, messages: list[LLMMessage]) -> LLMResponse:
+    def chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        think: bool | None = None,
+    ) -> LLMResponse:
         """Return a model response. Providers must never receive raw secrets."""

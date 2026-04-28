@@ -36,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser = subcommands.add_parser("chat", help="Send a message to the local agent.")
     chat_parser.add_argument("message", nargs="*", help="Message text. Omit for interactive mode.")
 
+    models_parser = subcommands.add_parser("models", help="Manage local model settings.")
+    models_subcommands = models_parser.add_subparsers(dest="models_command", required=True)
+    models_subcommands.add_parser("list", help="List recommended model modes.")
+    models_set_mode = models_subcommands.add_parser("set-mode", help="Set a recommended model mode.")
+    models_set_mode.add_argument("mode", choices=[mode.key for mode in MODEL_MODES])
+    models_set = models_subcommands.add_parser("set", help="Set an explicit Ollama model name.")
+    models_set.add_argument("model")
+
     serve_parser = subcommands.add_parser("serve", help="Start the local API server.")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", default=8765, type=int)
@@ -91,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
         return command_serve(args.host, args.port, args.reload)
     if args.command == "chat":
         return command_chat(" ".join(args.message))
+    if args.command == "models":
+        return command_models(args)
     if args.command == "tools":
         return command_tools(args)
     if args.command == "permissions":
@@ -228,6 +238,55 @@ def command_chat(message: str) -> int:
             continue
         response = core.handle_text(line)
         _print_agent_response(response.status, response.message, response.data)
+
+
+def command_models(args: argparse.Namespace) -> int:
+    paths = AppPaths.default()
+    paths.ensure()
+    config_path = write_default_config(paths.config)
+    config = load_config(config_path)
+
+    if args.models_command == "list":
+        rows = [
+            [
+                mode.key,
+                mode.label,
+                mode.default_model,
+                ", ".join(mode.alternatives) or "-",
+                mode.description,
+            ]
+            for mode in MODEL_MODES
+        ]
+        _print_rows(["Mode", "Label", "Default", "Alternatives", "Use case"], rows)
+        print("")
+        print(f"Current mode: {config['llm'].get('mode', '-')}")
+        print(f"Current model: {config['llm'].get('model', '-')}")
+        print(f"Current planner model: {config['llm'].get('planner_model') or config['llm'].get('model', '-')}")
+        return 0
+
+    if args.models_command == "set-mode":
+        selected = next(mode for mode in MODEL_MODES if mode.key == args.mode)
+        config.setdefault("llm", {})["mode"] = selected.key
+        config["llm"]["model"] = selected.default_model
+        config["llm"]["planner_model"] = selected.default_model
+        save_config(config, config_path)
+        print(f"Model mode set to {selected.label}.")
+        print(f"Model: {selected.default_model}")
+        print(f"Planner model: {selected.default_model}")
+        print(f"Install it with: ollama pull {selected.default_model}")
+        return 0
+
+    if args.models_command == "set":
+        config.setdefault("llm", {})["model"] = args.model
+        config["llm"]["planner_model"] = args.model
+        config["llm"]["mode"] = "custom"
+        save_config(config, config_path)
+        print(f"Model set to {args.model}.")
+        print(f"Planner model set to {args.model}.")
+        print(f"Install it with: ollama pull {args.model}")
+        return 0
+
+    return 2
 
 
 def command_tools(args: argparse.Namespace) -> int:

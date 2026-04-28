@@ -26,6 +26,7 @@ source .venv/bin/activate
 dmdagent status
 dmdagent wizard
 dmdagent chat "Show my local memory files"
+dmdagent models list
 dmdagent serve
 ```
 
@@ -50,6 +51,13 @@ ollama serve
 ```
 
 The wizard recommends a model based on detected system RAM.
+
+For faster responses on 8GB or 16GB machines:
+
+```bash
+dmdagent models set-mode light
+ollama pull qwen3:4b
+```
 
 ## API
 
