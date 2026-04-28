@@ -1,0 +1,46 @@
+llm:
+  provider: ollama
+  model: qwen3:8b
+  mode: fast
+  response_language: auto
+
+privacy:
+  local_first: true
+  cloud_models_disabled_by_default: true
+  never_send_email_body_to_cloud: true
+  never_send_calendar_details_to_cloud: true
+  redact_secrets: true
+  require_approval_for_cloud_context: true
+
+terminal:
+  enabled: false
+  mode: allowlist
+  workspace_only: true
+  allowed_commands:
+    - [pwd]
+    - [ls]
+    - [git, status]
+    - [git, diff]
+    - [npm, test]
+    - [pytest]
+
+browser:
+  enabled: false
+  isolated_profile: true
+  downloads_to_workspace: true
+  approval_required_for_submit: true
+
+tools: {}
+
+permissions:
+  granted: []
+  approval_required_at_risk: 3
+
+interfaces:
+  ui_language: en
+  telegram:
+    enabled: false
+    allowed_user_ids: []
+  whatsapp:
+    enabled: false
+    allowed_user_ids: []

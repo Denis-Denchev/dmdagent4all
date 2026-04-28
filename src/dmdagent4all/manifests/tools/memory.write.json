@@ -1,0 +1,9 @@
+{
+  "name": "memory.write",
+  "description": "Write an approved local Markdown memory file.",
+  "risk": 2,
+  "permissions": [],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

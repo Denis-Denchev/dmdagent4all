@@ -1,0 +1,10 @@
+{
+  "name": "browser.submit",
+  "description": "Submit a form in the isolated browser.",
+  "risk": 4,
+  "permissions": ["browser.submit"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false,
+  "sandbox_required": true
+}

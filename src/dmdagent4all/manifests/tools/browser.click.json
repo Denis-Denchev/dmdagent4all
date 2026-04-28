@@ -1,0 +1,10 @@
+{
+  "name": "browser.click",
+  "description": "Click an element in the isolated browser.",
+  "risk": 3,
+  "permissions": ["browser.interact"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false,
+  "sandbox_required": true
+}

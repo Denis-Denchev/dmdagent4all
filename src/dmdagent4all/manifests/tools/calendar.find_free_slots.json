@@ -1,0 +1,9 @@
+{
+  "name": "calendar.find_free_slots",
+  "description": "Find free slots using calendar free/busy data.",
+  "risk": 1,
+  "permissions": ["calendar.freebusy"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

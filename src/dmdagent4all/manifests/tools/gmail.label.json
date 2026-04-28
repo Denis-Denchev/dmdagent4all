@@ -1,0 +1,9 @@
+{
+  "name": "gmail.label",
+  "description": "Apply labels to Gmail messages.",
+  "risk": 3,
+  "permissions": ["gmail.modify"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

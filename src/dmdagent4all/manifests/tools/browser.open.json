@@ -1,0 +1,10 @@
+{
+  "name": "browser.open",
+  "description": "Open a URL in an isolated browser profile.",
+  "risk": 1,
+  "permissions": ["browser.read"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false,
+  "sandbox_required": true
+}

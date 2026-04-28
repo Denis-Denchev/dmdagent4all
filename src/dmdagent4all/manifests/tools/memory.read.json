@@ -1,0 +1,9 @@
+{
+  "name": "memory.read",
+  "description": "Read a local Markdown memory file.",
+  "risk": 0,
+  "permissions": [],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

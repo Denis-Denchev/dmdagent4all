@@ -1,0 +1,9 @@
+{
+  "name": "gmail.create_draft",
+  "description": "Create a Gmail draft without sending it.",
+  "risk": 2,
+  "permissions": ["gmail.compose"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

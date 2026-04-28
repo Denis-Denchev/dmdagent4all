@@ -1,0 +1,9 @@
+{
+  "name": "calendar.delete_event",
+  "description": "Delete a calendar event.",
+  "risk": 5,
+  "permissions": ["calendar.events"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

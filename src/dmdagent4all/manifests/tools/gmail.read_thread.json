@@ -1,0 +1,9 @@
+{
+  "name": "gmail.read_thread",
+  "description": "Read one Gmail thread with read-only access.",
+  "risk": 1,
+  "permissions": ["gmail.readonly"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

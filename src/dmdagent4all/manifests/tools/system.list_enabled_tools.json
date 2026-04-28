@@ -1,0 +1,9 @@
+{
+  "name": "system.list_enabled_tools",
+  "description": "List tools available to the current user policy.",
+  "risk": 0,
+  "permissions": [],
+  "approval_required": false,
+  "cloud_allowed": true,
+  "default_enabled": true
+}

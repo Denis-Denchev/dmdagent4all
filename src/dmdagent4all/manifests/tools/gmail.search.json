@@ -1,0 +1,9 @@
+{
+  "name": "gmail.search",
+  "description": "Search Gmail messages with read-only access.",
+  "risk": 1,
+  "permissions": ["gmail.readonly"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

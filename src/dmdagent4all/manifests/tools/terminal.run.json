@@ -1,0 +1,10 @@
+{
+  "name": "terminal.run",
+  "description": "Run an allowlisted command inside the configured workspace sandbox.",
+  "risk": 5,
+  "permissions": ["terminal.run"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false,
+  "sandbox_required": true
+}

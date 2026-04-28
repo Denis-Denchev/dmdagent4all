@@ -1,0 +1,47 @@
+model_modes:
+  light:
+    label: Light Mode
+    default_model: qwen3:4b
+    alternatives:
+      - phi4-mini
+      - qwen2.5:3b
+    description: Basic chat, summaries, and light tool usage.
+  fast:
+    label: Fast Mode
+    default_model: qwen3:8b
+    alternatives: []
+    description: Best default for most local assistant workflows.
+  balanced:
+    label: Balanced Mode
+    default_model: qwen3:14b
+    alternatives:
+      - qwen3:8b
+    description: Better planning and summaries when slower responses are acceptable.
+  power:
+    label: Power Mode
+    default_model: qwen3:30b
+    alternatives:
+      - qwen3:32b
+    description: Power-user mode for heavier agent tasks on larger machines.
+
+mac_mini:
+  - ram: 8GB RAM
+    default_model: qwen2.5:3b / qwen3:4b / phi4-mini
+    better_mode: Not recommended for 8B
+    note: Basic chat, summaries, and light tools. There is not much room for 8B.
+  - ram: 16GB RAM
+    default_model: qwen3:8b
+    better_mode: qwen3:14b if slower responses are acceptable
+    note: Best default for most Mac mini users.
+  - ram: 24GB RAM
+    default_model: qwen3:14b
+    better_mode: qwen3:8b for Fast Mode
+    note: Good balance between quality and speed.
+  - ram: 32GB RAM
+    default_model: qwen3:14b
+    better_mode: qwen3:30b / MoE option if it performs well
+    note: Better summaries, reasoning, and planning.
+  - ram: 64GB+ RAM
+    default_model: qwen3:30b
+    better_mode: Larger Qwen / DeepSeek Coder / Mixtral-style models
+    note: Power users and heavier agent tasks.

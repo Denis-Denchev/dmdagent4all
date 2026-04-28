@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dmdagent4all"
+version = "0.1.0"
+description = "Local-first AI control center with explicit tool permissions."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "DMDFlow" }
+]
+dependencies = [
+  "fastapi>=0.115.0",
+  "pyyaml>=6.0.0",
+  "uvicorn[standard]>=0.30.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/Denis-Denchev/dmdagent4all"
+Repository = "https://github.com/Denis-Denchev/dmdagent4all"
+
+[project.scripts]
+dmdagent = "dmdagent4all.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dmdagent4all = ["manifests/tools/*.json"]

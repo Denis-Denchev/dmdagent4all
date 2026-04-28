@@ -1,0 +1,9 @@
+{
+  "name": "memory.list",
+  "description": "List local Markdown memory files.",
+  "risk": 0,
+  "permissions": [],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

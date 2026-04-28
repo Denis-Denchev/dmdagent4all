@@ -1,0 +1,9 @@
+{
+  "name": "calendar.create_event",
+  "description": "Create a calendar event.",
+  "risk": 3,
+  "permissions": ["calendar.events"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

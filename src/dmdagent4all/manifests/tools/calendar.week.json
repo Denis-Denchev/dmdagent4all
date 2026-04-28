@@ -1,0 +1,9 @@
+{
+  "name": "calendar.week",
+  "description": "Read this week's calendar events.",
+  "risk": 1,
+  "permissions": ["calendar.readonly"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

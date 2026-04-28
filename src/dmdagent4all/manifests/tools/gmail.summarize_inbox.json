@@ -1,0 +1,9 @@
+{
+  "name": "gmail.summarize_inbox",
+  "description": "Summarize recent Gmail messages.",
+  "risk": 1,
+  "permissions": ["gmail.readonly"],
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

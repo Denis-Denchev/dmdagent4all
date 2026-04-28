@@ -1,0 +1,9 @@
+{
+  "name": "gmail.send_draft",
+  "description": "Send an existing Gmail draft.",
+  "risk": 4,
+  "permissions": ["gmail.send"],
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false
+}
