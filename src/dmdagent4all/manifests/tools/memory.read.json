@@ -3,6 +3,9 @@
   "description": "Read a local Markdown memory file.",
   "risk": 0,
   "permissions": [],
+  "args_schema": {
+    "path": "relative Markdown memory path, default profile.md"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": true

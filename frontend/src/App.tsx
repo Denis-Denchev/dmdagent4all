@@ -4,6 +4,7 @@ import {
   type Approval,
   type AuditEvent,
   api,
+  type DoctorResponse,
   type MemoryFile,
   type ModelMode,
   type PermissionItem,
@@ -11,7 +12,7 @@ import {
   type Tool,
 } from './api'
 
-type View = 'chat' | 'approvals' | 'tools' | 'permissions' | 'memory' | 'audit' | 'models'
+type View = 'chat' | 'doctor' | 'approvals' | 'tools' | 'permissions' | 'memory' | 'audit' | 'models'
 
 type ChatMessage = {
   role: 'user' | 'agent'
@@ -21,6 +22,7 @@ type ChatMessage = {
 
 const views: Array<{ key: View; label: string }> = [
   { key: 'chat', label: 'Chat' },
+  { key: 'doctor', label: 'Doctor' },
   { key: 'approvals', label: 'Approvals' },
   { key: 'tools', label: 'Tools' },
   { key: 'permissions', label: 'Permissions' },
@@ -36,6 +38,7 @@ export function App() {
   const [permissions, setPermissions] = useState<PermissionItem[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
+  const [doctor, setDoctor] = useState<DoctorResponse | null>(null)
   const [memoryFiles, setMemoryFiles] = useState<string[]>([])
   const [selectedMemory, setSelectedMemory] = useState<MemoryFile | null>(null)
   const [memoryDraft, setMemoryDraft] = useState('')
@@ -68,6 +71,7 @@ export function App() {
       permissionsResult,
       approvalsResult,
       auditResult,
+      doctorResult,
       memoryResult,
       modelsResult,
     ] =
@@ -77,6 +81,7 @@ export function App() {
         api.permissions(),
         api.approvals(),
         api.audit(),
+        api.doctor(),
         api.memory(),
         api.models(),
       ])
@@ -85,6 +90,7 @@ export function App() {
     setPermissions(permissionsResult.available)
     setApprovals(approvalsResult)
     setAudit(auditResult)
+    setDoctor(doctorResult)
     setMemoryFiles(memoryResult.files)
     setModels(modelsResult.modes)
     setCustomModel(modelsResult.current.model)
@@ -175,6 +181,8 @@ export function App() {
         </nav>
 
         <div className="sidebar-status">
+          <span>Version</span>
+          <strong>{status?.version ?? 'loading'}</strong>
           <span>Model</span>
           <strong>{status?.llm.model ?? 'loading'}</strong>
           <span>Tools enabled</span>
@@ -221,6 +229,37 @@ export function App() {
                 Send
               </button>
             </form>
+          </section>
+        ) : null}
+
+        {activeView === 'doctor' ? (
+          <section className="panel doctor-panel">
+            <div className="doctor-summary">
+              <div>
+                <span>OK</span>
+                <strong>{doctor?.summary.ok ?? 0}</strong>
+              </div>
+              <div>
+                <span>Warnings</span>
+                <strong>{doctor?.summary.warn ?? 0}</strong>
+              </div>
+              <div>
+                <span>Failures</span>
+                <strong>{doctor?.summary.fail ?? 0}</strong>
+              </div>
+            </div>
+            <div className="table-list">
+              {doctor?.checks.map((check, index) => (
+                <article className={`doctor-row doctor-row--${check.status}`} key={`${check.area}-${index}`}>
+                  <span>{check.status.toUpperCase()}</span>
+                  <div>
+                    <strong>{check.area}</strong>
+                    <p>{check.message}</p>
+                    {check.hint ? <code>{check.hint}</code> : null}
+                  </div>
+                </article>
+              ))}
+            </div>
           </section>
         ) : null}
 

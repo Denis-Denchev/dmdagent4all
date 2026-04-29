@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$ROOT_DIR/.venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
+DMDAGENT_BIN="$VENV_DIR/bin/dmdagent"
+
+cd "$ROOT_DIR"
+
+print_help() {
+  cat <<'EOF'
+DMD Agent 4 All launcher
+
+Beginner commands from the project folder:
+  ./start session              Open terminal chat
+  ./start ask "hello"          Ask once and exit
+  ./start web                  Start API + browser dashboard
+  ./start model fast --pull    Set and pull the default local model
+  ./start model light --pull   Set and pull a smaller local model
+  ./start doctor               Check health/security
+
+Optional shell shortcut:
+  ./start install-command
+
+After installing the shortcut and opening a new terminal:
+  start session
+EOF
+}
+
+ensure_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "python3 is required. Install Python 3.11+ and run this again." >&2
+  exit 1
+}
+
+ensure_venv() {
+  ensure_python
+  if [ ! -x "$PYTHON_BIN" ]; then
+    echo "Creating local Python environment..."
+    python3 -m venv "$VENV_DIR"
+  fi
+}
+
+ensure_package() {
+  ensure_venv
+  if [ ! -x "$DMDAGENT_BIN" ]; then
+    echo "Installing DMD Agent locally..."
+    "$PYTHON_BIN" -m pip install --upgrade pip
+    "$PYTHON_BIN" -m pip install -e .
+  fi
+}
+
+install_shell_command() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-zsh}")"
+  local shell_rc="${HOME}/.zshrc"
+  if [ "$shell_name" = "bash" ]; then
+    shell_rc="${HOME}/.bashrc"
+  fi
+
+  local begin_marker="# >>> dmdagent4all start command >>>"
+  local end_marker="# <<< dmdagent4all start command <<<"
+
+  touch "$shell_rc"
+  if grep -Fq "$begin_marker" "$shell_rc"; then
+    local tmp_file
+    tmp_file="$(mktemp)"
+    awk '
+      /# >>> dmdagent4all start command >>>/ { skip=1; next }
+      /# <<< dmdagent4all start command <<</ { skip=0; next }
+      skip != 1 { print }
+    ' "$shell_rc" > "$tmp_file"
+    mv "$tmp_file" "$shell_rc"
+  fi
+  cat >>"$shell_rc" <<'EOF'
+
+# >>> dmdagent4all start command >>>
+start() {
+  if [ -x "./start" ]; then
+    case "${1:-session}" in
+      session|chat|ask|web|dashboard|model|models|doctor|status|open|help|install-command|telegram|tools|permissions|memory|approvals|terminal)
+        ./start "$@"
+        return $?
+        ;;
+    esac
+  fi
+  command start "$@"
+}
+# <<< dmdagent4all start command <<<
+EOF
+  echo "Installed shell shortcut in $shell_rc"
+
+  echo ""
+  echo "Open a new terminal, or run:"
+  echo "  source $shell_rc"
+  echo ""
+  echo "Then from this project folder:"
+  echo "  start session"
+}
+
+command_name="${1:-session}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+case "$command_name" in
+  help|-h|--help)
+    print_help
+    ;;
+  install-command)
+    install_shell_command
+    ;;
+  session|chat)
+    ensure_package
+    exec "$DMDAGENT_BIN" chat "$@"
+    ;;
+  ask)
+    ensure_package
+    exec "$DMDAGENT_BIN" ask "$@"
+    ;;
+  web|dashboard)
+    ensure_package
+    exec "$DMDAGENT_BIN" start "$@"
+    ;;
+  model)
+    ensure_package
+    exec "$DMDAGENT_BIN" model "$@"
+    ;;
+  doctor|status|open)
+    ensure_package
+    exec "$DMDAGENT_BIN" "$command_name" "$@"
+    ;;
+  *)
+    ensure_package
+    exec "$DMDAGENT_BIN" "$command_name" "$@"
+    ;;
+esac

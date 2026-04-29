@@ -1,0 +1,12 @@
+{
+  "name": "reminders.complete",
+  "description": "Mark a local reminder as completed.",
+  "risk": 2,
+  "permissions": [],
+  "args_schema": {
+    "id": "reminder id returned by reminders.list"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

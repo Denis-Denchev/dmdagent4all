@@ -20,6 +20,7 @@ class ToolManifest:
     description: str
     risk: RiskLevel
     permissions: tuple[str, ...] = ()
+    argument_schema: dict[str, Any] = field(default_factory=dict)
     approval_required: bool = False
     cloud_allowed: bool = False
     default_enabled: bool = False
@@ -32,6 +33,7 @@ class ToolManifest:
             description=str(data.get("description", "")),
             risk=RiskLevel(int(data.get("risk", 0))),
             permissions=tuple(str(item) for item in data.get("permissions", [])),
+            argument_schema=dict(data.get("args_schema") or data.get("parameters") or {}),
             approval_required=bool(data.get("approval_required", False)),
             cloud_allowed=bool(data.get("cloud_allowed", False)),
             default_enabled=bool(data.get("default_enabled", False)),

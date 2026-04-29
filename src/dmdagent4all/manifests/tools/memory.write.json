@@ -3,6 +3,11 @@
   "description": "Write an approved local Markdown memory file.",
   "risk": 2,
   "permissions": [],
+  "args_schema": {
+    "path": "relative Markdown path such as facts/personal.md",
+    "body": "complete Markdown body to write",
+    "metadata": "optional object with type, source, confidence"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": true

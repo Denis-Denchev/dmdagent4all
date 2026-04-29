@@ -20,6 +20,14 @@ class PlannerTest(unittest.TestCase):
         result = parse_plan_response('text before {"type":"final","message":"Ok"} text after')
         self.assertEqual(result.final_message, "Ok")
 
+    def test_plain_text_response_becomes_final_answer(self) -> None:
+        result = parse_plan_response("Sure, I can help with that.")
+        self.assertEqual(result.final_message, "Sure, I can help with that.")
+
+    def test_message_without_type_becomes_final_answer(self) -> None:
+        result = parse_plan_response('{"message":"Hello without type"}')
+        self.assertEqual(result.final_message, "Hello without type")
+
     def test_rejects_unknown_type(self) -> None:
         with self.assertRaises(PlannerError):
             parse_plan_response('{"type":"unknown"}')

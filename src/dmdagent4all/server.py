@@ -6,9 +6,11 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from dmdagent4all import __version__
 from dmdagent4all.app_paths import AppPaths
 from dmdagent4all.audit import AuditStore
 from dmdagent4all.config import load_config, update_config, write_default_config
+from dmdagent4all.doctor import doctor_summary, run_doctor
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.memory.manager import MemoryPathError
 from dmdagent4all.model_presets import MODEL_MODES
@@ -45,7 +47,7 @@ def create_app() -> FastAPI:
     write_default_config(paths.config)
     registry = build_builtin_registry()
 
-    app = FastAPI(title="DMD Agent 4 All", version="0.1.0")
+    app = FastAPI(title="DMD Agent 4 All", version="1.0.0")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -125,6 +127,15 @@ def create_app() -> FastAPI:
     def audit(limit: int = 20) -> list[dict[str, Any]]:
         return AuditStore(paths.audit_db).list_recent_events(limit=limit)
 
+    @app.get("/v1/doctor")
+    def doctor(check_network: bool = False) -> dict[str, Any]:
+        config = load_config(paths.config)
+        checks = run_doctor(paths=paths, config=config, check_network=check_network)
+        return {
+            "summary": doctor_summary(checks),
+            "checks": [check.to_dict() for check in checks],
+        }
+
     @app.get("/v1/approvals")
     def approvals(status: str | None = "pending", limit: int = 50) -> list[dict[str, Any]]:
         return AuditStore(paths.audit_db).list_approvals(status=status, limit=limit)
@@ -182,7 +193,9 @@ def create_app() -> FastAPI:
     @app.get("/v1/status")
     def status() -> dict[str, Any]:
         config = load_config(paths.config)
+        telegram_config = config.get("interfaces", {}).get("telegram", {})
         return {
+            "version": __version__,
             "data_dir": str(paths.root),
             "config": str(paths.config),
             "memory": str(paths.memory),
@@ -190,8 +203,17 @@ def create_app() -> FastAPI:
             "audit_db": str(paths.audit_db),
             "llm": config.get("llm", {}),
             "privacy": config.get("privacy", {}),
+            "terminal": config.get("terminal", {}),
             "terminal_enabled": bool(config.get("terminal", {}).get("enabled", False)),
             "browser_enabled": bool(config.get("browser", {}).get("enabled", False)),
+            "telegram": {
+                "enabled": bool(telegram_config.get("enabled", False)),
+                "allowed_user_ids": list(telegram_config.get("allowed_user_ids", [])),
+                "bot_token_env": telegram_config.get(
+                    "bot_token_env",
+                    "DMDAGENT_TELEGRAM_BOT_TOKEN",
+                ),
+            },
         }
 
     @app.get("/v1/models")

@@ -11,6 +11,7 @@
 - model presets
 - CLI wizard
 - FastAPI skeleton
+- doctor diagnostics
 
 ## Milestone 1: Local MVP
 
@@ -20,6 +21,8 @@
 - memory viewer/editor API
 - local workspace file tools
 - web dashboard shell: started
+- OpenAI-compatible provider support
+- terminal.run through approval-gated workspace policy
 
 ## Milestone 2: Connectors
 
@@ -38,7 +41,7 @@
 
 ## Milestone 4: Sandboxed Automation
 
-- terminal workspace sandbox
+- terminal workspace sandbox: started
 - Docker sandbox executor
 - isolated browser profile
 - browser extraction

@@ -3,6 +3,10 @@
   "description": "Run an allowlisted command inside the configured workspace sandbox.",
   "risk": 5,
   "permissions": ["terminal.run"],
+  "args_schema": {
+    "command": "array of command parts, must exactly match allowlist",
+    "cwd": "optional workspace-relative working directory"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false,

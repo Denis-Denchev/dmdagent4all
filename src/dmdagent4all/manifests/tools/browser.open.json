@@ -1,8 +1,11 @@
 {
   "name": "browser.open",
-  "description": "Open a URL in an isolated browser profile.",
+  "description": "Fetch safe metadata for an HTTP/HTTPS URL through the guarded browser-read backend.",
   "risk": 1,
   "permissions": ["browser.read"],
+  "args_schema": {
+    "url": "HTTP or HTTPS URL/domain to open"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": false,

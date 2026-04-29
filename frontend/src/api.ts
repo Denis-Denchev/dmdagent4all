@@ -47,6 +47,7 @@ export type MemoryFile = {
 }
 
 export type Status = {
+  version: string
   data_dir: string
   config: string
   memory: string
@@ -60,7 +61,19 @@ export type Status = {
     response_language: string
   }
   terminal_enabled: boolean
+  terminal: {
+    enabled: boolean
+    workspace_only: boolean
+    timeout_seconds: number
+    max_output_chars: number
+    allowed_commands: string[][]
+  }
   browser_enabled: boolean
+  telegram: {
+    enabled: boolean
+    allowed_user_ids: number[]
+    bot_token_env: string
+  }
 }
 
 export type ModelMode = {
@@ -85,6 +98,22 @@ export type PermissionItem = {
 export type PermissionsResponse = {
   granted: string[]
   available: PermissionItem[]
+}
+
+export type DoctorCheck = {
+  status: 'ok' | 'warn' | 'fail'
+  area: string
+  message: string
+  hint: string
+}
+
+export type DoctorResponse = {
+  summary: {
+    ok: number
+    warn: number
+    fail: number
+  }
+  checks: DoctorCheck[]
 }
 
 async function request<T>(
@@ -128,6 +157,7 @@ export const api = {
   deny: (id: number) =>
     request<AgentResponse>(`/v1/approvals/${id}/deny`, { method: 'POST' }),
   audit: () => request<AuditEvent[]>('/v1/audit?limit=30'),
+  doctor: () => request<DoctorResponse>('/v1/doctor?check_network=false'),
   memory: () => request<MemoryList>('/v1/memory'),
   memoryFile: (path: string) =>
     request<MemoryFile>(`/v1/memory/file?path=${encodeURIComponent(path)}`),

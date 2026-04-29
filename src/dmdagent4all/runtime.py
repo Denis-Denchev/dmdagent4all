@@ -9,6 +9,7 @@ from dmdagent4all.audit import AuditStore
 from dmdagent4all.config import load_config, write_default_config
 from dmdagent4all.llm.cloud_providers import CloudProviderStub
 from dmdagent4all.llm.ollama_provider import OllamaProvider
+from dmdagent4all.llm.openai_compatible_provider import OpenAICompatibleProvider
 from dmdagent4all.permissions import PermissionContext, PermissionEngine
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
@@ -29,6 +30,7 @@ def build_agent_core() -> AgentCore:
             memory_root=paths.memory,
             workspace_root=paths.workspace,
             config=config,
+            config_path=paths.config,
         ),
         audit_store=AuditStore(paths.audit_db),
         planner=LLMPlanner(provider),
@@ -67,4 +69,39 @@ def _provider_from_config(config: dict[str, Any]):
             model=str(planner_model),
             base_url=str(llm.get("base_url", "http://localhost:11434")),
         )
+    if provider in {"openai", "openai-compatible", "openrouter", "lmstudio", "vllm"}:
+        return OpenAICompatibleProvider(
+            model=str(planner_model),
+            base_url=_openai_compatible_base_url(provider, llm),
+            api_key_env=_openai_compatible_api_key_env(provider, llm),
+            provider_name=provider,
+        )
     return CloudProviderStub(provider_name=provider, model=str(planner_model))
+
+
+def _openai_compatible_base_url(provider: str, llm: dict[str, Any]) -> str:
+    configured = llm.get("base_url")
+    if configured:
+        return str(configured)
+    if provider == "openai":
+        return "https://api.openai.com/v1"
+    if provider == "openrouter":
+        return "https://openrouter.ai/api/v1"
+    if provider == "lmstudio":
+        return "http://localhost:1234/v1"
+    if provider == "vllm":
+        return "http://localhost:8000/v1"
+    return "https://api.openai.com/v1"
+
+
+def _openai_compatible_api_key_env(provider: str, llm: dict[str, Any]) -> str | None:
+    configured = llm.get("api_key_env")
+    if configured:
+        return str(configured)
+    if provider == "openai":
+        return "DMDAGENT_OPENAI_API_KEY"
+    if provider == "openrouter":
+        return "DMDAGENT_OPENROUTER_API_KEY"
+    if provider in {"lmstudio", "vllm"}:
+        return None
+    return "DMDAGENT_OPENAI_COMPATIBLE_API_KEY"

@@ -1,16 +1,50 @@
 # DMD Agent 4 All
 
-Open-source local AI control center for personal computers and small servers.
+Open-source, local-first AI control center for personal computers and small
+servers.
 
-DMD Agent 4 All is designed around one core rule:
+Current version: `1.0.0`.
 
-> The model is never trusted for security.
+Read this file as both product documentation and a handoff prompt for another
+coding agent. It explains what the project is, what must stay true, what already
+works, and what should be built next.
 
-The local model can propose structured tool calls, but the backend decides what is allowed. The model never receives direct operating system access, raw tokens, passwords, `.env` files, SSH keys, or a shell.
+## Core Idea
 
-## What It Is
+DMD Agent 4 All is a personal AI assistant that runs on a user's own machine,
+such as a Mac mini, home server, or workstation. The user can talk to it through
+a web dashboard, CLI, and locked remote channels such as Telegram.
 
-DMD Agent 4 All is a local-first personal AI assistant that can be installed on machines such as Mac mini devices. Users interact through a web dashboard, CLI, and later locked remote channels such as Telegram or WhatsApp. Every connector and tool is explicitly enabled by the user.
+The assistant is allowed to plan and suggest actions, but it is never trusted as
+a security boundary.
+
+> The model is an untrusted planner. Backend code enforces security.
+
+The model can propose structured tool calls. The backend decides whether each
+tool call is allowed, denied, or requires approval. The model must never receive
+raw secrets, unrestricted shell access, `.env` files, SSH keys, OAuth refresh
+tokens, private browser profiles, or direct operating system control.
+
+## Product Vision
+
+The long-term goal is a local AI operator that helps a user manage routine
+digital work without handing control of their computer or private data to a
+cloud agent.
+
+Target capabilities:
+
+- Chat with a local model through Ollama by default.
+- Read and write local Markdown memory with approval for writes.
+- Manage explicit tools through a permission engine.
+- Connect to Gmail, Calendar, browser automation, terminal commands, and future
+  services only after the user enables each connector.
+- Use remote interfaces such as Telegram only for allowlisted user IDs.
+- Require approval for risky actions such as sending, modifying external data,
+  browser submits, terminal execution, or memory writes.
+- Keep a local audit trail of requests, tool calls, approvals, connector status,
+  LLM requests, and memory events.
+
+## Architecture
 
 ```text
 User Interfaces
@@ -26,27 +60,118 @@ Tool Layer
 Gmail / Calendar / Terminal / Files / Browser / GitHub
         |
 Sandbox / Connectors
-Docker / OAuth / Local APIs
+Docker / OAuth / Local APIs / OS Secret Store
 ```
 
-## Current Status
+Request flow:
 
-This repository is in early foundation stage. The first public milestone focuses on:
+1. A user sends a message through CLI, web UI, or Telegram.
+2. `AgentCore` handles deterministic commands first.
+3. If needed, the Ollama planner proposes either a final answer or a structured
+   `ToolRequest`.
+4. `PermissionEngine` evaluates the request against tool manifests, enabled
+   tools, granted permissions, risk level, approval requirements, and cloud
+   context policy.
+5. Allowed tools execute through registered backend handlers.
+6. Risky tools create a pending approval in SQLite and execute only after the
+   stored approval is approved.
+7. Audit logs record remote requests, tool calls, approvals, and execution
+   results.
 
-- security model and threat model
-- local storage layout
-- permission engine
-- tool manifests
-- audit logging
-- Markdown memory
-- local model presets
-- CLI install wizard
-- local Ollama planner loop
-- approval queue basics
-- React web dashboard MVP
-- FastAPI backend skeleton
+## Non-Negotiable Security Rules
 
-High-risk connectors such as terminal, browser automation, email sending, deployment, SSH, and production access are disabled by default.
+- Never trust the LLM for security decisions.
+- Never let the model invent tool names or bypass registered tool manifests.
+- Never expose secrets to model context or logs.
+- Never store bot tokens, OAuth refresh tokens, API keys, or passwords in
+  `config.yaml` or `.env` files.
+- Every connector and high-risk tool must be disabled by default.
+- Every external write/send/submit/delete/execute action must require approval.
+- Telegram must remain an allowlisted remote interface, not a public bot mode.
+- Terminal commands must use command arrays, exact allowlists, workspace-only
+  execution, timeouts, and blocked secret/system paths.
+- Browser automation must use an isolated profile, not the user's personal
+  browser profile.
+- Cloud models must stay disabled by default for private connector context.
+
+Read the security docs before changing these rules:
+
+- [SECURITY.md](SECURITY.md)
+- [PRIVACY.md](PRIVACY.md)
+- [THREAT_MODEL.md](THREAT_MODEL.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/permissions.md](docs/permissions.md)
+- [docs/connectors.md](docs/connectors.md)
+
+## Current Implementation Status
+
+Foundation implemented:
+
+- Python package and `dmdagent` CLI entry point.
+- Local data layout under `~/.local/share/dmdagent4all/`.
+- YAML config with deep-merged defaults.
+- Tool manifest loader.
+- Permission engine with risk levels, enabled/disabled tools, required
+  permissions, approval thresholds, and cloud context checks.
+- SQLite audit store with audit logs, tool calls, approvals, connector status,
+  LLM requests, and memory events tables.
+- Markdown memory manager with path safety.
+- Deterministic chat routes for help, greetings, and memory listing.
+- Ollama planner integration for structured tool planning.
+- Approval queue with approve-and-execute semantics.
+- FastAPI backend skeleton.
+- React/Vite dashboard MVP.
+- Local model mode presets for light, fast, balanced, and power modes.
+- OpenAI-compatible provider support for API-key and local compatible servers,
+  with API key values kept in environment variables only.
+- `dmdagent doctor` readiness and security diagnostics, also exposed in the
+  dashboard Doctor view.
+- Terminal policy module with exact command allowlist and blocked dangerous
+  commands/secret paths.
+- `terminal.run` handler wired through manifests, permissions, approval queue,
+  workspace-only cwd, timeouts, output limits, and redaction.
+- Telegram polling interface with allowlist, `/id`, `/help`, `/approvals`,
+  `/approve <id>`, `/deny <id>`, audit logging, and approve/deny inline buttons.
+
+Partially implemented or stubbed:
+
+- Gmail and Calendar tool manifests exist, but real OAuth connectors are not
+  implemented yet.
+- Browser manifests exist. Browser handlers currently validate URL shape and
+  return `not_implemented`; there is no isolated browser session yet.
+- Web dashboard can view chat, tools, permissions, approvals, memory, audit, and
+  models, plus Doctor diagnostics. It does not yet expose full Telegram setup
+  controls or terminal allowlist editing.
+- OS secret store protocol exists, but no concrete OS-backed secret store is
+  implemented yet.
+
+## Repository Map
+
+```text
+.
+├── config/default.yaml                 # Human-readable default config
+├── docs/                               # Architecture, connectors, roadmap
+├── frontend/                           # React + Vite dashboard
+├── scripts/install.sh                  # Local install script
+├── src/dmdagent4all/
+│   ├── agent/core.py                   # AgentCore, deterministic routing, approvals
+│   ├── agent/planner.py                # Planner prompt and structured parse layer
+│   ├── app_paths.py                    # Local data paths
+│   ├── audit.py                        # SQLite audit and approvals store
+│   ├── cli.py                          # dmdagent CLI
+│   ├── config.py                       # Config defaults and persistence
+│   ├── doctor.py                       # Local readiness and security diagnostics
+│   ├── interfaces/telegram.py          # Telegram Bot API polling interface
+│   ├── llm/                            # Ollama and OpenAI-compatible providers
+│   ├── manifests/tools/                # Tool manifests and risk metadata
+│   ├── memory/manager.py               # Markdown memory manager
+│   ├── permissions/                    # Permission models and engine
+│   ├── sandbox/terminal.py             # Terminal command policy
+│   ├── secrets/store.py                # Secret store protocol
+│   ├── server.py                       # FastAPI app
+│   └── tools/                          # Tool registry and built-in handlers
+└── tests/                              # Unit tests
+```
 
 ## Install For Local Development
 
@@ -56,73 +181,223 @@ cd dmdagent4all
 ./scripts/install.sh
 ```
 
-Run the wizard:
+The install script creates `.venv`, installs the package in editable mode, and
+initializes local app data.
+
+No manual `.venv` activation is required for normal use. From the project
+folder:
 
 ```bash
-dmdagent wizard
+./start session
 ```
 
-Run the API:
+On the first run, terminal setup asks for:
+
+- assistant name
+- user name
+- response language
+- local model or API provider choice
+
+Optional one-time shortcut:
 
 ```bash
-dmdagent serve
+./start install-command
 ```
 
-Run the web dashboard:
+After opening a new terminal, this works from the project folder:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+start session
+```
+
+Without the shortcut, use `./start session`.
+
+## Running Locally
+
+For terminal chat only:
+
+```bash
+start session
+```
+
+Ask one question and exit:
+
+```bash
+start ask "What can you do?"
+```
+
+For normal use, start everything from one terminal:
+
+```bash
+start web
+```
+
+This starts the local API and dashboard, opens the browser, and keeps both
+services attached to the same terminal. Stop with `Ctrl+C`.
+
+First-time setup is built into `start session`. To change model later:
+
+```bash
+start model fast --pull
+start model light --pull
+start model use qwen3:14b --pull
 ```
 
 Open:
 
 ```text
-http://localhost:5174
+http://127.0.0.1:5174
 ```
 
-## CLI
+Useful everyday controls:
 
 ```bash
+start session                   # terminal chat
+start ask "Show memory"         # one terminal answer
+start web                       # API + dashboard in one terminal
+start open                      # open the dashboard
+start doctor                    # check local health/security
+start model                     # show current model and modes
+start model light --pull        # small local model
+start model fast --pull         # default local model
+start model use qwen3:14b --pull
+start telegram status           # check Telegram interface
+```
+
+Developer commands still exist when needed:
+
+```bash
+dmdagent serve
+cd frontend && npm run dev
+```
+
+## CLI Cheat Sheet
+
+```bash
+dmdagent
+dmdagent ask "Show my local memory files"
+dmdagent start
+dmdagent open
 dmdagent status
+dmdagent doctor
+dmdagent doctor --json
 dmdagent wizard
 dmdagent chat "Show my local memory files"
+dmdagent model
+dmdagent model light --pull
+dmdagent model fast --pull
+dmdagent model use qwen3:8b --pull
 dmdagent models list
+dmdagent models set-mode light
+dmdagent models set qwen3:8b
+dmdagent models provider ollama
+dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --base-url https://api.openai.com/v1
+dmdagent models provider lmstudio --base-url http://localhost:1234/v1
 dmdagent tools list
+dmdagent tools enable memory.write
+dmdagent tools disable memory.write
+dmdagent permissions list
+dmdagent permissions grant gmail.readonly
+dmdagent permissions revoke gmail.readonly
+dmdagent terminal status
+dmdagent terminal allow git status
+dmdagent terminal enable --tool --grant-permission
+dmdagent terminal run -- git status
 dmdagent memory path
 dmdagent memory list
+dmdagent memory read profile.md
 dmdagent approvals list
 dmdagent approvals approve <id>
+dmdagent approvals deny <id>
+dmdagent telegram status
+dmdagent telegram allow <telegram_user_id>
+dmdagent telegram remove <telegram_user_id>
+dmdagent telegram enable
+dmdagent telegram disable
+dmdagent telegram run
 ```
 
-## Local Chat
+## Terminal Chat
 
-Start Ollama first, then pull the recommended model:
+The terminal chat is the simplest interface:
 
 ```bash
-ollama serve
-ollama pull qwen3:8b
+start session
 ```
+
+Inside chat:
+
+```text
+/panel
+/help
+/help telegram
+/telegram
+/telegram setup
+/permissions
+/tool enable <tool>
+/tool disable <tool>
+/permission grant <permission>
+/permission revoke <permission>
+/back
+/model fast --pull
+/model light --pull
+/doctor
+/setup
+/memory
+/read profile.md
+/tools
+/approvals
+/logs
+/approve <id>
+/deny <id>
+/exit
+```
+
+Plain-language setup requests are routed before the LLM is used. Inside
+interactive chat, `set up telegram bot` starts the Telegram setup wizard in the
+same terminal panel. `start ask "set up telegram bot"` prints the non-interactive
+guide.
+
+Identity is stored in local setup config and Markdown memory. The assistant can
+answer `who are you` and `who am i` without a model call. To update names in
+chat:
+
+```text
+call yourself Jarvis
+my name is Denis
+```
+
+The chat starts Ollama automatically when possible. If a model is missing, run:
+
+```bash
+start model fast --pull
+```
+
+## Local Chat And Models
+
+Recommended first local setup:
+
+```bash
+start session
+```
+
+The first terminal session asks whether to use a local Ollama model or an
+OpenAI-compatible API provider. It stores only provider settings and environment
+variable names. API key values stay in the shell environment.
 
 Send a message:
 
 ```bash
-dmdagent chat "Show my local memory files"
+start ask "Show my local memory files"
 ```
-
-The model can only propose a structured tool request. The backend still validates the tool, risk level, permissions, approval requirement, and cloud-context policy before anything runs.
 
 For slower machines, switch to Light Mode:
 
 ```bash
-dmdagent models set-mode light
-ollama pull qwen3:4b
+start model light --pull
 ```
 
-This also switches the planner model to the selected lightweight model.
-
-## Model Presets
+Model presets:
 
 | Mode | Model |
 |---|---|
@@ -131,31 +406,213 @@ This also switches the planner model to the selected lightweight model.
 | Balanced Mode | `qwen3:14b` |
 | Power Mode | `qwen3:30b` |
 
-Mac mini recommendations are documented in [docs/model-presets.md](docs/model-presets.md).
+Mac mini recommendations are documented in
+[docs/model-presets.md](docs/model-presets.md).
 
-## Security Principles
+Cloud and OpenAI-compatible providers are opt-in. Store only the env var name
+in config; never store the key value:
 
-- The LLM is an untrusted planner, not a security boundary.
-- Tools are explicit, named backend capabilities.
-- Every tool has a manifest with risk level, permissions, approval requirements, and cloud-context rules.
-- Secrets are stored through OS secret stores where possible, never exposed to the model.
-- Markdown memory is the source of truth. Vector indexes are optional derived data.
-- Terminal and browser automation are disabled by default.
-- Cloud models are disabled by default for private connector data.
+```bash
+export DMDAGENT_OPENAI_API_KEY="sk-..."
+start models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY
+start models set <model-name>
+start doctor
+```
 
-Read:
+For a local OpenAI-compatible server:
 
-- [SECURITY.md](SECURITY.md)
-- [PRIVACY.md](PRIVACY.md)
-- [THREAT_MODEL.md](THREAT_MODEL.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/permissions.md](docs/permissions.md)
+```bash
+start models provider lmstudio --base-url http://localhost:1234/v1
+start models set local-model-name
+```
+
+Private tool context still requires backend approval before being used with a
+cloud model.
+
+## Doctor And Terminal Safety
+
+Run diagnostics:
+
+```bash
+dmdagent doctor
+```
+
+Terminal execution is disabled by default and requires all of these:
+
+```bash
+dmdagent terminal allow git status
+dmdagent terminal enable --tool --grant-permission
+dmdagent terminal run -- git status
+dmdagent approvals approve <id>
+```
+
+`terminal.run` accepts command arrays only, matches exact allowlist entries,
+forces workspace-only cwd, applies a timeout, redacts obvious secrets from
+output, and always requires approval.
+
+## Telegram Interface
+
+Telegram is a locked remote interface into the same local agent core and
+permission engine. It is disabled by default.
+
+Rules:
+
+- Bot token comes from `DMDAGENT_TELEGRAM_BOT_TOKEN`.
+- Bot token is not stored in `config.yaml`.
+- `/id` is available so a user can discover their Telegram user ID.
+- All useful access requires an allowlisted Telegram user ID.
+- Every Telegram request is audited as `telegram.request`.
+- Risky tool requests return approve/deny buttons.
+- Approving from Telegram executes the stored approval request once. It does not
+  bypass disabled tools or missing permissions.
+
+Setup:
+
+```bash
+/telegram setup
+```
+
+Useful in-chat controls:
+
+```text
+/telegram token <bot_token>
+/telegram once
+/telegram allow <telegram_user_id>
+/telegram enable
+/telegram disable
+/telegram run
+/telegram status
+/back
+```
+
+The token command loads the token only for the current terminal process. It is
+not stored in `config.yaml`.
+
+Available Telegram commands:
+
+```text
+/id
+/help
+/approvals
+/approve <id>
+/deny <id>
+```
+
+## Testing And Verification
+
+Run backend tests with the standard library test runner:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Run a Python syntax/import pass:
+
+```bash
+.venv/bin/python -m compileall -q src tests
+```
+
+Build the frontend:
+
+```bash
+cd frontend
+npm run build
+```
+
+Optional, if `pytest` is installed:
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Current note: the frontend package has `dev`, `build`, and `preview` scripts.
+There is no `lint` script yet.
 
 ## Language Policy
 
-All install flow, terminal output, documentation, approval text, and product UI copy are English by default.
+All install flow, terminal output, documentation, approval text, and product UI
+copy are English by default.
 
-The assistant can answer in any language supported by the selected model. The default response mode is auto-detect from the user's message.
+The assistant can answer in any language supported by the selected model. The
+default response mode is auto-detect from the user's message.
+
+## Recommended Next Implementation Targets
+
+The next Codex should choose one narrow target, implement it end to end, and
+verify it with tests.
+
+Recommended order:
+
+1. Harden Telegram operational behavior.
+   Add graceful retry/backoff for transient Telegram API errors, document a
+   launchd/systemd service example, and optionally expose Telegram status in the
+   web dashboard.
+2. Implement OS-backed secret storage.
+   Provide a concrete secret store for macOS Keychain or another local secure
+   backend. Keep secrets out of config and model context.
+3. Build connector status plumbing.
+   Add backend APIs and UI for connector status, enabled state, missing secrets,
+   and permission status.
+4. Implement the first real connector.
+   Start with read-only Gmail search or Calendar free/busy. Avoid send/modify
+   actions until read-only flows are tested.
+5. Replace browser stubs with an isolated browser sandbox.
+   Do not use a personal browser profile. Require approval for clicks, form
+   fills, submits, logins, purchases, and downloads.
+6. Improve frontend coverage and scripts.
+   Add a lint script, consider component tests, and keep the dashboard focused
+   on operational control rather than marketing UI.
+
+## Handoff Prompt For The Next Codex
+
+Use this prompt when continuing the project in another Codex session:
+
+```text
+You are continuing the DMD Agent 4 All repository.
+
+First read README.md completely. Treat it as the product brief, architecture
+contract, and security policy.
+
+Project summary:
+- This is a local-first AI control center for personal machines and small
+  servers.
+- The LLM is an untrusted planner, never a security boundary.
+- All actions must go through registered backend tools, tool manifests, the
+  permission engine, approval queue, and audit logging.
+- Secrets must never be stored in config, committed files, prompts, logs, or
+  model context.
+- High-risk tools and remote interfaces are disabled by default.
+- Telegram is now implemented as an allowlisted polling interface with approval
+  buttons, but it still needs operational hardening and/or dashboard controls.
+- terminal.run is now wired through the same manifest, permission, approval,
+  workspace, timeout, and audit path. Keep it disabled unless explicitly enabled.
+- dmdagent doctor is the local readiness/security check and should stay aligned
+  with backend and dashboard behavior.
+
+Before editing:
+1. Run `git status --short`.
+2. Inspect the files related to the task.
+3. Do not revert user changes or unrelated work.
+4. Keep documentation and UI copy in English.
+
+Useful verification commands:
+- `.venv/bin/python -m unittest discover -s tests -v`
+- `.venv/bin/python -m compileall -q src tests`
+- `cd frontend && npm run build`
+
+When adding capabilities:
+- Add or update tool manifests first.
+- Keep tools disabled by default unless they are harmless local reads.
+- Add tests for allowed, denied, approval-required, and audit behavior.
+- Never let Telegram, CLI, web UI, or the planner bypass AgentCore and
+  PermissionEngine.
+- Prefer small, complete increments over broad rewrites.
+
+Recommended next task:
+Pick one remaining item from "Recommended Next Implementation Targets" in
+README.md, implement it end to end, run the verification commands, and summarize
+exactly what changed.
+```
 
 ## License
 

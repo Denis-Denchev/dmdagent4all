@@ -22,12 +22,24 @@ The script:
 After install:
 
 ```bash
-source .venv/bin/activate
-dmdagent status
-dmdagent wizard
-dmdagent chat "Show my local memory files"
-dmdagent models list
-dmdagent serve
+./start session
+```
+
+`./start session` manages `.venv` for you and opens the terminal chat. On first
+run it asks for the assistant name, your name, response language, and whether to
+use a local model or an API provider. Type `/panel` inside chat for Telegram,
+permissions, logs, model, and approval controls.
+
+Optional shortcut:
+
+```bash
+./start install-command
+```
+
+After opening a new terminal:
+
+```bash
+start session
 ```
 
 ## Ollama
@@ -41,27 +53,55 @@ https://ollama.com/download
 Pull the recommended model:
 
 ```bash
-ollama pull qwen3:8b
+start model fast --pull
 ```
 
 If Ollama is not already running:
 
 ```bash
-ollama serve
+start web
 ```
 
 The wizard recommends a model based on detected system RAM.
+The terminal chat can also select the first model during `start session`.
 
 For faster responses on 8GB or 16GB machines:
 
 ```bash
-dmdagent models set-mode light
-ollama pull qwen3:4b
+start model light --pull
+```
+
+## One-Terminal Start
+
+Terminal chat only:
+
+```bash
+start session
+```
+
+Ask once:
+
+```bash
+start ask "What can you do?"
+```
+
+Start API and dashboard together:
+
+```bash
+start web
+```
+
+Stop both with `Ctrl+C`.
+
+Open the dashboard:
+
+```bash
+start open
 ```
 
 ## API
 
-Start the API:
+Developer-only API start:
 
 ```bash
 dmdagent serve
@@ -81,25 +121,16 @@ curl http://127.0.0.1:8765/health
 
 ## Web Dashboard
 
-Start the API in one terminal:
+Normal users should use:
 
 ```bash
-source .venv/bin/activate
-dmdagent serve
-```
-
-Start the dashboard in another terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev
+start web
 ```
 
 Open:
 
 ```text
-http://localhost:5174
+http://127.0.0.1:5174
 ```
 
 The dashboard includes chat, tools, approvals, memory, audit logs, and model settings.

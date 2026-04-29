@@ -66,6 +66,21 @@ Allowed terminal execution must use:
 - no `docker.sock`
 - no host home access
 
+Operational flow:
+
+```bash
+dmdagent terminal status
+dmdagent terminal allow git status
+dmdagent terminal enable --tool --grant-permission
+dmdagent terminal run -- git status
+dmdagent approvals approve <id>
+```
+
+`terminal.run` is a risk 5 tool. Enabling the terminal policy, enabling the
+tool manifest, and granting `terminal.run` permission still does not execute
+commands automatically. Each request is stored as an approval and executed once
+only after approval.
+
 ## Cloud Context
 
 If a cloud model is active and a tool is marked `cloud_allowed: false`, the backend must require explicit approval before private tool output is sent into model context.

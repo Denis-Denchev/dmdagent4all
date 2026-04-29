@@ -18,6 +18,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "provider": "ollama",
         "model": "qwen3:8b",
         "planner_model": None,
+        "base_url": "http://localhost:11434",
+        "api_key_env": None,
         "mode": "fast",
         "response_language": "auto",
         "planner_max_tokens": 192,
@@ -36,6 +38,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": False,
         "mode": "allowlist",
         "workspace_only": True,
+        "timeout_seconds": 30,
+        "max_output_chars": 20000,
         "allowed_commands": [
             ["pwd"],
             ["ls"],
@@ -56,11 +60,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "granted": [],
         "approval_required_at_risk": 3,
     },
+    "setup": {
+        "completed": False,
+        "agent_name": "DMD Agent",
+        "user_name": "",
+        "preferred_language": "auto",
+    },
     "interfaces": {
         "ui_language": "en",
         "telegram": {
             "enabled": False,
             "allowed_user_ids": [],
+            "bot_token_env": "DMDAGENT_TELEGRAM_BOT_TOKEN",
+            "polling_timeout_seconds": 30,
         },
         "whatsapp": {
             "enabled": False,

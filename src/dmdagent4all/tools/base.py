@@ -10,6 +10,7 @@ class ToolRuntimeContext:
     memory_root: Path
     workspace_root: Path
     config: dict[str, Any]
+    config_path: Path | None = None
 
 
 ToolHandler = Callable[[dict[str, Any], ToolRuntimeContext], dict[str, Any]]

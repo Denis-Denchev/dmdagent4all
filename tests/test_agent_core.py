@@ -5,6 +5,7 @@ from pathlib import Path
 from dmdagent4all.agent import AgentCore
 from dmdagent4all.agent.planner import PlanResult
 from dmdagent4all.audit import AuditStore
+from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
@@ -23,6 +24,16 @@ class ExplodingPlanner:
     def plan(self, **kwargs) -> PlanResult:
         del kwargs
         raise AssertionError("planner should not be called")
+
+
+class AnsweringPlanner(FakePlanner):
+    def __init__(self, result: PlanResult, answer: str) -> None:
+        super().__init__(result)
+        self.answer_text = answer
+
+    def answer(self, **kwargs) -> str:
+        del kwargs
+        return self.answer_text
 
 
 class AgentCoreTest(unittest.TestCase):
@@ -76,6 +87,57 @@ class AgentCoreTest(unittest.TestCase):
             self.assertNotEqual(response.message, "как си")
             self.assertIn("permission engine", response.message)
 
+    def test_unimplemented_browser_request_is_answered_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), ExplodingPlanner())
+            response = core.handle_text("може ли да отвориш гугъл")
+            self.assertEqual(response.status, "ok")
+            self.assertIn("не мога реално", response.message)
+
+    def test_identity_answers_use_setup_config_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(
+                Path(tmp),
+                ExplodingPlanner(),
+                config={
+                    "llm": {"response_language": "auto"},
+                    "setup": {
+                        "agent_name": "jarvis",
+                        "user_name": "Denis",
+                        "preferred_language": "auto",
+                    },
+                },
+            )
+            who_are_you = core.handle_text("who are you")
+            who_am_i = core.handle_text("who am i")
+            self.assertEqual(who_are_you.status, "ok")
+            self.assertIn("jarvis", who_are_you.message)
+            self.assertEqual(who_am_i.message, "You are Denis.")
+
+    def test_identity_changes_update_config_and_memory_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "llm": {"response_language": "auto"},
+                "setup": {
+                    "agent_name": "DMD Agent",
+                    "user_name": "",
+                    "preferred_language": "auto",
+                },
+            }
+            core = _build_core(root, ExplodingPlanner(), config=config)
+
+            agent_response = core.handle_text("call yourself Jarvis")
+            user_response = core.handle_text("my name is Denis")
+
+            self.assertEqual(agent_response.status, "ok")
+            self.assertEqual(user_response.status, "ok")
+            self.assertEqual(config["setup"]["agent_name"], "Jarvis")
+            self.assertEqual(config["setup"]["user_name"], "Denis")
+            profile = (root / "memory" / "profile.md").read_text(encoding="utf-8")
+            self.assertIn("Assistant name: Jarvis", profile)
+            self.assertIn("User name: Denis", profile)
+
     def test_approval_required_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -124,21 +186,163 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(audit.get_approval(approval_id)["status"], "executed")
             self.assertTrue((root / "memory" / "facts" / "test.md").exists())
 
+    def test_explicit_remember_requires_real_memory_write_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Remember that I like ice cream")
+
+            self.assertEqual(response.status, "approval_required")
+            approval = audit.list_approvals(status="pending")[0]
+            self.assertEqual(approval["tool"], "memory.write")
+            self.assertEqual(approval["args"]["path"], "facts/personal.md")
+            self.assertIn("I like ice cream", approval["args"]["body"])
+
+    def test_natural_remember_phrases_require_real_memory_write_approval(self) -> None:
+        examples = [
+            ("And also remember that I like BMW cars", "I like BMW cars"),
+            ("I like BMW cars remember that", "I like BMW cars"),
+            ("Can you remember that I have Lenovo servers at home", "I have Lenovo servers at home"),
+        ]
+        for message, expected_fact in examples:
+            with self.subTest(message=message):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    audit = AuditStore(root / "audit.db")
+                    core = _build_core(
+                        root,
+                        ExplodingPlanner(),
+                        audit,
+                        config={"llm": {"provider": "ollama", "response_language": "auto"}},
+                    )
+
+                    response = core.handle_text(message)
+
+                    self.assertEqual(response.status, "approval_required")
+                    approval = audit.list_approvals(status="pending")[0]
+                    self.assertEqual(approval["tool"], "memory.write")
+                    self.assertIn(expected_fact, approval["args"]["body"])
+
+    def test_memory_tool_result_can_be_synthesized_into_human_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "facts/personal.md",
+                "- Denis likes ice cream.",
+                metadata={"type": "personal_fact"},
+            )
+            core = _build_core(
+                root,
+                AnsweringPlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="memory.list",
+                            args={},
+                            reason="Look up memory.",
+                        )
+                    ),
+                    "You like ice cream.",
+                ),
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("What do I like?")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.message, "You like ice cream.")
+
+    def test_approved_cloud_memory_read_is_synthesized_into_human_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            MemoryManager(root / "memory").write(
+                "facts/personal.md",
+                "- Denis likes ice cream.",
+                metadata={"type": "personal_fact"},
+            )
+            core = _build_core(
+                root,
+                AnsweringPlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="memory.list",
+                            args={},
+                            reason="Look up memory.",
+                        )
+                    ),
+                    "You like ice cream.",
+                ),
+                audit=audit,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            pending = core.handle_text("What do I like?")
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approved.status, "ok")
+            self.assertEqual(approved.message, "You like ice cream.")
+
+    def test_cloud_memory_approval_applies_for_current_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            MemoryManager(root / "memory").write(
+                "facts/personal.md",
+                "- Denis likes ice cream.",
+                metadata={"type": "personal_fact"},
+            )
+            core = _build_core(
+                root,
+                AnsweringPlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="memory.list",
+                            args={},
+                            reason="Look up memory.",
+                        )
+                    ),
+                    "You like ice cream.",
+                ),
+                audit=audit,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            pending = core.handle_text("What do I like?")
+            core.approve_and_execute(pending.data["approval_id"])
+            second = core.handle_text("What do I like?")
+
+            self.assertEqual(second.status, "ok")
+            self.assertEqual(second.message, "You like ice cream.")
+            self.assertEqual(len(audit.list_approvals(status="pending")), 0)
+
 
 def _build_core(
     root: Path,
     planner,
     audit: AuditStore | None = None,
+    config: dict | None = None,
+    permission_context: PermissionContext | None = None,
 ) -> AgentCore:
     registry = build_builtin_registry()
+    runtime_config = config or {"llm": {"response_language": "auto"}}
     return AgentCore(
         permission_engine=PermissionEngine(registry.manifests),
         tool_registry=registry,
-        permission_context=PermissionContext(),
+        permission_context=permission_context or PermissionContext(),
         runtime_context=ToolRuntimeContext(
             memory_root=root / "memory",
             workspace_root=root / "workspace",
-            config={"llm": {"response_language": "auto"}},
+            config=runtime_config,
         ),
         audit_store=audit or AuditStore(root / "audit.db"),
         planner=planner,

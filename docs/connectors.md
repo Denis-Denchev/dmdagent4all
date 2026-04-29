@@ -68,6 +68,37 @@ Rules:
 - approval buttons for risky actions
 - audit every remote request
 
+Local setup from the terminal chat:
+
+```text
+/telegram setup
+```
+
+The same panel also supports:
+
+```text
+/telegram token <bot_token>
+/telegram once
+/telegram allow <telegram_user_id>
+/telegram enable
+/telegram disable
+/telegram run
+/telegram status
+/back
+```
+
+Inside terminal chat, `/telegram`, `/help telegram`, or a plain request such as
+`set up telegram bot` opens deterministic Telegram setup before any LLM planning
+is used.
+
+Operational notes:
+
+- The bot token is read from `DMDAGENT_TELEGRAM_BOT_TOKEN` by default.
+- The token is not stored in `config.yaml` or sent to the model.
+- `/id` returns the Telegram user ID needed for the allowlist.
+- `/approvals`, `/approve <id>`, and `/deny <id>` work from Telegram for allowlisted users.
+- Risky actions still go through the same approval queue as CLI and web UI.
+
 ## WhatsApp
 
 WhatsApp support should follow the same remote-interface rules as Telegram. It is not part of the first backend milestone.

@@ -1,0 +1,12 @@
+{
+  "name": "reminders.list",
+  "description": "List local reminders from the user's private reminder store.",
+  "risk": 0,
+  "permissions": [],
+  "args_schema": {
+    "status": "optional filter: pending, completed, or all"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

@@ -39,9 +39,8 @@ The core does not bypass the permission engine.
 Providers are isolated behind a common interface:
 
 - Ollama provider for local models
-- OpenAI provider later
-- Anthropic provider later
-- OpenRouter provider later
+- OpenAI-compatible provider for OpenAI-style cloud or local API servers
+- Cloud-provider stubs for providers that still need explicit implementation
 
 Default:
 
@@ -49,9 +48,12 @@ Default:
 llm:
   provider: ollama
   model: qwen3:8b
+  base_url: http://localhost:11434
+  api_key_env: null
 ```
 
-Cloud providers require explicit user setup and privacy approvals before private connector context is sent.
+Cloud providers require explicit user setup, API key values in environment
+variables, and privacy approvals before private connector context is sent.
 
 ## Permission Engine
 
@@ -81,10 +83,13 @@ Initial tool groups:
 - `system.*`
 - `gmail.*` manifests
 - `calendar.*` manifests
-- `terminal.*` manifest
+- `terminal.*` manifest and approval-gated workspace runner
 - `browser.*` manifests
 
 High-risk tools are disabled by default.
+
+`terminal.run` is intentionally narrow: command arrays only, exact allowlist,
+workspace-only cwd, timeout, output limit, redaction, audit, and approval.
 
 ## Storage
 

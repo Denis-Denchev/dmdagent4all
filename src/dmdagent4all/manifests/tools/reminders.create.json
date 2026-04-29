@@ -1,0 +1,14 @@
+{
+  "name": "reminders.create",
+  "description": "Create a local reminder in the user's private reminder store.",
+  "risk": 2,
+  "permissions": [],
+  "args_schema": {
+    "title": "short reminder text",
+    "due_at": "ISO datetime when the reminder is due",
+    "notes": "optional notes or original user request"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

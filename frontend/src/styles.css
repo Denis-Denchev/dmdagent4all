@@ -297,7 +297,8 @@ textarea:focus {
 
 .approval-row,
 .permission-row,
-.audit-row {
+.audit-row,
+.doctor-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 1rem;
@@ -310,6 +311,69 @@ textarea:focus {
 
 .audit-row {
   grid-template-columns: 170px minmax(0, 1fr) minmax(160px, auto);
+}
+
+.doctor-panel {
+  overflow: hidden;
+}
+
+.doctor-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border-bottom: 1px solid var(--line);
+  background: var(--line);
+}
+
+.doctor-summary div {
+  display: grid;
+  gap: 0.25rem;
+  background: #ffffff;
+  padding: 1rem;
+}
+
+.doctor-summary span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.doctor-summary strong {
+  font-size: 1.45rem;
+}
+
+.doctor-row {
+  grid-template-columns: 86px minmax(0, 1fr);
+}
+
+.doctor-row > span {
+  display: inline-grid;
+  min-height: 30px;
+  place-items: center;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.doctor-row p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+}
+
+.doctor-row--ok > span {
+  background: #dff3ef;
+  color: var(--brand-strong);
+}
+
+.doctor-row--warn > span {
+  background: #fff2cc;
+  color: #7a5500;
+}
+
+.doctor-row--fail > span {
+  background: #ffe0dc;
+  color: #8c2319;
 }
 
 .permission-row {
@@ -481,7 +545,12 @@ textarea {
   .approval-row,
   .permission-row,
   .audit-row,
+  .doctor-row,
   .model-current {
+    grid-template-columns: 1fr;
+  }
+
+  .doctor-summary {
     grid-template-columns: 1fr;
   }
 }

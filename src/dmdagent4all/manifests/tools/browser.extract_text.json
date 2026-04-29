@@ -1,8 +1,12 @@
 {
   "name": "browser.extract_text",
-  "description": "Extract visible text from a page opened in the isolated browser.",
+  "description": "Fetch and extract readable text from an HTTP/HTTPS URL through the guarded browser-read backend.",
   "risk": 1,
   "permissions": ["browser.read"],
+  "args_schema": {
+    "url": "HTTP or HTTPS URL/domain to read",
+    "max_chars": "optional maximum characters to return"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": false,

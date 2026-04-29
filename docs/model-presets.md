@@ -38,6 +38,15 @@ dmdagent models list
 Switch modes:
 
 ```bash
+dmdagent model light --pull
+dmdagent model fast --pull
+dmdagent model balanced --pull
+dmdagent model power --pull
+```
+
+The longer equivalent commands are:
+
+```bash
 dmdagent models set-mode light
 dmdagent models set-mode fast
 dmdagent models set-mode balanced
@@ -49,5 +58,31 @@ Changing mode updates both the default assistant model and the planner model. Th
 Set a custom model:
 
 ```bash
-dmdagent models set phi4-mini
+dmdagent model use phi4-mini --pull
 ```
+
+## API-Key And Compatible Providers
+
+Local Ollama remains the default:
+
+```bash
+dmdagent models provider ollama
+```
+
+OpenAI-compatible providers are opt-in. The config stores only the environment
+variable name, not the API key value:
+
+```bash
+export DMDAGENT_OPENAI_API_KEY="sk-..."
+dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY
+dmdagent models set <model-name>
+```
+
+For local compatible servers:
+
+```bash
+dmdagent models provider lmstudio --base-url http://localhost:1234/v1
+dmdagent models provider vllm --base-url http://localhost:8000/v1
+```
+
+Run `dmdagent doctor` after changing providers.

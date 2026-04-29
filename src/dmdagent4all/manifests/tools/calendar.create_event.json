@@ -3,6 +3,12 @@
   "description": "Create a calendar event.",
   "risk": 3,
   "permissions": ["calendar.events"],
+  "args_schema": {
+    "title": "event title",
+    "start": "ISO datetime or user-provided start time",
+    "end": "optional ISO datetime or end time",
+    "reminder": "optional reminder time or offset"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false
