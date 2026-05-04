@@ -3,6 +3,10 @@
   "description": "Apply labels to Gmail messages.",
   "risk": 3,
   "permissions": ["gmail.modify"],
+  "args_schema": {
+    "message_ids": "array of Gmail message ids",
+    "labels": "array of labels to apply"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false

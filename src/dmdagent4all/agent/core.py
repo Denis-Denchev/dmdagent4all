@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from dmdagent4all.audit import AuditEvent, AuditStore
@@ -51,12 +51,24 @@ class AgentCore:
                     reason="User requested enabled tools.",
                 )
             )
+        approval_action = self._handle_approval_action_from_text(stripped)
+        if approval_action is not None:
+            return approval_action
         identity_update = _handle_identity_update(stripped, self.runtime_context)
         if identity_update is not None:
             return identity_update
         memory_update = _memory_write_request_from_text(stripped, self.runtime_context)
         if memory_update is not None:
             return self.handle_tool_request(memory_update)
+        reminder_request = _reminder_request_from_text(stripped)
+        if reminder_request is not None:
+            return self.handle_tool_request(reminder_request)
+        browser_request = _browser_request_from_text(stripped)
+        if browser_request is not None:
+            return self.handle_tool_request(browser_request)
+        terminal_request = _terminal_request_from_text(stripped)
+        if terminal_request is not None:
+            return self.handle_tool_request(terminal_request)
         routed = _route_without_llm(stripped)
         if routed is not None:
             return self.handle_tool_request(routed)
@@ -95,6 +107,7 @@ class AgentCore:
         try:
             llm_config = self.runtime_context.config.get("llm", {})
             memory_context = _load_memory_context(self.runtime_context)
+            now = datetime.now().astimezone()
             plan = self.planner.plan(
                 user_message=text,
                 manifests=self.tool_registry.manifests,
@@ -105,8 +118,8 @@ class AgentCore:
                     self.runtime_context.config,
                 ),
                 response_language=llm_config.get("response_language", "auto"),
-                current_time=datetime.now().astimezone().isoformat(timespec="seconds"),
-                timezone_name=datetime.now().astimezone().tzname() or "",
+                current_time=now.isoformat(timespec="seconds"),
+                timezone_name=now.tzname() or "",
                 max_tokens=int(llm_config.get("planner_max_tokens", 192)),
                 temperature=float(llm_config.get("planner_temperature", 0.0)),
                 think=bool(llm_config.get("planner_think", False)),
@@ -128,6 +141,35 @@ class AgentCore:
             status="ok",
             message=plan.final_message or "",
             data={"planner": "llm"},
+        )
+
+    def _handle_approval_action_from_text(self, text: str) -> AgentResponse | None:
+        action = _approval_action_from_text(text)
+        if action is None:
+            return None
+        verb, approval_id = action
+        if approval_id is None:
+            pending = self.audit_store.list_approvals(status="pending", limit=1)
+            if not pending:
+                return AgentResponse(
+                    status="ok",
+                    message="No pending approvals.",
+                    data={"planner": "deterministic"},
+                )
+            approval_id = int(pending[0]["id"])
+        if verb == "approve":
+            return self.approve_and_execute(approval_id)
+        changed = self.audit_store.set_approval_status(approval_id, "denied")
+        if not changed:
+            return AgentResponse(
+                status="not_found",
+                message=f"No pending approval found: {approval_id}",
+                data={"approval_id": approval_id},
+            )
+        return AgentResponse(
+            status="ok",
+            message=f"Approval denied: {approval_id}",
+            data={"approval_id": approval_id},
         )
 
     def _should_synthesize_tool_response(
@@ -186,12 +228,21 @@ class AgentCore:
         return tool_response
 
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
-        decision = self.permission_engine.evaluate(request, self._permission_context())
+        auto_approved = _is_auto_approved_terminal_request(request, self.runtime_context.config)
+        decision = self.permission_engine.evaluate(
+            request,
+            self._permission_context(),
+            approval_granted=auto_approved,
+        )
         self.audit_store.record_tool_call(
             tool=request.tool,
             risk=None if decision.risk is None else int(decision.risk),
             args=request.args,
-            decision=decision.reason,
+            decision=(
+                f"auto_approved_allowlisted:{decision.reason}"
+                if auto_approved
+                else decision.reason
+            ),
             result_status="blocked" if not decision.allowed else None,
         )
 
@@ -329,6 +380,12 @@ class AgentCore:
                 message=str(result.get("message", "Tool is not implemented yet.")),
                 data=result,
             )
+        if result.get("status") == "connector_not_configured":
+            return AgentResponse(
+                status="not_configured",
+                message=str(result.get("message", "Connector is not configured yet.")),
+                data=result,
+            )
 
         self.audit_store.record_event(
             AuditEvent(
@@ -366,6 +423,19 @@ def _route_without_llm(text: str) -> ToolRequest | None:
             args={},
             reason="User requested local memory files.",
         )
+    if normalized in {
+        "/reminders",
+        "reminders",
+        "list reminders",
+        "show reminders",
+        "напомняния",
+        "покажи напомняния",
+    }:
+        return ToolRequest(
+            tool="reminders.list",
+            args={"status": "pending"},
+            reason="User requested local reminders.",
+        )
     if "memory files" in normalized or "local memory" in normalized:
         if any(word in normalized for word in {"show", "list", "see", "display"}):
             return ToolRequest(
@@ -374,6 +444,206 @@ def _route_without_llm(text: str) -> ToolRequest | None:
                 reason="User requested local memory files.",
             )
     return None
+
+
+def _approval_action_from_text(text: str) -> tuple[str, int | None] | None:
+    normalized = _normalize_for_match(text)
+    approve_match = re.match(
+        r"^(?:/approve|approve|approved|одобри|одобрявам)(?:\s+#?(?P<id>\d+))?$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if approve_match:
+        raw_id = approve_match.group("id")
+        return "approve", int(raw_id) if raw_id else None
+    deny_match = re.match(
+        r"^(?:/deny|deny|denied|откажи|отказвам)(?:\s+#?(?P<id>\d+))?$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if deny_match:
+        raw_id = deny_match.group("id")
+        return "deny", int(raw_id) if raw_id else None
+    if normalized in {"approve", "approved", "одобри", "одобрявам", "готово"}:
+        return "approve", None
+    if normalized in {"deny", "denied", "откажи", "отказвам"}:
+        return "deny", None
+    return None
+
+
+def _reminder_request_from_text(text: str) -> ToolRequest | None:
+    stripped = text.strip()
+    normalized = _normalize_for_match(stripped)
+    if not any(word in normalized for word in {"remind", "напомни"}):
+        return None
+
+    due_at = _relative_reminder_due_at(stripped) or _tomorrow_reminder_due_at(stripped)
+    if due_at is None:
+        return None
+    title = _clean_reminder_title(stripped)
+    if not title:
+        return None
+    return ToolRequest(
+        tool="reminders.create",
+        args={
+            "title": title,
+            "due_at": due_at,
+            "notes": stripped,
+        },
+        reason="User asked the agent to create a local reminder.",
+    )
+
+
+def _relative_reminder_due_at(text: str) -> str | None:
+    pattern = re.compile(
+        r"(?:\b(?:after|in)\s+(?P<amount_en>\d+|one|a|an)\s+"
+        r"(?P<unit_en>seconds?|minutes?|mins?|hours?|days?)|"
+        r"\bслед\s+(?P<amount_bg>\d+|един|една)\s+"
+        r"(?P<unit_bg>секунди?|минути?|часа?|дни?))\s*$",
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(text.strip())
+    if not match:
+        return None
+    amount = _parse_amount(match.group("amount_en") or match.group("amount_bg") or "")
+    unit = (match.group("unit_en") or match.group("unit_bg") or "").lower()
+    if amount is None:
+        return None
+    if unit.startswith(("second", "секунд")):
+        delta = timedelta(seconds=amount)
+    elif unit.startswith(("minute", "min", "минут")):
+        delta = timedelta(minutes=amount)
+    elif unit.startswith(("hour", "час")):
+        delta = timedelta(hours=amount)
+    elif unit.startswith(("day", "д")):
+        delta = timedelta(days=amount)
+    else:
+        return None
+    return (datetime.now().astimezone() + delta).isoformat(timespec="seconds")
+
+
+def _tomorrow_reminder_due_at(text: str) -> str | None:
+    pattern = re.compile(
+        r"(?:tomorrow\s+(?:at\s+)?|утре\s+(?:в\s+)?)"
+        r"(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2}))?",
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute") or 0)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    now = datetime.now().astimezone()
+    due = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return due.isoformat(timespec="seconds")
+
+
+def _clean_reminder_title(text: str) -> str:
+    title = re.sub(
+        r"(?:\b(?:after|in)\s+(?:\d+|one|a|an)\s+"
+        r"(?:seconds?|minutes?|mins?|hours?|days?)|"
+        r"\bслед\s+(?:\d+|един|една)\s+"
+        r"(?:секунди?|минути?|часа?|дни?))\s*$",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"^(?:please\s+)?remind\s+me(?:\s+(?:that|to))?\s+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"^напомни\s+ми(?:\s+(?:че|да))?\s+", "", title, flags=re.IGNORECASE)
+    title = re.sub(
+        r"\s+and\s+i\s+want\s+you\s+to\s+remind\s+me\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"\s+и\s+искам\s+да\s+ми\s+напомниш\s*$", "", title, flags=re.IGNORECASE)
+    return title.strip().strip(" .,!?:;\"'")
+
+
+def _parse_amount(value: str) -> int | None:
+    normalized = value.strip().lower()
+    if normalized in {"one", "a", "an", "един", "една"}:
+        return 1
+    if normalized.isdigit():
+        amount = int(normalized)
+        return amount if 1 <= amount <= 365 else None
+    return None
+
+
+def _browser_request_from_text(text: str) -> ToolRequest | None:
+    normalized = _normalize_for_match(text)
+    if not any(word in normalized for word in {"open", "visit", "отвори", "отвориш"}):
+        return None
+    url = _extract_urlish_target(text)
+    if url is None:
+        return None
+    return ToolRequest(
+        tool="browser.open",
+        args={"url": url},
+        reason="User asked the agent to open a web page through the guarded browser-read tool.",
+    )
+
+
+def _extract_urlish_target(text: str) -> str | None:
+    lower = text.lower()
+    if "google" in lower or "гугъл" in lower:
+        return "https://www.google.com"
+    patterns = [
+        r"https?://[^\s]+",
+        r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(0).strip(" .,!?:;\"'")
+    return None
+
+
+def _terminal_request_from_text(text: str) -> ToolRequest | None:
+    normalized = _normalize_for_match(text)
+    if "terminal" not in normalized:
+        return None
+    command: list[str] | None = None
+    if re.search(r"\b(?:type|run|execute)\s+ls\b", text, flags=re.IGNORECASE):
+        command = ["ls"]
+    elif re.search(r"\b(?:type|run|execute)\s+pwd\b", text, flags=re.IGNORECASE):
+        command = ["pwd"]
+    elif re.search(r"\bgit\s+status\b", text, flags=re.IGNORECASE):
+        command = ["git", "status"]
+    elif re.search(r"\bgit\s+diff\b", text, flags=re.IGNORECASE):
+        command = ["git", "diff"]
+    if command is None:
+        return None
+    return ToolRequest(
+        tool="terminal.run",
+        args={"command": command},
+        reason="User asked to run a simple allowlist-style terminal command.",
+    )
+
+
+def _is_auto_approved_terminal_request(request: ToolRequest, config: dict[str, Any]) -> bool:
+    if request.tool != "terminal.run":
+        return False
+    terminal = config.get("terminal", {})
+    if not bool(terminal.get("auto_approve_allowlisted", False)):
+        return False
+    raw_command = request.args.get("command")
+    if not isinstance(raw_command, list) or not raw_command:
+        return False
+    command = tuple(str(part) for part in raw_command if str(part))
+    allowed = {
+        tuple(str(part) for part in item)
+        for item in terminal.get("allowed_commands", [])
+        if isinstance(item, list) and item
+    }
+    return command in allowed
 
 
 def _memory_write_request_from_text(
@@ -439,6 +709,7 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
     profile = _profile_from_config(config)
     agent_name = profile["agent_name"]
     user_name = profile["user_name"]
+    nickname = profile["nickname_bg"] if _looks_bulgarian(text) else profile["nickname"]
     if _is_unimplemented_browser_request(normalized):
         if _looks_bulgarian(text):
             return "Browser sandbox още не е имплементиран, затова не мога реално да отварям Google или уеб страници оттук."
@@ -479,13 +750,15 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
         "my name?",
         "кой съм аз",
         "коя съм аз",
+        "аз кой съм",
+        "аз коя съм",
         "как се казвам",
         "името ми",
     }:
         if user_name:
             if _looks_bulgarian(text):
-                return f"Ти си {user_name}."
-            return f"You are {user_name}."
+                return f"{nickname}, ти си {user_name}." if nickname else f"Ти си {user_name}."
+            return f"{nickname}, you are {user_name}." if nickname else f"You are {user_name}."
         if _looks_bulgarian(text):
             return "Още не знам името ти. Напиши: казвам се <име>."
         return "I do not know your name yet. Write: my name is <name>."
@@ -538,10 +811,28 @@ def _handle_identity_update(text: str, runtime_context: ToolRuntimeContext) -> A
             data={"planner": "deterministic"},
         )
 
+    nickname_update = _extract_nickname_update(text)
+    if nickname_update is not None:
+        nickname, nickname_bg = nickname_update
+        _update_profile(runtime_context, nickname=nickname, nickname_bg=nickname_bg)
+        if _looks_bulgarian(text):
+            display = nickname_bg or nickname
+            return AgentResponse(
+                status="ok",
+                message=f"Готово. Ще ти казвам {display}.",
+                data={"planner": "deterministic"},
+            )
+        return AgentResponse(
+            status="ok",
+            message=f"Done. I will call you {nickname}.",
+            data={"planner": "deterministic"},
+        )
+
     user_name = _extract_name(
         text,
         [
             r"^my name is\s+(.+)$",
+            r"^i['’]?m\s+(.+)$",
             r"^call me\s+(.+)$",
             r"^remember my name is\s+(.+)$",
             r"^казвам се\s+(.+)$",
@@ -567,6 +858,24 @@ def _handle_identity_update(text: str, runtime_context: ToolRuntimeContext) -> A
     return None
 
 
+def _extract_nickname_update(text: str) -> tuple[str, str] | None:
+    match = re.match(
+        r"^i\s+want\s+you\s+to\s+call\s+me\s+(.+?)\s+or\s+if\s+i\s+type\s+in\s+bulgarian\s+"
+        r"you\s+can\s+also\s+call\s+me\s+(.+)$",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    nickname = match.group(1).strip().strip(" .,!?:;\"'")
+    nickname_bg = match.group(2).strip().strip(" .,!?:;\"'")
+    if not nickname or len(nickname) > 80 or "\n" in nickname:
+        return None
+    if not nickname_bg or len(nickname_bg) > 80 or "\n" in nickname_bg:
+        return None
+    return nickname, nickname_bg
+
+
 def _extract_name(text: str, patterns: list[str]) -> str | None:
     for pattern in patterns:
         match = re.match(pattern, text.strip(), flags=re.IGNORECASE)
@@ -584,6 +893,8 @@ def _profile_from_config(config: dict[str, Any]) -> dict[str, str]:
         "agent_name": str(setup.get("agent_name") or "DMD Agent"),
         "user_name": str(setup.get("user_name") or ""),
         "preferred_language": str(setup.get("preferred_language") or "auto"),
+        "nickname": str(setup.get("nickname") or ""),
+        "nickname_bg": str(setup.get("nickname_bg") or setup.get("nickname") or ""),
     }
 
 
@@ -621,6 +932,8 @@ def _update_profile(
     *,
     agent_name: str | None = None,
     user_name: str | None = None,
+    nickname: str | None = None,
+    nickname_bg: str | None = None,
 ) -> None:
     config = runtime_context.config
     setup = config.setdefault("setup", {})
@@ -628,6 +941,10 @@ def _update_profile(
         setup["agent_name"] = agent_name
     if user_name is not None:
         setup["user_name"] = user_name
+    if nickname is not None:
+        setup["nickname"] = nickname
+    if nickname_bg is not None:
+        setup["nickname_bg"] = nickname_bg
     setup["completed"] = True
 
     if runtime_context.config_path is not None:
@@ -639,6 +956,8 @@ def _update_profile(
         "\n".join(
             [
                 f"User name: {profile['user_name'] or 'not set'}",
+                f"Preferred nickname: {profile['nickname'] or 'not set'}",
+                f"Bulgarian nickname: {profile['nickname_bg'] or 'not set'}",
                 f"Assistant name: {profile['agent_name']}",
                 f"Preferred response language: {profile['preferred_language']}",
             ]
@@ -695,14 +1014,16 @@ def _strip_frontmatter(markdown: str) -> str:
 def _approval_message(request: ToolRequest, default: str) -> str:
     if request.tool == "memory.write":
         return "I can save that to memory after you approve it."
+    if request.tool == "reminders.create":
+        return "I can create that local reminder after you approve it."
     return default
 
 
 def _denial_message(request: ToolRequest, default: str) -> str:
     if default.startswith("Tool is disabled:"):
         return (
-            f"{default}. Enable it first from the terminal chat with /tool enable {request.tool}. "
-            "If the tool needs a permission, open /permissions."
+            f"{default}. Enable it from the dashboard Tools/Terminal tabs or from terminal chat "
+            f"with /tool enable {request.tool}. If the tool needs a permission, open Permissions."
         )
     return default
 
@@ -710,6 +1031,10 @@ def _denial_message(request: ToolRequest, default: str) -> str:
 def _tool_success_message(request: ToolRequest) -> str:
     if request.tool == "memory.write":
         return "Saved to memory."
+    if request.tool == "reminders.create":
+        return "Reminder saved."
+    if request.tool == "reminders.complete":
+        return "Reminder completed."
     if request.tool == "calendar.create_event":
         return "Saved to local calendar store. Active reminder notifications are not implemented yet."
     return "Tool executed."

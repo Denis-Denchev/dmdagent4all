@@ -19,8 +19,10 @@
 - structured tool-call parsing: started
 - approval queue with approve-and-execute: started
 - memory viewer/editor API
+- local reminder tools
 - local workspace file tools
-- web dashboard shell: started
+- web dashboard shell with connectors, terminal, Telegram, tools, approvals,
+  memory, audit, models, and Doctor views
 - OpenAI-compatible provider support
 - terminal.run through approval-gated workspace policy
 
@@ -30,6 +32,7 @@
 - Gmail draft connector
 - Calendar free/busy connector
 - Calendar read-only connector
+- local calendar store create/update/delete/read/free-slot handlers
 - connector status UI
 - OS secret store integration
 
@@ -38,14 +41,15 @@
 - Telegram allowlisted bot
 - approval buttons
 - remote status commands
+- dashboard setup controls
 
 ## Milestone 4: Sandboxed Automation
 
 - terminal workspace sandbox: started
 - Docker sandbox executor
-- isolated browser profile
-- browser extraction
-- approval-gated browser interactions
+- optional isolated browser profile through Playwright
+- guarded browser read/extraction: started
+- approval-gated browser interactions through optional runtime
 
 ## Milestone 5: Public Release
 

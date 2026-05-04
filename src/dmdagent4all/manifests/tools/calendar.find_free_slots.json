@@ -3,6 +3,14 @@
   "description": "Find free slots using calendar free/busy data.",
   "risk": 1,
   "permissions": ["calendar.freebusy"],
+  "args_schema": {
+    "start": "optional ISO datetime search start, default now",
+    "end": "optional ISO datetime search end, default seven days from start",
+    "duration_minutes": "optional required slot length, default 30",
+    "limit": "optional max slots to return, default 20",
+    "workday_start": "optional local time HH:MM, default 09:00",
+    "workday_end": "optional local time HH:MM, default 17:00"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": false

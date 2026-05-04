@@ -158,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Also grant the terminal.run permission.",
     )
     terminal_subcommands.add_parser("disable", help="Disable terminal policy and tool.")
+    terminal_auto_approve = terminal_subcommands.add_parser(
+        "auto-approve",
+        help="Toggle automatic approval for exact allowlisted commands.",
+    )
+    terminal_auto_approve.add_argument("state", choices=("on", "off"))
     terminal_allow = terminal_subcommands.add_parser("allow", help="Add an exact command allowlist entry.")
     terminal_allow.add_argument("command", nargs=argparse.REMAINDER)
     terminal_remove = terminal_subcommands.add_parser("remove", help="Remove an exact command allowlist entry.")
@@ -906,6 +911,7 @@ def command_terminal(args: argparse.Namespace) -> int:
                 ["Workspace only", _yes_no(bool(terminal.get("workspace_only", True)))],
                 ["Timeout", f"{terminal.get('timeout_seconds', 30)}s"],
                 ["Max output", str(terminal.get("max_output_chars", 20000))],
+                ["Auto-approve allowlist", _yes_no(bool(terminal.get("auto_approve_allowlisted", False)))],
             ],
         )
         print("")
@@ -929,7 +935,7 @@ def command_terminal(args: argparse.Namespace) -> int:
             print("Next: dmdagent tools enable terminal.run")
         if not args.grant_permission:
             print("Next: dmdagent permissions grant terminal.run")
-        print("Every terminal.run request still requires approval.")
+        print("Every terminal.run request still requires approval unless exact allowlist auto-approve is enabled.")
         return 0
 
     if args.terminal_command == "disable":
@@ -937,6 +943,12 @@ def command_terminal(args: argparse.Namespace) -> int:
         config.setdefault("tools", {}).setdefault("terminal.run", {})["enabled"] = False
         save_config(config, config_path)
         print("Terminal policy and terminal.run tool disabled.")
+        return 0
+
+    if args.terminal_command == "auto-approve":
+        terminal["auto_approve_allowlisted"] = args.state == "on"
+        save_config(config, config_path)
+        print(f"Auto-approve exact allowlist: {args.state}.")
         return 0
 
     if args.terminal_command in {"allow", "remove"}:
@@ -2134,6 +2146,7 @@ def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:
     terminal.setdefault("workspace_only", True)
     terminal.setdefault("timeout_seconds", 30)
     terminal.setdefault("max_output_chars", 20000)
+    terminal.setdefault("auto_approve_allowlisted", False)
     terminal.setdefault(
         "allowed_commands",
         [["pwd"], ["ls"], ["git", "status"], ["git", "diff"], ["npm", "test"], ["pytest"]],

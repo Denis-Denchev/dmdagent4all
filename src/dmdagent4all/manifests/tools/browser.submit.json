@@ -3,6 +3,11 @@
   "description": "Submit a form in the isolated browser.",
   "risk": 4,
   "permissions": ["browser.submit"],
+  "args_schema": {
+    "url": "HTTP or HTTPS URL/domain for the form page",
+    "selector": "optional form or submit button selector",
+    "fields": "optional object mapping field selectors/names to values before submit"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false,

@@ -3,6 +3,9 @@
   "description": "Send an existing Gmail draft.",
   "risk": 4,
   "permissions": ["gmail.send"],
+  "args_schema": {
+    "draft_id": "Gmail draft id"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false

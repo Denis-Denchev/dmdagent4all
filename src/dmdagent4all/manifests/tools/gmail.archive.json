@@ -3,6 +3,9 @@
   "description": "Archive Gmail messages.",
   "risk": 3,
   "permissions": ["gmail.modify"],
+  "args_schema": {
+    "message_ids": "array of Gmail message ids"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false

@@ -110,13 +110,14 @@ Foundation implemented:
 - Python package and `dmdagent` CLI entry point.
 - Local data layout under `~/.local/share/dmdagent4all/`.
 - YAML config with deep-merged defaults.
-- Tool manifest loader.
+- Tool manifest loader with compact argument schemas for planner guidance.
 - Permission engine with risk levels, enabled/disabled tools, required
   permissions, approval thresholds, and cloud context checks.
 - SQLite audit store with audit logs, tool calls, approvals, connector status,
   LLM requests, and memory events tables.
 - Markdown memory manager with path safety.
-- Deterministic chat routes for help, greetings, and memory listing.
+- Deterministic chat routes for help, greetings, memory listing, explicit
+  memory writes, local reminders, and simple browser-open requests.
 - Ollama planner integration for structured tool planning.
 - Approval queue with approve-and-execute semantics.
 - FastAPI backend skeleton.
@@ -126,22 +127,38 @@ Foundation implemented:
   with API key values kept in environment variables only.
 - `dmdagent doctor` readiness and security diagnostics, also exposed in the
   dashboard Doctor view.
+- Dashboard connector, terminal, and Telegram control views backed by
+  `/v1/connectors`, `/v1/terminal`, and `/v1/telegram` API endpoints.
 - Terminal policy module with exact command allowlist and blocked dangerous
   commands/secret paths.
 - `terminal.run` handler wired through manifests, permissions, approval queue,
   workspace-only cwd, timeouts, output limits, and redaction.
+- Local `reminders.create`, `reminders.list`, and `reminders.complete` tools
+  with approval-gated writes to the private workspace reminder store.
+- Local calendar store handlers for create, update, delete, today, week, and
+  free-slot queries. External calendar sync is still a connector task.
+- Guarded `browser.open` and `browser.extract_text` read tools for HTTP/HTTPS
+  pages with URL validation, private/local network blocking, timeouts, output
+  limits, and secret redaction.
+- Approval-gated `browser.click`, `browser.fill_form`, and `browser.submit`
+  handlers for an isolated Playwright profile when optional browser runtime
+  support is installed.
+- Gmail tool handlers fail closed with `not_configured` until real OAuth
+  connector setup exists, instead of silently running unimplemented actions.
 - Telegram polling interface with allowlist, `/id`, `/help`, `/approvals`,
   `/approve <id>`, `/deny <id>`, audit logging, and approve/deny inline buttons.
 
 Partially implemented or stubbed:
 
-- Gmail and Calendar tool manifests exist, but real OAuth connectors are not
-  implemented yet.
-- Browser manifests exist. Browser handlers currently validate URL shape and
-  return `not_implemented`; there is no isolated browser session yet.
-- Web dashboard can view chat, tools, permissions, approvals, memory, audit, and
-  models, plus Doctor diagnostics. It does not yet expose full Telegram setup
-  controls or terminal allowlist editing.
+- Gmail and Calendar tool manifests exist. Calendar has a local workspace store;
+  real Google OAuth sync is not implemented yet.
+- Gmail OAuth is not implemented yet. Gmail tools are registered and policy
+  gated, but return `not_configured` until connector setup is added.
+- Browser interaction tools require the optional Playwright runtime and Chromium
+  browser install. Without that runtime, they fail closed with setup guidance.
+- Web dashboard can view chat, connectors, tools, permissions, approvals,
+  terminal controls, Telegram setup controls, memory, audit, models, and Doctor
+  diagnostics. Telegram polling itself still runs from the CLI process.
 - OS secret store protocol exists, but no concrete OS-backed secret store is
   implemented yet.
 
@@ -302,6 +319,7 @@ dmdagent permissions revoke gmail.readonly
 dmdagent terminal status
 dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
+dmdagent terminal auto-approve on
 dmdagent terminal run -- git status
 dmdagent memory path
 dmdagent memory list
@@ -444,11 +462,14 @@ dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal run -- git status
 dmdagent approvals approve <id>
+dmdagent terminal auto-approve on
 ```
 
 `terminal.run` accepts command arrays only, matches exact allowlist entries,
 forces workspace-only cwd, applies a timeout, redacts obvious secrets from
-output, and always requires approval.
+output, and requires approval by default. The dashboard Terminal view and
+`dmdagent terminal auto-approve on` can opt in to automatic execution for exact
+allowlist matches only.
 
 ## Telegram Interface
 
@@ -544,21 +565,20 @@ verify it with tests.
 Recommended order:
 
 1. Harden Telegram operational behavior.
-   Add graceful retry/backoff for transient Telegram API errors, document a
-   launchd/systemd service example, and optionally expose Telegram status in the
-   web dashboard.
+   Document a launchd/systemd service example and consider dashboard-driven
+   lifecycle controls for starting/stopping polling.
 2. Implement OS-backed secret storage.
    Provide a concrete secret store for macOS Keychain or another local secure
    backend. Keep secrets out of config and model context.
-3. Build connector status plumbing.
-   Add backend APIs and UI for connector status, enabled state, missing secrets,
-   and permission status.
-4. Implement the first real connector.
-   Start with read-only Gmail search or Calendar free/busy. Avoid send/modify
-   actions until read-only flows are tested.
-5. Replace browser stubs with an isolated browser sandbox.
-   Do not use a personal browser profile. Require approval for clicks, form
-   fills, submits, logins, purchases, and downloads.
+3. Implement the first real OAuth connector.
+   Start with read-only Gmail search or Google Calendar free/busy. Avoid
+   send/modify actions until read-only flows are tested.
+4. Package optional browser runtime setup.
+   Add an installer path for `.[browser]` and Playwright Chromium so browser
+   interaction tools are easy to enable.
+5. Prepare release packaging.
+   Add signed macOS packaging or another release artifact once signing identity
+   and distribution target are available.
 6. Improve frontend coverage and scripts.
    Add a lint script, consider component tests, and keep the dashboard focused
    on operational control rather than marketing UI.

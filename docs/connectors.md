@@ -25,6 +25,10 @@ Rules:
 
 Important: Some Gmail OAuth scopes can technically allow more than one action. Backend policy must enforce the intended product behavior even when a token has broader capability.
 
+Current build status: Gmail manifests and backend handlers are registered, but
+real OAuth is not implemented. If enabled and permitted, Gmail tools return
+`not_configured` rather than attempting a fake action.
+
 ## Calendar
 
 Preferred minimal scope for availability:
@@ -44,6 +48,10 @@ Rules:
 - Create/update/delete require approval.
 - Delete is high risk.
 
+Current build status: Calendar tools use a local workspace JSONL event store for
+create, update, delete, today, week, and free-slot queries. Google Calendar OAuth
+sync is still a connector task.
+
 ## Browser
 
 Browser automation is disabled by default.
@@ -55,6 +63,15 @@ Rules:
 - no saved passwords
 - downloads only to workspace
 - approval required for clicks, form fills, submits, logins, and purchases
+
+Current build status: `browser.open` and `browser.extract_text` use guarded
+HTTP reads. `browser.click`, `browser.fill_form`, and `browser.submit` use an
+isolated Playwright profile when optional browser support is installed:
+
+```bash
+pip install -e ".[browser]"
+python -m playwright install chromium
+```
 
 ## Telegram
 
@@ -98,6 +115,9 @@ Operational notes:
 - `/id` returns the Telegram user ID needed for the allowlist.
 - `/approvals`, `/approve <id>`, and `/deny <id>` work from Telegram for allowlisted users.
 - Risky actions still go through the same approval queue as CLI and web UI.
+- The dashboard can enable/disable Telegram, configure the token environment
+  variable name, load a token into the current API process environment, and edit
+  the allowlisted user IDs. Long-running polling is still started from the CLI.
 
 ## WhatsApp
 

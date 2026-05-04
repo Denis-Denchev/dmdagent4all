@@ -395,7 +395,8 @@ textarea:focus {
 }
 
 .tools-grid,
-.models-grid {
+.models-grid,
+.connector-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 0.8rem;
@@ -403,7 +404,8 @@ textarea:focus {
 }
 
 .tool-card,
-.model-card {
+.model-card,
+.connector-card {
   display: grid;
   gap: 0.75rem;
   align-content: start;
@@ -415,9 +417,61 @@ textarea:focus {
 }
 
 .tool-card strong,
-.model-card strong {
+.model-card strong,
+.connector-card strong {
   display: block;
   margin-bottom: 0.35rem;
+}
+
+.connector-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.connector-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.connector-meter,
+.status-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.45rem 0.7rem;
+  align-items: center;
+}
+
+.connector-meter span,
+.status-grid span,
+.settings-header span,
+label {
+  color: var(--muted);
+}
+
+.status-chip {
+  border: 1px solid #ccd6df;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #4b5563;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.status-chip--enabled,
+.status-chip--read_ready,
+.status-chip--local_store {
+  border-color: #8fcabe;
+  background: #dff3ef;
+  color: var(--brand-strong);
+}
+
+.status-chip--not_configured {
+  border-color: #d9c28a;
+  background: #fff7df;
+  color: #6a4d0f;
 }
 
 .tool-meta {
@@ -454,6 +508,106 @@ textarea:focus {
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 1rem;
   min-height: calc(100vh - 8rem);
+}
+
+.terminal-layout,
+.telegram-layout {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-panel,
+.command-panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-header strong,
+.settings-header span {
+  display: block;
+}
+
+.settings-form,
+.inline-form,
+.run-form {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.settings-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+}
+
+.inline-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.run-form {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.45fr) auto;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.setting-check {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-muted);
+  padding: 0.75rem;
+}
+
+.setting-check input {
+  width: 18px;
+  height: 18px;
+  margin-top: 0.1rem;
+  accent-color: var(--brand);
+}
+
+.setting-check span {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.setting-check small {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.table-list--compact {
+  padding: 0;
+}
+
+.command-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-muted);
+  padding: 0.75rem;
+}
+
+.command-row code {
+  display: block;
 }
 
 .file-list {
@@ -546,7 +700,9 @@ textarea {
   .permission-row,
   .audit-row,
   .doctor-row,
-  .model-current {
+  .model-current,
+  .settings-form,
+  .run-form {
     grid-template-columns: 1fr;
   }
 
@@ -563,6 +719,7 @@ textarea {
   .topbar,
   .chat-form,
   .model-form,
+  .inline-form,
   .row-actions {
     align-items: stretch;
     flex-direction: column;

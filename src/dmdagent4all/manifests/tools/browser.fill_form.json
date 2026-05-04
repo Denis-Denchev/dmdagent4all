@@ -3,6 +3,10 @@
   "description": "Fill a form in the isolated browser without submitting.",
   "risk": 3,
   "permissions": ["browser.interact"],
+  "args_schema": {
+    "url": "HTTP or HTTPS URL/domain for the form page",
+    "fields": "object mapping field selectors/names to values"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false,

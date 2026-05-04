@@ -3,6 +3,9 @@
   "description": "Read one Gmail thread with read-only access.",
   "risk": 1,
   "permissions": ["gmail.readonly"],
+  "args_schema": {
+    "thread_id": "Gmail thread id"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": false

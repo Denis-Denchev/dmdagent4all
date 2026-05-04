@@ -143,7 +143,11 @@ def parse_plan_response(raw: str) -> PlanResult:
             tool = str(payload.get("name", "")).strip()
         if not tool:
             raise PlannerError("Planner returned a tool request without a tool name.")
-        args = payload.get("args", {})
+        args = (
+            payload.get("arguments", {})
+            if plan_type == "function_call"
+            else payload.get("args", {})
+        )
         if not isinstance(args, dict) and isinstance(payload.get("arguments"), dict):
             args = payload.get("arguments", {})
         if not isinstance(args, dict):
@@ -197,7 +201,11 @@ def _build_planning_prompt(
     tool_rows: list[dict[str, Any]] = []
     effective_enabled = set(enabled_tools or ())
     for manifest in manifests.values():
-        enabled = manifest.name in effective_enabled if enabled_tools is not None else manifest.default_enabled
+        enabled = (
+            manifest.name in effective_enabled
+            if enabled_tools is not None
+            else manifest.default_enabled
+        )
         tool_rows.append(
             {
                 "name": manifest.name,

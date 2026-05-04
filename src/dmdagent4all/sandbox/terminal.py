@@ -37,6 +37,8 @@ class TerminalPolicy:
         ("ls",),
         ("git", "status"),
         ("git", "diff"),
+        ("cat", "README.md"),
+        ("cat", "readme.md"),
         ("npm", "test"),
         ("pytest",),
     )

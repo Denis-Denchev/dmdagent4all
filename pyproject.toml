@@ -18,6 +18,11 @@ dependencies = [
   "uvicorn[standard]>=0.30.0"
 ]
 
+[project.optional-dependencies]
+browser = [
+  "playwright>=1.52.0"
+]
+
 [project.urls]
 Homepage = "https://github.com/Denis-Denchev/dmdagent4all"
 Repository = "https://github.com/Denis-Denchev/dmdagent4all"

@@ -3,6 +3,10 @@
   "description": "Summarize recent Gmail messages.",
   "risk": 1,
   "permissions": ["gmail.readonly"],
+  "args_schema": {
+    "query": "optional Gmail search query",
+    "limit": "optional maximum messages to summarize"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": false

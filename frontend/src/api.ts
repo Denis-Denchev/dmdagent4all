@@ -76,6 +76,38 @@ export type Status = {
   }
 }
 
+export type TerminalStatus = {
+  enabled: boolean
+  tool_enabled: boolean
+  permission_granted: boolean
+  ready: boolean
+  workspace_only: boolean
+  timeout_seconds: number
+  max_output_chars: number
+  auto_approve_allowlisted: boolean
+  allowed_commands: string[][]
+}
+
+export type TelegramStatus = {
+  enabled: boolean
+  allowed_user_ids: number[]
+  bot_token_env: string
+  bot_token_available: boolean
+  polling_timeout_seconds: number
+  ready: boolean
+}
+
+export type ConnectorStatus = {
+  name: string
+  status: string
+  detail: string
+  tools_total: number
+  enabled_tools: string[]
+  permissions_required: string[]
+  permissions_granted: string[]
+  interface?: unknown
+}
+
 export type ModelMode = {
   key: string
   label: string
@@ -176,5 +208,57 @@ export const api = {
     request<AgentResponse>('/v1/models/model', {
       method: 'POST',
       body: JSON.stringify({ model }),
+    }),
+  connectors: () => request<ConnectorStatus[]>('/v1/connectors'),
+  terminal: () => request<TerminalStatus>('/v1/terminal'),
+  enableTerminal: () => request<AgentResponse>('/v1/terminal/enable', { method: 'POST' }),
+  disableTerminal: () => request<AgentResponse>('/v1/terminal/disable', { method: 'POST' }),
+  updateTerminalSettings: (settings: {
+    workspace_only?: boolean
+    timeout_seconds?: number
+    max_output_chars?: number
+    auto_approve_allowlisted?: boolean
+  }) =>
+    request<AgentResponse>('/v1/terminal/settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    }),
+  allowTerminalCommand: (command: string) =>
+    request<AgentResponse>('/v1/terminal/allow', {
+      method: 'POST',
+      body: JSON.stringify({ command }),
+    }),
+  removeTerminalCommand: (command: string[]) =>
+    request<AgentResponse>('/v1/terminal/remove', {
+      method: 'POST',
+      body: JSON.stringify({ command }),
+    }),
+  runTerminalCommand: (command: string, cwd?: string) =>
+    request<AgentResponse>('/v1/terminal/run', {
+      method: 'POST',
+      body: JSON.stringify({ command, cwd: cwd || null }),
+    }),
+  telegram: () => request<TelegramStatus>('/v1/telegram'),
+  enableTelegram: () => request<AgentResponse>('/v1/telegram/enable', { method: 'POST' }),
+  disableTelegram: () => request<AgentResponse>('/v1/telegram/disable', { method: 'POST' }),
+  allowTelegramUser: (user_id: number) =>
+    request<AgentResponse>('/v1/telegram/allow', {
+      method: 'POST',
+      body: JSON.stringify({ user_id }),
+    }),
+  removeTelegramUser: (user_id: number) =>
+    request<AgentResponse>('/v1/telegram/remove', {
+      method: 'POST',
+      body: JSON.stringify({ user_id }),
+    }),
+  setTelegramTokenEnv: (bot_token_env: string) =>
+    request<AgentResponse>('/v1/telegram/token-env', {
+      method: 'POST',
+      body: JSON.stringify({ bot_token_env }),
+    }),
+  loadTelegramToken: (token: string) =>
+    request<AgentResponse>('/v1/telegram/token', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
     }),
 }

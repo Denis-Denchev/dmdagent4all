@@ -3,6 +3,10 @@
   "description": "Click an element in the isolated browser.",
   "risk": 3,
   "permissions": ["browser.interact"],
+  "args_schema": {
+    "url": "HTTP or HTTPS URL/domain for the browser page",
+    "selector": "optional CSS selector or accessible target description"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false,

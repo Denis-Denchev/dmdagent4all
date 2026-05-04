@@ -3,6 +3,13 @@
   "description": "Update a calendar event.",
   "risk": 3,
   "permissions": ["calendar.events"],
+  "args_schema": {
+    "id": "local event id returned by calendar.create_event/today/week",
+    "title": "optional new event title",
+    "start": "optional ISO datetime start",
+    "end": "optional ISO datetime end",
+    "reminder": "optional reminder time or offset"
+  },
   "approval_required": true,
   "cloud_allowed": false,
   "default_enabled": false

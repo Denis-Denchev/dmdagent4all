@@ -3,6 +3,11 @@
   "description": "Create a Gmail draft without sending it.",
   "risk": 2,
   "permissions": ["gmail.compose"],
+  "args_schema": {
+    "to": "recipient email address",
+    "subject": "draft subject",
+    "body": "draft body"
+  },
   "approval_required": false,
   "cloud_allowed": false,
   "default_enabled": false

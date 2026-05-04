@@ -87,12 +87,12 @@ class AgentCoreTest(unittest.TestCase):
             self.assertNotEqual(response.message, "как си")
             self.assertIn("permission engine", response.message)
 
-    def test_unimplemented_browser_request_is_answered_without_planner(self) -> None:
+    def test_browser_request_routes_to_policy_before_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(Path(tmp), ExplodingPlanner())
             response = core.handle_text("може ли да отвориш гугъл")
-            self.assertEqual(response.status, "ok")
-            self.assertIn("не мога реално", response.message)
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Tool is disabled: browser.open", response.message)
 
     def test_identity_answers_use_setup_config_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,6 +137,33 @@ class AgentCoreTest(unittest.TestCase):
             profile = (root / "memory" / "profile.md").read_text(encoding="utf-8")
             self.assertIn("Assistant name: Jarvis", profile)
             self.assertIn("User name: Denis", profile)
+
+    def test_short_im_name_phrase_updates_identity_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "llm": {"response_language": "auto"},
+                "setup": {
+                    "agent_name": "DMD Agent",
+                    "user_name": "",
+                    "preferred_language": "auto",
+                },
+            }
+            core = _build_core(root, ExplodingPlanner(), config=config)
+
+            response = core.handle_text("im Denis")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(config["setup"]["user_name"], "Denis")
+
+    def test_simple_terminal_phrase_routes_to_terminal_policy_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), ExplodingPlanner())
+
+            response = core.handle_text("tell me can you type ls in terminal")
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Tool is disabled: terminal.run", response.message)
 
     def test_approval_required_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,6 +256,118 @@ class AgentCoreTest(unittest.TestCase):
                     approval = audit.list_approvals(status="pending")[0]
                     self.assertEqual(approval["tool"], "memory.write")
                     self.assertIn(expected_fact, approval["args"]["body"])
+
+    def test_remind_me_phrase_creates_approval_gated_local_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Remind me that I have a dentist appointment after 1 hour")
+
+            self.assertEqual(response.status, "approval_required")
+            approval = audit.list_approvals(status="pending")[0]
+            self.assertEqual(approval["tool"], "reminders.create")
+            self.assertIn("dentist appointment", approval["args"]["title"])
+            self.assertIn("due_at", approval["args"])
+
+    def test_approved_reminder_is_saved_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            pending = core.handle_text("Remind me to call the dentist in 1 hour")
+            approved = core.approve_and_execute(pending.data["approval_id"])
+            listed = core.handle_tool_request(ToolRequest(tool="reminders.list", args={}))
+
+            self.assertEqual(approved.status, "ok")
+            self.assertEqual(listed.status, "ok")
+            self.assertEqual(listed.data["reminders"][0]["status"], "pending")
+            self.assertIn("call the dentist", listed.data["reminders"][0]["title"])
+
+    def test_ready_text_approves_latest_pending_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            pending = core.handle_text("Remind me to start work in 15 minutes")
+            approved = core.handle_text("готово")
+            listed = core.handle_tool_request(ToolRequest(tool="reminders.list", args={}))
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approved.status, "ok")
+            self.assertEqual(audit.list_approvals(limit=1)[0]["status"], "executed")
+            self.assertIn("start work", listed.data["reminders"][0]["title"])
+
+    def test_auto_approve_allowlisted_terminal_command_runs_without_pending_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["pwd"]],
+                        "auto_approve_allowlisted": True,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_tool_request(ToolRequest(tool="terminal.run", args={"command": ["pwd"]}))
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+            self.assertIn(str(root / "workspace"), response.data["stdout"])
+
+    def test_bulgarian_identity_uses_saved_nickname_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "llm": {"response_language": "auto"},
+                "setup": {
+                    "agent_name": "jarvis",
+                    "user_name": "Denis",
+                    "preferred_language": "auto",
+                },
+            }
+            core = _build_core(root, ExplodingPlanner(), config=config)
+
+            saved = core.handle_text(
+                "i want you to call me buddy or if i type in Bulgarian you can also call me маняк"
+            )
+            answered = core.handle_text("аз кой съм")
+
+            self.assertEqual(saved.status, "ok")
+            self.assertEqual(config["setup"]["nickname"], "buddy")
+            self.assertEqual(config["setup"]["nickname_bg"], "маняк")
+            self.assertEqual(answered.status, "ok")
+            self.assertIn("маняк", answered.message)
+            self.assertIn("Denis", answered.message)
 
     def test_memory_tool_result_can_be_synthesized_into_human_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

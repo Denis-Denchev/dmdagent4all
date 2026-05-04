@@ -16,6 +16,19 @@ class PlannerTest(unittest.TestCase):
         self.assertIsNotNone(result.tool_request)
         self.assertEqual(result.tool_request.tool, "memory.list")
 
+    def test_accepts_common_tool_type_aliases(self) -> None:
+        result = parse_plan_response('{"type":"tool","tool":"memory.list","args":{}}')
+        self.assertIsNotNone(result.tool_request)
+        self.assertEqual(result.tool_request.tool, "memory.list")
+
+    def test_accepts_function_call_shape(self) -> None:
+        result = parse_plan_response(
+            '{"type":"function_call","name":"memory.read","arguments":{"path":"profile.md"}}'
+        )
+        self.assertIsNotNone(result.tool_request)
+        self.assertEqual(result.tool_request.tool, "memory.read")
+        self.assertEqual(result.tool_request.args["path"], "profile.md")
+
     def test_extracts_json_from_wrapped_text(self) -> None:
         result = parse_plan_response('text before {"type":"final","message":"Ok"} text after')
         self.assertEqual(result.final_message, "Ok")

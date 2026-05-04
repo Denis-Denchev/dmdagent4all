@@ -4,15 +4,29 @@ import {
   type Approval,
   type AuditEvent,
   api,
+  type ConnectorStatus,
   type DoctorResponse,
   type MemoryFile,
   type ModelMode,
   type PermissionItem,
   type Status,
+  type TelegramStatus,
+  type TerminalStatus,
   type Tool,
 } from './api'
 
-type View = 'chat' | 'doctor' | 'approvals' | 'tools' | 'permissions' | 'memory' | 'audit' | 'models'
+type View =
+  | 'chat'
+  | 'doctor'
+  | 'connectors'
+  | 'approvals'
+  | 'tools'
+  | 'permissions'
+  | 'terminal'
+  | 'telegram'
+  | 'memory'
+  | 'audit'
+  | 'models'
 
 type ChatMessage = {
   role: 'user' | 'agent'
@@ -23,9 +37,12 @@ type ChatMessage = {
 const views: Array<{ key: View; label: string }> = [
   { key: 'chat', label: 'Chat' },
   { key: 'doctor', label: 'Doctor' },
+  { key: 'connectors', label: 'Connectors' },
   { key: 'approvals', label: 'Approvals' },
   { key: 'tools', label: 'Tools' },
   { key: 'permissions', label: 'Permissions' },
+  { key: 'terminal', label: 'Terminal' },
+  { key: 'telegram', label: 'Telegram' },
   { key: 'memory', label: 'Memory' },
   { key: 'audit', label: 'Audit' },
   { key: 'models', label: 'Models' },
@@ -36,6 +53,9 @@ export function App() {
   const [status, setStatus] = useState<Status | null>(null)
   const [tools, setTools] = useState<Tool[]>([])
   const [permissions, setPermissions] = useState<PermissionItem[]>([])
+  const [connectors, setConnectors] = useState<ConnectorStatus[]>([])
+  const [terminal, setTerminal] = useState<TerminalStatus | null>(null)
+  const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
   const [doctor, setDoctor] = useState<DoctorResponse | null>(null)
@@ -44,6 +64,15 @@ export function App() {
   const [memoryDraft, setMemoryDraft] = useState('')
   const [models, setModels] = useState<ModelMode[]>([])
   const [customModel, setCustomModel] = useState('')
+  const [terminalCommand, setTerminalCommand] = useState('')
+  const [terminalRunCommand, setTerminalRunCommand] = useState('')
+  const [terminalCwd, setTerminalCwd] = useState('')
+  const [terminalTimeout, setTerminalTimeout] = useState('')
+  const [terminalMaxOutput, setTerminalMaxOutput] = useState('')
+  const [terminalAutoApprove, setTerminalAutoApprove] = useState(false)
+  const [telegramUserId, setTelegramUserId] = useState('')
+  const [telegramTokenEnv, setTelegramTokenEnv] = useState('')
+  const [telegramToken, setTelegramToken] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'agent',
@@ -69,6 +98,9 @@ export function App() {
       statusResult,
       toolsResult,
       permissionsResult,
+      connectorsResult,
+      terminalResult,
+      telegramResult,
       approvalsResult,
       auditResult,
       doctorResult,
@@ -79,6 +111,9 @@ export function App() {
         api.status(),
         api.tools(),
         api.permissions(),
+        api.connectors(),
+        api.terminal(),
+        api.telegram(),
         api.approvals(),
         api.audit(),
         api.doctor(),
@@ -88,6 +123,13 @@ export function App() {
     setStatus(statusResult)
     setTools(toolsResult)
     setPermissions(permissionsResult.available)
+    setConnectors(connectorsResult)
+    setTerminal(terminalResult)
+    setTelegram(telegramResult)
+    setTerminalTimeout(String(terminalResult.timeout_seconds))
+    setTerminalMaxOutput(String(terminalResult.max_output_chars))
+    setTerminalAutoApprove(terminalResult.auto_approve_allowlisted)
+    setTelegramTokenEnv(telegramResult.bot_token_env)
     setApprovals(approvalsResult)
     setAudit(auditResult)
     setDoctor(doctorResult)
@@ -110,6 +152,36 @@ export function App() {
     }
   }
 
+  function appendAgentResponse(response: AgentResponse, focusChat = false) {
+    setMessages((current) => [
+      ...current,
+      { role: 'agent', text: `[${response.status}] ${response.message}`, data: response.data },
+    ])
+    if (focusChat) setActiveView('chat')
+  }
+
+  async function runAgentAction(
+    action: () => Promise<AgentResponse>,
+    options: { focusChat?: boolean } = {},
+  ) {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const response = await action()
+      appendAgentResponse(response, options.focusChat ?? false)
+      setNotice(`${response.status}: ${response.message}`)
+      await refreshAll()
+      return response
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Request failed'
+      setNotice(message)
+      setMessages((current) => [...current, { role: 'agent', text: message }])
+      return null
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function sendChat() {
     const message = chatInput.trim()
     if (!message) return
@@ -118,10 +190,7 @@ export function App() {
     setBusy(true)
     try {
       const response = await api.chat(message)
-      setMessages((current) => [
-        ...current,
-        { role: 'agent', text: `[${response.status}] ${response.message}`, data: response.data },
-      ])
+      appendAgentResponse(response)
       await refreshAll()
     } catch (error) {
       setMessages((current) => [
@@ -144,13 +213,65 @@ export function App() {
 
   async function requestMemorySave() {
     if (!selectedMemory) return
+    await runAgentAction(() => api.writeMemory(selectedMemory.path, memoryDraft))
+  }
+
+  async function saveTerminalSettings() {
     await runAction(
-      async () => {
-        const response = await api.writeMemory(selectedMemory.path, memoryDraft)
-        setNotice(`${response.status}: ${response.message}`)
-      },
-      undefined,
+      () =>
+        api.updateTerminalSettings({
+          workspace_only: terminal?.workspace_only ?? true,
+          timeout_seconds: Number(terminalTimeout),
+          max_output_chars: Number(terminalMaxOutput),
+          auto_approve_allowlisted: terminalAutoApprove,
+        }),
+      'Terminal settings updated.',
     )
+  }
+
+  async function approveRequest(approvalId: number) {
+    await runAgentAction(() => api.approve(approvalId), { focusChat: true })
+  }
+
+  async function denyRequest(approvalId: number) {
+    await runAgentAction(() => api.deny(approvalId))
+  }
+
+  async function allowTerminalCommand() {
+    const command = terminalCommand.trim()
+    if (!command) return
+    await runAction(() => api.allowTerminalCommand(command), `Allowlisted: ${command}`)
+    setTerminalCommand('')
+  }
+
+  async function requestTerminalRun() {
+    const command = terminalRunCommand.trim()
+    if (!command) return
+    const response = await runAgentAction(
+      () => api.runTerminalCommand(command, terminalCwd.trim()),
+      { focusChat: true },
+    )
+    if (response?.status === 'ok') setTerminalRunCommand('')
+  }
+
+  async function allowTelegramUser() {
+    const userId = Number(telegramUserId)
+    if (!Number.isInteger(userId)) return
+    await runAction(() => api.allowTelegramUser(userId), `Telegram user allowed: ${userId}`)
+    setTelegramUserId('')
+  }
+
+  async function saveTelegramTokenEnv() {
+    const value = telegramTokenEnv.trim()
+    if (!value) return
+    await runAction(() => api.setTelegramTokenEnv(value), `Telegram token env set to ${value}.`)
+  }
+
+  async function loadTelegramToken() {
+    const token = telegramToken.trim()
+    if (!token) return
+    await runAction(() => api.loadTelegramToken(token), 'Telegram token loaded into this API process.')
+    setTelegramToken('')
   }
 
   return (
@@ -263,6 +384,37 @@ export function App() {
           </section>
         ) : null}
 
+        {activeView === 'connectors' ? (
+          <section className="panel">
+            <div className="connector-grid">
+              {connectors.map((connector) => (
+                <article className="connector-card" key={connector.name}>
+                  <div className="connector-card__header">
+                    <strong>{connector.name}</strong>
+                    <span className={`status-chip status-chip--${connector.status}`}>
+                      {connector.status}
+                    </span>
+                  </div>
+                  {connector.detail ? <p>{connector.detail}</p> : null}
+                  <div className="connector-meter">
+                    <span>Tools</span>
+                    <strong>
+                      {connector.enabled_tools.length}/{connector.tools_total}
+                    </strong>
+                    <span>Permissions</span>
+                    <strong>
+                      {connector.permissions_granted.length}/{connector.permissions_required.length}
+                    </strong>
+                  </div>
+                  {connector.enabled_tools.length ? (
+                    <code>{connector.enabled_tools.join(', ')}</code>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         {activeView === 'approvals' ? (
           <section className="panel">
             <div className="table-list">
@@ -278,14 +430,14 @@ export function App() {
                     <button
                       className="button"
                       type="button"
-                      onClick={() => void runAction(() => api.approve(approval.id), 'Approval executed.')}
+                      onClick={() => void approveRequest(approval.id)}
                     >
                       Approve
                     </button>
                     <button
                       className="button button-danger"
                       type="button"
-                      onClick={() => void runAction(() => api.deny(approval.id), 'Approval denied.')}
+                      onClick={() => void denyRequest(approval.id)}
                     >
                       Deny
                     </button>
@@ -352,6 +504,256 @@ export function App() {
                   </button>
                 </article>
               ))}
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'terminal' ? (
+          <section className="terminal-layout">
+            <div className="panel settings-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Terminal Policy</strong>
+                  <span>{terminal?.ready ? 'Ready for approval-gated runs' : 'Not ready'}</span>
+                </div>
+                <button
+                  className={terminal?.enabled ? 'button button-danger' : 'button'}
+                  type="button"
+                  onClick={() =>
+                    void runAction(
+                      () => (terminal?.enabled ? api.disableTerminal() : api.enableTerminal()),
+                      terminal?.enabled ? 'Terminal disabled.' : 'Terminal enabled.',
+                    )
+                  }
+                >
+                  {terminal?.enabled ? 'Disable' : 'Enable'}
+                </button>
+              </div>
+              <div className="status-grid">
+                <span>Policy</span>
+                <strong>{terminal?.enabled ? 'enabled' : 'disabled'}</strong>
+                <span>Tool</span>
+                <strong>{terminal?.tool_enabled ? 'enabled' : 'disabled'}</strong>
+                <span>Permission</span>
+                <strong>{terminal?.permission_granted ? 'granted' : 'missing'}</strong>
+              </div>
+              <div className="settings-form">
+                <label>
+                  Timeout seconds
+                  <input
+                    value={terminalTimeout}
+                    onChange={(event) => setTerminalTimeout(event.target.value)}
+                    inputMode="numeric"
+                  />
+                </label>
+                <label>
+                  Max output chars
+                  <input
+                    value={terminalMaxOutput}
+                    onChange={(event) => setTerminalMaxOutput(event.target.value)}
+                    inputMode="numeric"
+                  />
+                </label>
+                <label className="setting-check">
+                  <input
+                    type="checkbox"
+                    checked={terminalAutoApprove}
+                    onChange={(event) => setTerminalAutoApprove(event.target.checked)}
+                  />
+                  <span>
+                    <strong>Auto-approve exact allowlist</strong>
+                    <small>Runs matching allowlisted commands without creating a new approval.</small>
+                  </span>
+                </label>
+                <button className="button button-secondary" type="button" onClick={() => void saveTerminalSettings()}>
+                  Save Settings
+                </button>
+              </div>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Exact Allowlist</strong>
+                  <span>Command arrays are parsed from shell-like text.</span>
+                </div>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void allowTerminalCommand()
+                }}
+              >
+                <input
+                  value={terminalCommand}
+                  onChange={(event) => setTerminalCommand(event.target.value)}
+                  placeholder="git status"
+                />
+                <button className="button" type="submit">Allow</button>
+              </form>
+              <div className="table-list table-list--compact">
+                {terminal?.allowed_commands.map((command) => (
+                  <article className="command-row" key={command.join('\u0000')}>
+                    <code>{command.join(' ')}</code>
+                    <button
+                      className="button button-danger"
+                      type="button"
+                      onClick={() =>
+                        void runAction(
+                          () => api.removeTerminalCommand(command),
+                          `Removed: ${command.join(' ')}`,
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Request Run</strong>
+                  <span>Runs create an approval item unless policy blocks them.</span>
+                </div>
+              </div>
+              <form
+                className="run-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void requestTerminalRun()
+                }}
+              >
+                <input
+                  value={terminalRunCommand}
+                  onChange={(event) => setTerminalRunCommand(event.target.value)}
+                  placeholder="pwd"
+                />
+                <input
+                  value={terminalCwd}
+                  onChange={(event) => setTerminalCwd(event.target.value)}
+                  placeholder="workspace-relative cwd"
+                />
+                <button className="button" type="submit" disabled={busy}>Request</button>
+              </form>
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'telegram' ? (
+          <section className="telegram-layout">
+            <div className="panel settings-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Telegram Remote Access</strong>
+                  <span>{telegram?.ready ? 'Ready for allowlisted polling' : 'Needs token, enablement, and an allowlisted user'}</span>
+                </div>
+                <button
+                  className={telegram?.enabled ? 'button button-danger' : 'button'}
+                  type="button"
+                  onClick={() =>
+                    void runAction(
+                      () => (telegram?.enabled ? api.disableTelegram() : api.enableTelegram()),
+                      telegram?.enabled ? 'Telegram disabled.' : 'Telegram enabled.',
+                    )
+                  }
+                >
+                  {telegram?.enabled ? 'Disable' : 'Enable'}
+                </button>
+              </div>
+              <div className="status-grid">
+                <span>Token env</span>
+                <strong>{telegram?.bot_token_env ?? '-'}</strong>
+                <span>Token loaded</span>
+                <strong>{telegram?.bot_token_available ? 'yes' : 'no'}</strong>
+                <span>Allowed users</span>
+                <strong>{telegram?.allowed_user_ids.length ?? 0}</strong>
+              </div>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Token Environment</strong>
+                  <span>Token values are loaded only into the running API process.</span>
+                </div>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void saveTelegramTokenEnv()
+                }}
+              >
+                <input
+                  value={telegramTokenEnv}
+                  onChange={(event) => setTelegramTokenEnv(event.target.value)}
+                  placeholder="DMDAGENT_TELEGRAM_BOT_TOKEN"
+                />
+                <button className="button button-secondary" type="submit">Save Env</button>
+              </form>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void loadTelegramToken()
+                }}
+              >
+                <input
+                  type="password"
+                  value={telegramToken}
+                  onChange={(event) => setTelegramToken(event.target.value)}
+                  placeholder="BotFather token"
+                />
+                <button className="button" type="submit">Load Token</button>
+              </form>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Allowed Users</strong>
+                  <span>Send /id to the bot to discover the numeric user ID.</span>
+                </div>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void allowTelegramUser()
+                }}
+              >
+                <input
+                  value={telegramUserId}
+                  onChange={(event) => setTelegramUserId(event.target.value)}
+                  placeholder="123456789"
+                  inputMode="numeric"
+                />
+                <button className="button" type="submit">Allow User</button>
+              </form>
+              <div className="table-list table-list--compact">
+                {telegram?.allowed_user_ids.length ? null : <p className="empty">No allowed Telegram users.</p>}
+                {telegram?.allowed_user_ids.map((userId) => (
+                  <article className="command-row" key={userId}>
+                    <code>{userId}</code>
+                    <button
+                      className="button button-danger"
+                      type="button"
+                      onClick={() =>
+                        void runAction(
+                          () => api.removeTelegramUser(userId),
+                          `Removed Telegram user: ${userId}`,
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </article>
+                ))}
+              </div>
             </div>
           </section>
         ) : null}

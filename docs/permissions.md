@@ -48,6 +48,9 @@ dmdagent approvals deny <id>
 ```
 
 Approving a request executes that stored request once. Approval does not bypass tool enablement or missing connector permissions.
+In the dashboard, clicking Approve or typing `approve <id>` executes the stored
+request and posts the tool result back into the chat log. Typing `готово` or
+bare `approve` approves the newest pending request.
 
 ## Terminal
 
@@ -74,12 +77,18 @@ dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal run -- git status
 dmdagent approvals approve <id>
+dmdagent terminal auto-approve on
 ```
 
 `terminal.run` is a risk 5 tool. Enabling the terminal policy, enabling the
-tool manifest, and granting `terminal.run` permission still does not execute
-commands automatically. Each request is stored as an approval and executed once
-only after approval.
+tool manifest, and granting `terminal.run` permission still keeps execution
+approval-gated by default. If exact allowlist auto-approve is enabled, only
+commands that exactly match the allowlist can run without creating a new
+approval. Blocked commands, non-allowlisted commands, and unsafe cwd values stay
+blocked.
+
+The web dashboard exposes the same policy state, exact allowlist editing,
+settings, the auto-approve toggle, and run requests through the Terminal view.
 
 ## Cloud Context
 
