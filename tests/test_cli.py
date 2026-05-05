@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from dmdagent4all.cli import main
-from dmdagent4all.config import DEFAULT_CONFIG
+from dmdagent4all.config import DEFAULT_CONFIG, load_config
 
 
 class CliTest(unittest.TestCase):
@@ -45,6 +45,55 @@ class CliTest(unittest.TestCase):
                     os.environ["XDG_DATA_HOME"] = old_home
         self.assertEqual(result, 0)
         self.assertIn("Model mode set to Light Mode", output.getvalue())
+
+    def test_custom_model_command_switches_back_to_ollama_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_home = os.environ.get("XDG_DATA_HOME")
+            os.environ["XDG_DATA_HOME"] = tmp
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    provider_result = main(["models", "provider", "openai"])
+                    model_result = main(["model", "use", "qwen3:8b"])
+                config = load_config()
+            finally:
+                if old_home is None:
+                    os.environ.pop("XDG_DATA_HOME", None)
+                else:
+                    os.environ["XDG_DATA_HOME"] = old_home
+
+        self.assertEqual(provider_result, 0)
+        self.assertEqual(model_result, 0)
+        self.assertEqual(config["llm"]["provider"], "ollama")
+        self.assertEqual(config["llm"]["model"], "qwen3:8b")
+        self.assertEqual(config["llm"]["base_url"], "http://localhost:11434")
+        self.assertIsNone(config["llm"]["api_key_env"])
+
+    def test_provider_command_switches_models_between_openai_and_local(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_home = os.environ.get("XDG_DATA_HOME")
+            os.environ["XDG_DATA_HOME"] = tmp
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    openai_result = main(["models", "provider", "openai"])
+                openai_config = load_config()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    local_result = main(["models", "provider", "ollama"])
+                local_config = load_config()
+            finally:
+                if old_home is None:
+                    os.environ.pop("XDG_DATA_HOME", None)
+                else:
+                    os.environ["XDG_DATA_HOME"] = old_home
+
+        self.assertEqual(openai_result, 0)
+        self.assertEqual(openai_config["llm"]["provider"], "openai")
+        self.assertEqual(openai_config["llm"]["model"], "gpt-4o-mini")
+        self.assertEqual(openai_config["llm"]["api_key_env"], "DMDAGENT_OPENAI_API_KEY")
+        self.assertEqual(local_result, 0)
+        self.assertEqual(local_config["llm"]["provider"], "ollama")
+        self.assertEqual(local_config["llm"]["model"], "qwen3:8b")
+        self.assertEqual(local_config["llm"]["base_url"], "http://localhost:11434")
+        self.assertIsNone(local_config["llm"]["api_key_env"])
 
     def test_ask_alias_prints_friendly_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,7 +136,7 @@ class CliTest(unittest.TestCase):
             try:
                 with (
                     contextlib.redirect_stdout(io.StringIO()) as output,
-                    mock.patch("builtins.input", side_effect=["DMD", "Denis", "1", "1", EOFError]),
+                    mock.patch("builtins.input", side_effect=["DMD", "Test User", "1", "1", EOFError]),
                     mock.patch("dmdagent4all.cli._ensure_ollama", return_value=None),
                 ):
                     result = main(["chat", "--no-ollama"])
@@ -103,7 +152,7 @@ class CliTest(unittest.TestCase):
                     os.environ["XDG_DATA_HOME"] = old_home
         self.assertEqual(result, 0)
         self.assertIn("DMD Terminal Chat", output.getvalue())
-        self.assertIn("User name: Denis", profile)
+        self.assertIn("User name: Test User", profile)
         self.assertIn("Assistant name: DMD", profile)
 
     def test_no_args_opens_terminal_chat(self) -> None:
@@ -146,7 +195,7 @@ class CliTest(unittest.TestCase):
                         "builtins.input",
                         side_effect=[
                             "DMD",
-                            "Denis",
+                            "Test User",
                             "1",
                             "1",
                             "/tool enable calendar.create_event",

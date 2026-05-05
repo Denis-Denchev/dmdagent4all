@@ -8,11 +8,20 @@ from dmdagent4all.llm.base import LLMMessage, LLMProvider
 from dmdagent4all.permissions import ToolManifest, ToolRequest
 
 
-SYSTEM_PROMPT = """You are DMD Agent's fast planner. /no_think
+SYSTEM_PROMPT = """You are DMD Agent's conversational planner. /no_think
 
 Security: you are untrusted. You never access OS, shell, tokens, .env, SSH keys, or browser credentials. You only propose one listed tool call. Backend validates everything.
 
-Use the provided profile and memory context when answering personal questions. If the user asks to remember/save/store a fact, request memory.write; never claim a fact was saved unless you requested memory.write.
+Conversational behavior:
+- Behave like a capable personal assistant, not a rule-based command parser.
+- Use recent_conversation to understand follow-up questions, references like "that/it/това", and what the user is frustrated about.
+- If no tool is needed, answer naturally, with empathy and practical judgment, in the user's language.
+- Do not force exact command wording. Infer intent from natural language when the intent is clear.
+- If the request is ambiguous, ask one short clarifying question instead of pretending you cannot help.
+- Keep answers concise but human. Avoid robotic stock phrases.
+
+Use the provided profile and retrieved memory context when it is relevant. Treat memory as RAG context: answer naturally from it instead of asking the user to repeat facts the backend already supplied.
+If the user asks to remember/save/store a fact, request memory.write; never claim a fact was saved unless you requested memory.write.
 Memory policy:
 - Use long-term memory for stable facts, preferences, identities, projects, addresses, decisions, and anything the user expects to remain until manually deleted.
 - Use short-term memory only for temporary context, current-session summaries, draft task state, or reminders to yourself that should expire. Short-term memory must include memory_scope="short-term" and ttl_hours, normally 24 or 48.
@@ -20,6 +29,11 @@ Memory policy:
 - When creating a new Markdown memory, choose a concise title and a sensible path. Prefer long-term/<topic>/<slug>.md for durable notes and short-term/<slug>.md for temporary notes. You may use path="auto" or omit path if title is present.
 - Sort memory content by topic and keep it useful for future retrieval. Use existing memory context to decide whether to update an existing file or create a new one.
 If memory context already contains enough information, answer directly instead of listing memory files.
+Path and URL policy:
+- Bare Markdown names such as profile.md, preferences.md, README.md, or memory/owner/profile.md are local Markdown/memory paths by default, not web URLs.
+- Use memory.read for local memory paths when the user asks to read, open, show, inspect, or fix a Markdown memory file.
+- Use browser.open only for explicit http:// or https:// URLs, common web domains, or when the user clearly asks to open a website in the browser.
+- If a target could be either a local file and a web URL, prefer the local memory/file interpretation when the surrounding request is about memory, Markdown, project files, or organization.
 If the user asks for a reminder, request reminders.create. Use current time and timezone to compute ISO datetimes.
 For reminders about future events, separate event_at from due_at: event_at is when the event happens, due_at is when the user should be notified.
 Use memory context to enrich reminders when relevant. If memory contains a known address or place for the reminder topic, include location and an action_url such as a Google Maps search URL. Do not invent addresses.
@@ -64,6 +78,7 @@ class LLMPlanner:
         manifests: dict[str, ToolManifest],
         profile: dict[str, str] | None = None,
         memory_context: str = "",
+        conversation_context: str = "",
         enabled_tools: set[str] | frozenset[str] | None = None,
         response_language: str = "auto",
         current_time: str = "",
@@ -82,6 +97,7 @@ class LLMPlanner:
                         manifests=manifests,
                         profile=profile or {},
                         memory_context=memory_context,
+                        conversation_context=conversation_context,
                         enabled_tools=enabled_tools,
                         response_language=response_language,
                         current_time=current_time,
@@ -101,6 +117,7 @@ class LLMPlanner:
         user_message: str,
         profile: dict[str, str] | None = None,
         memory_context: str = "",
+        conversation_context: str = "",
         tool_result: dict[str, Any] | None = None,
         response_language: str = "auto",
         max_tokens: int = 384,
@@ -120,6 +137,7 @@ class LLMPlanner:
                                 "user_name": (profile or {}).get("user_name", ""),
                             },
                             "memory": memory_context,
+                            "recent_conversation": conversation_context,
                             "tool_result": tool_result or {},
                             "user": user_message,
                         },
@@ -202,6 +220,7 @@ def _build_planning_prompt(
     manifests: dict[str, ToolManifest],
     profile: dict[str, str],
     memory_context: str,
+    conversation_context: str,
     enabled_tools: set[str] | frozenset[str] | None,
     response_language: str,
     current_time: str,
@@ -236,6 +255,7 @@ def _build_planning_prompt(
                 "user_name": profile.get("user_name", ""),
             },
             "memory": memory_context,
+            "recent_conversation": conversation_context,
             "tools": tool_rows,
             "user": user_message,
         },

@@ -73,7 +73,7 @@ Operational flow:
 
 ```bash
 dmdagent terminal status
-dmdagent terminal workspace /Users/Apple/PycharmProjects/dmdagent4all
+dmdagent terminal workspace /path/to/dmdagent4all
 dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal run -- git status

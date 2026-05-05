@@ -56,6 +56,7 @@ from dmdagent4all.tools.reminders import (
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str | None = None
 
 
 class MemoryWriteRequest(BaseModel):
@@ -167,7 +168,7 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
-        return asdict(build_agent_core().handle_text(request.message))
+        return asdict(build_agent_core().handle_text(request.message, session_id=request.session_id or "dashboard"))
 
     @app.get("/v1/permissions")
     def permissions() -> dict[str, Any]:
@@ -838,9 +839,13 @@ def _set_model_config(
     model: str,
     planner_model: str,
 ) -> None:
-    config.setdefault("llm", {})["mode"] = mode
-    config["llm"]["model"] = model
-    config["llm"]["planner_model"] = planner_model
+    llm = config.setdefault("llm", {})
+    llm["provider"] = "ollama"
+    llm["mode"] = mode
+    llm["model"] = model
+    llm["planner_model"] = planner_model
+    llm["base_url"] = "http://localhost:11434"
+    llm["api_key_env"] = None
 
 
 def _set_openai_config(config: dict[str, Any], *, model: str) -> None:

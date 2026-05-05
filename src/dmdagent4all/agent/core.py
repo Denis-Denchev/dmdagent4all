@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from dmdagent4all.audit import AuditEvent, AuditStore
+from dmdagent4all.agent.history import ChatHistory
 from dmdagent4all.agent.planner import LLMPlanner, PlannerError
 from dmdagent4all.config import save_config
 from dmdagent4all.memory import MemoryManager
@@ -40,6 +41,7 @@ class AgentCore:
         runtime_context: ToolRuntimeContext,
         audit_store: AuditStore,
         planner: LLMPlanner | None = None,
+        chat_history: ChatHistory | None = None,
     ) -> None:
         self.permission_engine = permission_engine
         self.tool_registry = tool_registry
@@ -48,9 +50,16 @@ class AgentCore:
         self.audit_store = audit_store
         self.planner = planner
         self._cloud_context_approved = permission_context.cloud_context_approved
+        self.chat_history = chat_history or ChatHistory(runtime_context.workspace_root / "chat_history.json")
 
-    def handle_text(self, text: str) -> AgentResponse:
+    def handle_text(self, text: str, *, session_id: str = "default") -> AgentResponse:
         stripped = text.strip()
+        response = self._handle_text(stripped, text, session_id=session_id)
+        self._record_chat_turn(session_id, stripped, response)
+        return response
+
+    def _handle_text(self, stripped: str, text: str, *, session_id: str) -> AgentResponse:
+        conversation_context = self._conversation_context(session_id)
         if stripped == "/tools":
             return self.handle_tool_request(
                 ToolRequest(
@@ -65,7 +74,13 @@ class AgentCore:
         identity_update = _handle_identity_update(stripped, self.runtime_context)
         if identity_update is not None:
             return identity_update
-        llm_reminder_request = self._plan_reminder_request(stripped)
+        memory_organize = _memory_organize_request_from_text(stripped)
+        if memory_organize is not None:
+            return self.handle_tool_request(memory_organize)
+        memory_organize_missing_source = _memory_organize_missing_source_response(stripped)
+        if memory_organize_missing_source is not None:
+            return memory_organize_missing_source
+        llm_reminder_request = self._plan_reminder_request(stripped, session_id=session_id)
         if llm_reminder_request is not None:
             return self.handle_tool_request(llm_reminder_request)
         reminder_request = _reminder_request_from_text(stripped)
@@ -74,9 +89,24 @@ class AgentCore:
         memory_update = _memory_write_request_from_text(stripped, self.runtime_context)
         if memory_update is not None:
             return self.handle_tool_request(memory_update)
-        memory_answer = _answer_memory_recall_question(stripped, self.runtime_context)
+        memory_answer = _answer_memory_recall_question(
+            stripped,
+            self.runtime_context,
+            conversation_context=self.chat_history.format_recent(session_id, limit=6, max_chars=2500),
+        )
         if memory_answer is not None:
+            if self._can_send_private_context_to_llm():
+                synthesized = self._synthesize_memory_recall_response(
+                    stripped,
+                    memory_answer,
+                    conversation_context=conversation_context,
+                )
+                if synthesized is not None:
+                    return synthesized
             return memory_answer
+        clarification = self._answer_clarification_followup(stripped, session_id=session_id)
+        if clarification is not None:
+            return clarification
         browser_request = _browser_request_from_text(stripped)
         if browser_request is not None:
             return self.handle_tool_request(browser_request)
@@ -87,7 +117,7 @@ class AgentCore:
         if routed is not None:
             return self.handle_tool_request(routed)
         fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
-        if fast_answer is not None:
+        if fast_answer is not None and _is_fast_control_answer(stripped):
             return AgentResponse(
                 status="ok",
                 message=fast_answer,
@@ -110,6 +140,12 @@ class AgentCore:
                 )
 
         if self.planner is None:
+            if fast_answer is not None:
+                return AgentResponse(
+                    status="ok",
+                    message=fast_answer,
+                    data={"planner": "deterministic"},
+                )
             return AgentResponse(
                 status="ok",
                 message=(
@@ -120,13 +156,19 @@ class AgentCore:
 
         try:
             llm_config = self.runtime_context.config.get("llm", {})
-            memory_context = _load_memory_context(self.runtime_context)
+            memory_context = _load_memory_context(
+                self.runtime_context,
+                query=text,
+                conversation_context=conversation_context,
+                allow_cloud_context=self._cloud_context_approved,
+            )
             now = datetime.now().astimezone()
             plan = self.planner.plan(
                 user_message=text,
                 manifests=self.tool_registry.manifests,
                 profile=_profile_from_config(self.runtime_context.config),
                 memory_context=memory_context,
+                conversation_context=conversation_context,
                 enabled_tools=_enabled_tools_from_config(
                     self.tool_registry.manifests,
                     self.runtime_context.config,
@@ -134,11 +176,21 @@ class AgentCore:
                 response_language=llm_config.get("response_language", "auto"),
                 current_time=now.isoformat(timespec="seconds"),
                 timezone_name=now.tzname() or "",
-                max_tokens=int(llm_config.get("planner_max_tokens", 192)),
+                max_tokens=max(512, int(llm_config.get("planner_max_tokens", 192))),
                 temperature=float(llm_config.get("planner_temperature", 0.0)),
                 think=bool(llm_config.get("planner_think", False)),
             )
-        except (PlannerError, OSError, RuntimeError) as exc:
+        except Exception as exc:
+            fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
+            if fast_answer is not None:
+                return AgentResponse(
+                    status="ok",
+                    message=fast_answer,
+                    data={"planner": "deterministic", "fallback": "llm_unavailable"},
+                )
+            unavailable_answer = _answer_llm_unavailable(stripped, self.runtime_context.config, exc)
+            if unavailable_answer is not None:
+                return unavailable_answer
             return AgentResponse(
                 status="error",
                 message=f"LLM planner failed: {exc}",
@@ -148,7 +200,11 @@ class AgentCore:
             request = _request_with_original_message(plan.tool_request, stripped)
             tool_response = self.handle_tool_request(request)
             if self._should_synthesize_tool_response(stripped, request, tool_response):
-                return self._synthesize_tool_response(stripped, tool_response)
+                return self._synthesize_tool_response(
+                    stripped,
+                    tool_response,
+                    conversation_context=conversation_context,
+                )
             return tool_response
 
         return AgentResponse(
@@ -217,6 +273,7 @@ class AgentCore:
         tool_response: AgentResponse,
         *,
         allow_cloud_memory: bool = False,
+        conversation_context: str = "",
     ) -> AgentResponse:
         if self.planner is None:
             return tool_response
@@ -229,6 +286,7 @@ class AgentCore:
                     self.runtime_context,
                     allow_cloud_context=allow_cloud_memory,
                 ),
+                conversation_context=conversation_context,
                 tool_result=tool_response.data or {},
                 response_language=llm_config.get("response_language", "auto"),
                 max_tokens=max(256, int(llm_config.get("planner_max_tokens", 192))),
@@ -241,7 +299,42 @@ class AgentCore:
             return tool_response
         return tool_response
 
-    def _plan_reminder_request(self, text: str) -> ToolRequest | None:
+    def _synthesize_memory_recall_response(
+        self,
+        user_message: str,
+        memory_answer: AgentResponse,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse | None:
+        if self.planner is None or not hasattr(self.planner, "answer") or memory_answer.status != "ok":
+            return None
+        try:
+            llm_config = self.runtime_context.config.get("llm", {})
+            answer = self.planner.answer(
+                user_message=user_message,
+                profile=_profile_from_config(self.runtime_context.config),
+                memory_context=_load_memory_context(
+                    self.runtime_context,
+                    allow_cloud_context=self._cloud_context_approved,
+                ),
+                conversation_context=conversation_context,
+                tool_result={
+                    "kind": "memory_recall",
+                    "answer": memory_answer.message,
+                    "data": memory_answer.data or {},
+                },
+                response_language=llm_config.get("response_language", "auto"),
+                max_tokens=max(384, int(llm_config.get("planner_max_tokens", 192))),
+                temperature=0.25,
+                think=bool(llm_config.get("planner_think", False)),
+            )
+            if answer:
+                return AgentResponse(status="ok", message=answer, data={"planner": "llm", "source": "memory_recall"})
+        except (PlannerError, OSError, RuntimeError):
+            return None
+        return None
+
+    def _plan_reminder_request(self, text: str, *, session_id: str = "default") -> ToolRequest | None:
         if self.planner is None or not _is_reminder_creation_text(text):
             return None
         if self.runtime_context.config.get("reminders", {}).get("prefer_llm_parser") is False:
@@ -253,7 +346,13 @@ class AgentCore:
                 user_message=text,
                 manifests=self.tool_registry.manifests,
                 profile=_profile_from_config(self.runtime_context.config),
-                memory_context=_load_memory_context(self.runtime_context),
+                memory_context=_load_memory_context(
+                    self.runtime_context,
+                    query=text,
+                    conversation_context=self._conversation_context(session_id),
+                    allow_cloud_context=self._cloud_context_approved,
+                ),
+                conversation_context=self._conversation_context(session_id),
                 enabled_tools=_enabled_tools_from_config(
                     self.tool_registry.manifests,
                     self.runtime_context.config,
@@ -279,6 +378,39 @@ class AgentCore:
             ToolRequest(tool=request.tool, args=args, reason=request.reason),
             text,
         )
+
+    def _answer_clarification_followup(self, text: str, *, session_id: str = "default") -> AgentResponse | None:
+        if not _is_clarification_followup(text):
+            return None
+        previous = _last_assistant_message(self.chat_history.recent(session_id, limit=8))
+        if previous is None:
+            return None
+        if _looks_bulgarian(text):
+            return AgentResponse(
+                status="ok",
+                message=f"Казано по-просто: {previous}",
+                data={"planner": "deterministic", "source": "recent_conversation"},
+            )
+        return AgentResponse(
+            status="ok",
+            message=f"In simpler terms: {previous}",
+            data={"planner": "deterministic", "source": "recent_conversation"},
+        )
+
+    def _can_send_private_context_to_llm(self) -> bool:
+        return not self.permission_context.cloud_model_active or self._cloud_context_approved
+
+    def _conversation_context(self, session_id: str) -> str:
+        if self.permission_context.cloud_model_active and not self._cloud_context_approved:
+            return ""
+        return self.chat_history.format_recent(session_id, limit=12, max_chars=6000)
+
+    def _record_chat_turn(self, session_id: str, user_message: str, response: AgentResponse) -> None:
+        try:
+            self.chat_history.append(session_id, "user", user_message)
+            self.chat_history.append(session_id, "assistant", _history_text_from_response(response))
+        except (OSError, ValueError):
+            return
 
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
         auto_approved = _is_auto_approved_terminal_request(request, self.runtime_context.config)
@@ -562,6 +694,8 @@ def _reminder_request_from_text(text: str) -> ToolRequest | None:
 
 
 def _is_reminder_creation_text(text: str) -> bool:
+    if _is_bulk_memory_organization_text(text):
+        return False
     normalized = _normalize_for_match(text)
     if normalized in {
         "/reminders",
@@ -972,6 +1106,8 @@ def _parse_amount(value: str) -> int | None:
 
 
 def _browser_request_from_text(text: str) -> ToolRequest | None:
+    if _is_bulk_memory_organization_text(text):
+        return None
     normalized = _normalize_for_match(text)
     if not any(word in normalized for word in {"open", "visit", "отвори", "отвориш"}):
         return None
@@ -989,14 +1125,15 @@ def _extract_urlish_target(text: str) -> str | None:
     lower = text.lower()
     if "google" in lower or "гугъл" in lower:
         return "https://www.google.com"
-    patterns = [
-        r"https?://[^\s]+",
-        r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            return match.group(0).strip(" .,!?:;\"'")
+    explicit_match = re.search(r"https?://[^\s]+", text, flags=re.IGNORECASE)
+    if explicit_match:
+        return explicit_match.group(0).strip(" .,!?:;\"'")
+    domain_match = re.search(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?", text, flags=re.IGNORECASE)
+    if domain_match:
+        candidate = domain_match.group(0).strip(" .,!?:;\"'")
+        if candidate.casefold().endswith(".md"):
+            return None
+        return candidate
     return None
 
 
@@ -1136,16 +1273,110 @@ def _memory_write_request_from_text(
     )
 
 
+def _memory_organize_request_from_text(text: str) -> ToolRequest | None:
+    if not _is_bulk_memory_organization_text(text):
+        return None
+    if not _has_embedded_bulk_memory_source(text):
+        return None
+    source = _extract_bulk_memory_source(text)
+    if len(source.strip()) < 100:
+        return None
+    return ToolRequest(
+        tool="memory.organize_long_term",
+        args={
+            "source_markdown": source,
+            "today": datetime.now().astimezone().date().isoformat(),
+        },
+        reason="User asked to split a large long-term memory Markdown source into modular category files.",
+    )
+
+
+def _is_bulk_memory_organization_text(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    strong_markers = {
+        "# long-term memory",
+        "long-term memory —",
+        "memory/readme.md",
+        "high priority файлове",
+        "high-priority for retrieval",
+        "препоръчителна структура",
+        "разделиш на ясни категории",
+        "модулна long-term memory",
+        "modular long-term memory",
+        "грешка в организирането на memory",
+        "празни категории",
+        "празни лонг търм",
+        "no source notes were found",
+        "source memory content",
+        "не създавай празни категории",
+        "не оставяй",
+        "разпредели съществуващите реални факти",
+    }
+    return any(marker in normalized for marker in strong_markers) and any(
+        marker in normalized
+        for marker in {
+            "markdown",
+            ".md",
+            "memory/",
+            "памет",
+            "memory",
+        }
+    )
+
+
+def _has_embedded_bulk_memory_source(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in {
+            "# Long-Term Memory",
+            "# Long-term Memory",
+            "# long-term Memory",
+            "and this is the knowlage",
+            "and this is the knowledge",
+        }
+    )
+
+
+def _memory_organize_missing_source_response(text: str) -> AgentResponse | None:
+    if not _is_bulk_memory_organization_text(text) or _has_embedded_bulk_memory_source(text):
+        return None
+    return AgentResponse(
+        status="ok",
+        message="Нямам достъп до source memory content. Моля, дай ми го отново.",
+        data={"planner": "deterministic", "missing": "source_memory_content"},
+    )
+
+
+def _extract_bulk_memory_source(text: str) -> str:
+    markers = [
+        "# Long-Term Memory",
+        "# Long-term Memory",
+        "and this is the knowlage",
+        "and this is the knowledge",
+    ]
+    for marker in markers:
+        index = text.find(marker)
+        if index != -1:
+            if marker.startswith("#"):
+                return text[index:]
+            return text[index + len(marker) :].strip()
+    return text
+
+
 def _answer_memory_recall_question(
     text: str,
     runtime_context: ToolRuntimeContext,
+    *,
+    conversation_context: str = "",
 ) -> AgentResponse | None:
-    if not _is_memory_recall_question(text):
-        return None
+    recall_text = _memory_recall_query_text(text, conversation_context)
+    explicit_recall = _is_memory_recall_question(recall_text)
 
     entries = _load_memory_entries(runtime_context)
     bulgarian = _looks_bulgarian(text)
     if not entries:
+        if not explicit_recall:
+            return None
         return AgentResponse(
             status="ok",
             message=(
@@ -1156,12 +1387,45 @@ def _answer_memory_recall_question(
             data={"planner": "deterministic"},
         )
 
-    if _is_broad_memory_recall_question(text):
-        matches = entries[:12]
+    ranked = _rank_memory_entries(recall_text, entries)
+    if not explicit_recall and not _is_likely_memory_lookup_question(recall_text, ranked):
+        return None
+
+    if _is_broad_memory_recall_question(recall_text):
+        matches = _broad_memory_matches(entries)
     else:
-        matches = _rank_memory_entries(text, entries)[:6]
+        if _asks_about_proxmox(recall_text):
+            proxmox_matches = [
+                entry
+                for entry in ranked
+                if any(marker in _normalize_for_match(f"{entry.path} {entry.text}") for marker in {"proxmox", "проксмокс"})
+            ]
+            matches = (proxmox_matches or ranked)[:3]
+        elif _asks_for_port(recall_text):
+            port_matches = [entry for entry in ranked if _memory_entry_contains_port(entry)]
+            subject_terms = _memory_subject_query_terms(recall_text)
+            subject_port_matches = [
+                entry
+                for entry in port_matches
+                if any(term in _normalize_for_match(f"{entry.path} {entry.text}") for term in subject_terms)
+            ]
+            matches = (subject_port_matches or port_matches or ranked)[:4]
+        elif _asks_for_address_or_url(recall_text) and _asks_about_servers(recall_text):
+            access_matches = [entry for entry in ranked if _memory_entry_contains_machine_access_endpoint(entry)]
+            address_matches = [entry for entry in ranked if _memory_entry_contains_address_or_url(entry)]
+            matches = (access_matches or address_matches or ranked)[:3]
+        elif _asks_for_address_or_url(recall_text) or _asks_about_machine_access(recall_text):
+            address_matches = [entry for entry in ranked if _memory_entry_contains_address_or_url(entry)]
+            matches = (address_matches or ranked)[:3]
+        elif _asks_about_servers(recall_text) or _asks_about_models(recall_text):
+            owned_matches = [entry for entry in ranked if _is_relevant_owned_inventory_memory_entry(entry, recall_text)]
+            matches = (owned_matches or ranked)[:3]
+        else:
+            matches = ranked[:6]
 
     if not matches:
+        if not explicit_recall:
+            return None
         return AgentResponse(
             status="ok",
             message=(
@@ -1174,9 +1438,35 @@ def _answer_memory_recall_question(
 
     return AgentResponse(
         status="ok",
-        message=_format_memory_recall_answer(matches, text),
+        message=_format_memory_recall_answer(matches, recall_text),
         data={"planner": "deterministic"},
     )
+
+
+def _memory_recall_query_text(text: str, conversation_context: str) -> str:
+    normalized = _normalize_for_match(text)
+    if not conversation_context.strip():
+        return text
+    if any(
+        marker in normalized
+        for marker in {
+            "на кой адрес",
+            "кой адрес",
+            "адреса",
+            "адресът",
+            "ip",
+            "url",
+            "линк",
+            "link",
+            "машината",
+            "machine",
+            "вляза",
+            "login",
+            "log in",
+        }
+    ):
+        return f"{conversation_context}\nUser: {text}"
+    return text
 
 
 def _load_memory_entries(runtime_context: ToolRuntimeContext) -> list[MemoryEntry]:
@@ -1198,8 +1488,102 @@ def _load_memory_entries(runtime_context: ToolRuntimeContext) -> list[MemoryEntr
     return entries
 
 
+def _broad_memory_matches(entries: list[MemoryEntry], *, max_entries: int = 14) -> list[MemoryEntry]:
+    preferred_paths = [
+        "profile.md",
+        "facts/personal.md",
+        "long-term/facts/computers.md",
+        "owner/profile.md",
+        "owner/motivation.md",
+        "preferences.md",
+        "long-term/facts/personal.md",
+        "long-term/preferences.md",
+        "business/brand.md",
+        "business/positioning.md",
+        "projects/dmd-agent-4-all/overview.md",
+        "projects/dmd-agent-4-all/current-features.md",
+    ]
+    path_limits = {
+        "profile.md": 5,
+        "facts/personal.md": 5,
+        "long-term/facts/computers.md": 3,
+        "owner/profile.md": 4,
+        "owner/motivation.md": 2,
+        "preferences.md": 4,
+        "business/brand.md": 3,
+        "business/positioning.md": 2,
+    }
+    by_path: dict[str, list[MemoryEntry]] = {}
+    for entry in entries:
+        by_path.setdefault(entry.path, []).append(entry)
+
+    selected: list[MemoryEntry] = []
+    seen: set[str] = set()
+
+    def add(entry: MemoryEntry) -> None:
+        if len(selected) >= max_entries:
+            return
+        if _is_broad_memory_noise(entry):
+            return
+        normalized = _normalize_for_match(entry.text)
+        if normalized.startswith("bulgaria / sofia area") and any(
+            _normalize_for_match(selected_entry.text).startswith("location: bulgaria / sofia area")
+            for selected_entry in selected
+        ):
+            return
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        selected.append(entry)
+
+    for path in preferred_paths:
+        per_path = 0
+        for entry in by_path.get(path, []):
+            before = len(selected)
+            add(entry)
+            if len(selected) > before:
+                per_path += 1
+            if per_path >= path_limits.get(path, 2) or len(selected) >= max_entries:
+                break
+
+    if len(selected) < max_entries:
+        for entry in entries:
+            if entry.path == "README.md" or entry.path.startswith(
+                ("assistant-behavior/", "github/", "security/", "owner/preferences.md")
+            ):
+                continue
+            add(entry)
+            if len(selected) >= max_entries:
+                break
+    return selected
+
+
+def _is_broad_memory_noise(entry: MemoryEntry) -> bool:
+    normalized_path = _normalize_for_match(entry.path)
+    normalized = _normalize_for_match(entry.text)
+    if normalized_path == "readme.md":
+        return True
+    if not normalized:
+        return True
+    if normalized.startswith("#") or normalized.startswith("##"):
+        return True
+    if normalized.startswith(("purpose:", "last updated:", "important rules", "notes:", "## ")):
+        return True
+    if normalized in {"location", "domains", "focus areas", "role", "known system"}:
+        return True
+    if normalized in {
+        "memory index",
+        "high priority for retrieval",
+        "high priority files",
+    }:
+        return True
+    if normalized.endswith(".md") and "/" in normalized:
+        return True
+    return False
+
+
 def _memory_content_lines(content: str) -> list[str]:
-    lines: list[str] = []
+    cleaned_lines: list[str] = []
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line:
@@ -1207,7 +1591,14 @@ def _memory_content_lines(content: str) -> list[str]:
         line = re.sub(r"^[-*]\s+", "", line).strip()
         if not line or _is_placeholder_memory_line(line):
             continue
+        cleaned_lines.append(line)
+    lines: list[str] = []
+    for index, line in enumerate(cleaned_lines):
         lines.append(line)
+        if line.endswith(":") and index + 1 < len(cleaned_lines):
+            next_line = cleaned_lines[index + 1]
+            if next_line and not next_line.startswith("#"):
+                lines.append(f"{line} {next_line}")
     if lines:
         return lines
     compact = re.sub(r"\s+", " ", content).strip()
@@ -1242,14 +1633,49 @@ def _rank_memory_entries(text: str, entries: list[MemoryEntry]) -> list[MemoryEn
                 score += 3
             elif len(term) >= 5 and any(token.startswith(term[:5]) for token in _tokenize(haystack)):
                 score += 1
-        if _asks_about_servers(text) and any(marker in haystack for marker in {"server", "servers", "сърв", "lenovo"}):
+        if _asks_about_servers(text) and any(marker in haystack for marker in {"server", "servers", "сърв"}):
             score += 4
-        if _asks_about_models(text) and any(marker in haystack for marker in {"model", "модел", "m700", "lenovo"}):
+            if re.search(r"\b(?:имам|i have|you have)\b", entry.text, flags=re.IGNORECASE):
+                score += 8
+            if any(marker in haystack for marker in {"model", "модел"}):
+                score += 6
+        if _asks_about_models(text) and any(marker in haystack for marker in {"model", "модел"}):
             score += 2
+        if _is_owned_inventory_memory_entry(entry):
+            score += 6
+        if _asks_for_port(text) and _memory_entry_contains_port(entry):
+            score += 12
+        if _asks_about_proxmox(text) and any(marker in haystack for marker in {"proxmox", "проксмокс"}):
+            score += 14
+        if _asks_for_address_or_url(text) and _memory_entry_contains_address_or_url(entry):
+            score += 10
+        if _asks_about_machine_access(text) and any(
+            marker in haystack for marker in {"web ui", "ui", "https://", "http://", "ssh", "tailscale", "lan ip"}
+        ):
+            score += 5
         if score > 0:
             scored.append((score, -index, entry))
     scored.sort(reverse=True)
     return [entry for _, __, entry in scored]
+
+
+def _is_owned_inventory_memory_entry(entry: MemoryEntry) -> bool:
+    path = _normalize_for_match(entry.path)
+    text = entry.text.strip()
+    if path.startswith("long-term/facts/") or path.startswith("facts/"):
+        return True
+    return bool(re.match(r"^(?:аз\s+)?имам\b|^i\s+have\b|^you\s+have\b", text, flags=re.IGNORECASE))
+
+
+def _is_relevant_owned_inventory_memory_entry(entry: MemoryEntry, text: str) -> bool:
+    if not _is_owned_inventory_memory_entry(entry):
+        return False
+    haystack = f"{_normalize_for_match(entry.path)} {_normalize_for_match(entry.text)}"
+    if _asks_about_servers(text):
+        return any(marker in haystack for marker in {"server", "servers", "сърв", "model", "модел"})
+    if _asks_about_models(text):
+        return any(marker in haystack for marker in {"model", "models", "модел", "server", "servers", "сърв"})
+    return True
 
 
 def _memory_query_terms(text: str) -> set[str]:
@@ -1264,33 +1690,80 @@ def _memory_query_terms(text: str) -> set[str]:
         "i",
         "me",
         "my",
+        "it",
+        "that",
+        "was",
+        "where",
         "the",
         "what",
         "which",
         "you",
         "аз",
+        "адрес",
+        "адреса",
+        "адресът",
         "бяха",
+        "беше",
         "вече",
         "да",
+        "е",
         "за",
         "знам",
         "знаеш",
         "имам",
         "какви",
         "какво",
+        "кажи",
         "казах",
+        "кой",
+        "коя",
+        "къде",
         "което",
+        "машина",
+        "машината",
         "ми",
         "ме",
+        "на",
         "моля",
         "напомни",
         "помниш",
         "съм",
         "ти",
     }
-    terms = {token for token in _tokenize(_normalize_for_match(text)) if token not in stopwords}
+    normalized = _normalize_for_match(text)
+    all_tokens = set(_tokenize(normalized))
+    terms = {token for token in all_tokens if token not in stopwords and len(token) >= 2}
     aliases: set[str] = set()
-    for term in terms:
+    if any(marker in normalized for marker in {"ай пи", "айпи", "ай пито"}):
+        aliases.update({"ip", "lan", "tailscale", "адрес"})
+    for term in all_tokens:
+        service_aliases = {
+            "имич": "immich",
+            "иммич": "immich",
+            "хоумлаб": "homelab",
+            "хомелаб": "homelab",
+            "графана": "grafana",
+            "адгард": "adguard",
+            "адгуард": "adguard",
+            "плекс": "plex",
+            "пейпърлес": "paperless",
+            "прометеус": "prometheus",
+            "тейлскейл": "tailscale",
+            "клаудфлеър": "cloudflare",
+            "основенпродукт": "primary-product",
+        }
+        if term in service_aliases:
+            aliases.add(service_aliases[term])
+        if term in {"proxmox", "проксмокс", "prox"} or term.startswith("проксм"):
+            aliases.update({"proxmox", "проксмокс"})
+        if term in {"port", "ports"} or term.startswith("порт"):
+            aliases.update({"port", "ports", "порт"})
+        if term in {"address", "url", "link", "линк"} or term.startswith("адрес"):
+            aliases.update({"address", "url", "link", "адрес", "https", "http"})
+        if term in {"ip", "айпи", "ип"}:
+            aliases.update({"ip", "lan", "tailscale", "адрес"})
+        if term in {"machine"} or term.startswith("машин"):
+            aliases.update({"machine", "машина", "server", "servers", "сърв"})
         if term.startswith("сърв"):
             aliases.update({"сърв", "server", "servers"})
         if term in {"server", "servers"}:
@@ -1308,6 +1781,14 @@ def _tokenize(text: str) -> list[str]:
 
 def _format_memory_recall_answer(matches: list[MemoryEntry], text: str) -> str:
     bulgarian = _looks_bulgarian(text)
+    if _is_broad_memory_recall_question(text):
+        return _format_broad_memory_answer(matches, bulgarian=bulgarian)
+    port_answer = _format_port_answer(matches, text, bulgarian=bulgarian)
+    if port_answer and _asks_for_port(text):
+        return port_answer
+    proxmox_answer = _format_proxmox_access_answer(matches, bulgarian=bulgarian)
+    if proxmox_answer and (_asks_about_proxmox(text) or _asks_for_address_or_url(text) or _asks_about_machine_access(text)):
+        return proxmox_answer
     facts = [_memory_fact_for_user(entry.text, bulgarian=bulgarian) for entry in matches]
     if len(facts) == 1 and not _is_broad_memory_recall_question(text):
         return facts[0]
@@ -1317,6 +1798,128 @@ def _format_memory_recall_answer(matches: list[MemoryEntry], text: str) -> str:
         else "Here is what I have in local long-term memory:"
     )
     return "\n".join([prefix, *[f"- {fact}" for fact in facts]])
+
+
+def _format_broad_memory_answer(matches: list[MemoryEntry], *, bulgarian: bool) -> str:
+    prefix = (
+        "В локалната long-term memory знам това за теб:"
+        if bulgarian
+        else "Here is what I know about you from local long-term memory:"
+    )
+    facts: list[str] = []
+    seen: set[str] = set()
+    for entry in matches:
+        fact = _compact_broad_memory_fact(_memory_fact_for_user(entry.text, bulgarian=bulgarian))
+        normalized = _normalize_for_match(fact[:180])
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        facts.append(fact)
+        if len(facts) >= 14:
+            break
+    if not facts:
+        return (
+            "Имам memory файлове, но не намирам полезни лични факти в тях още."
+            if bulgarian
+            else "I have memory files, but I do not find useful personal facts in them yet."
+        )
+    return "\n".join([prefix, *[f"- {fact}" for fact in facts]])
+
+
+def _compact_broad_memory_fact(fact: str, *, max_chars: int = 360) -> str:
+    compact = " ".join(fact.split()).strip()
+    if len(compact) <= max_chars:
+        return compact
+    sentences = re.split(r"(?<=[.!?])\s+", compact)
+    selected: list[str] = []
+    length = 0
+    for sentence in sentences:
+        if not sentence or sentence.startswith("##"):
+            continue
+        if length + len(sentence) + 1 > max_chars:
+            break
+        selected.append(sentence)
+        length += len(sentence) + 1
+    if selected:
+        return " ".join(selected).rstrip(" .") + "."
+    return compact[:max_chars].rstrip(" ,.;") + "..."
+
+
+def _format_port_answer(matches: list[MemoryEntry], text: str, *, bulgarian: bool) -> str | None:
+    combined = "\n".join(entry.text for entry in matches)
+    port_match = re.search(r"\b(?:port|ports|порт)[^0-9]{0,80}([0-9]{2,5})\b", combined, flags=re.IGNORECASE)
+    if port_match is None:
+        for number in re.findall(r"\b([0-9]{2,5})\b", combined):
+            value = int(number)
+            if value < 1900 or value > 2100:
+                port_match = re.match(r".*", number)
+                break
+    if port_match is None:
+        return None
+    port = port_match.group(1) if port_match.lastindex else port_match.group(0)
+    subject = _memory_subject_label(matches, text)
+    if bulgarian:
+        return f"{subject} е на порт {port}."
+    return f"{subject} is on port {port}."
+
+
+def _memory_subject_label(matches: list[MemoryEntry], text: str) -> str:
+    normalized = _normalize_for_match(text)
+    labels = {
+        "immich": "Immich",
+        "имич": "Immich",
+        "иммич": "Immich",
+        "homelab": "homelab",
+        "хоумлаб": "homelab",
+        "хомелаб": "homelab",
+        "grafana": "Grafana",
+        "графана": "Grafana",
+        "adguard": "AdGuard",
+        "адгард": "AdGuard",
+        "адгуард": "AdGuard",
+        "plex": "Plex",
+        "плекс": "Plex",
+        "paperless": "Paperless",
+        "пейпърлес": "Paperless",
+        "proxmox": "Proxmox",
+        "проксмокс": "Proxmox",
+    }
+    for marker, label in labels.items():
+        if marker in normalized:
+            return label
+    for entry in matches:
+        stem = entry.path.rsplit("/", 1)[-1].removesuffix(".md")
+        if stem and stem not in {"overview", "services", "commands", "security", "networking"}:
+            return stem.replace("-", " ").title()
+    return "Това" if _looks_bulgarian(text) else "That"
+
+
+def _format_proxmox_access_answer(matches: list[MemoryEntry], *, bulgarian: bool) -> str | None:
+    combined = "\n".join(entry.text for entry in matches)
+    url_match = re.search(r"https?://[^\s,)]+", combined)
+    lan_match = re.search(r"\bLAN IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", combined, flags=re.IGNORECASE)
+    tailscale_match = re.search(r"\bTailscale IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", combined, flags=re.IGNORECASE)
+    if not url_match and not lan_match and not tailscale_match:
+        return None
+    if bulgarian:
+        lines = []
+        if url_match:
+            lines.append(f"Proxmox web UI адресът ти е: {url_match.group(0)}")
+        if lan_match:
+            lines.append(f"LAN IP на машината: {lan_match.group(1)}")
+        if tailscale_match:
+            lines.append(f"Tailscale IP: {tailscale_match.group(1)}")
+        lines.append("Отваря се през браузър; ако не зареди, трябва да си в LAN/VPN мрежата или през Tailscale.")
+        return "\n".join(lines)
+    lines = []
+    if url_match:
+        lines.append(f"Your Proxmox web UI address is: {url_match.group(0)}")
+    if lan_match:
+        lines.append(f"Machine LAN IP: {lan_match.group(1)}")
+    if tailscale_match:
+        lines.append(f"Tailscale IP: {tailscale_match.group(1)}")
+    lines.append("Open it in a browser; if it does not load, connect through LAN/VPN or Tailscale.")
+    return "\n".join(lines)
 
 
 def _memory_fact_for_user(line: str, *, bulgarian: bool) -> str:
@@ -1352,10 +1955,22 @@ def _is_memory_recall_question(text: str) -> bool:
         "what have i told you",
         "what do you remember",
         "remind me what",
+        "use long term memo",
+        "long term memo",
+        "long-term memory",
         "какви сървъри имам",
         "какви модели",
+        "имаш инфо в long term memo",
+        "long term memo",
+        "дългосрочната памет",
+        "локалната memory",
         "какво съм ти казал",
         "какво помниш",
+        "не помня как",
+        "на кой адрес",
+        "кой адрес",
+        "къде беше",
+        "адреса на машината",
         "напомни ми какви",
         "напомни ми какво",
     }
@@ -1363,6 +1978,7 @@ def _is_memory_recall_question(text: str) -> bool:
         return True
     return bool(re.search(r"\b(?:what|which)\b.+\b(?:do i have|are mine)\b", normalized)) or bool(
         re.search(r"\bкакви\b.+\bимам\b", normalized)
+        or re.search(r"\b(?:къде|кой|какъв|как)\b.+\b(?:адрес|ip|url|линк|вляза|машин)", normalized)
     )
 
 
@@ -1384,12 +2000,120 @@ def _is_broad_memory_recall_question(text: str) -> bool:
 
 def _asks_about_servers(text: str) -> bool:
     normalized = _normalize_for_match(text)
-    return any(marker in normalized for marker in {"server", "servers", "сърв"})
+    return any(marker in normalized for marker in {"server", "servers", "сърв", "машина", "машината", "machine"})
 
 
 def _asks_about_models(text: str) -> bool:
     normalized = _normalize_for_match(text)
     return any(marker in normalized for marker in {"model", "models", "модел"})
+
+
+def _asks_about_proxmox(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(marker in normalized for marker in {"proxmox", "проксмокс", "proxm"})
+
+
+def _asks_for_port(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(marker in normalized for marker in {"port", "ports", "порт", "порта", "портът"})
+
+
+def _asks_for_address_or_url(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {"адрес", "address", "url", "линк", "link", "ip", "айпи", "ай пи", "ай пито", "https", "http"}
+    )
+
+
+def _asks_about_machine_access(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(marker in normalized for marker in {"вляза", "login", "log in", "достъп", "access", "web ui", "ui"})
+
+
+def _memory_entry_contains_address_or_url(entry: MemoryEntry) -> bool:
+    haystack = f"{entry.path}\n{entry.text}".casefold()
+    return bool(re.search(r"https?://|(?:lan|tailscale)\s+ip:|\bip:\s*\d", haystack, flags=re.IGNORECASE))
+
+
+def _memory_entry_contains_port(entry: MemoryEntry) -> bool:
+    haystack = f"{entry.path}\n{entry.text}".casefold()
+    return bool(re.search(r"\b(?:port|ports|порт)\b|:\s*[0-9]{2,5}\b|\b[0-9]{2,5}\s+[a-zа-я]", haystack))
+
+
+def _memory_entry_contains_machine_access_endpoint(entry: MemoryEntry) -> bool:
+    haystack = f"{entry.path}\n{entry.text}".casefold()
+    if re.search(r"(?:lan|tailscale)\s+ip:|\bip:\s*\d", haystack, flags=re.IGNORECASE):
+        return True
+    return bool(re.search(r"https?://[^\s)]*(?::\d{2,5}|proxmox|homelab|tailscale|192\.168\.|10\.)", haystack))
+
+
+def _memory_subject_query_terms(text: str) -> set[str]:
+    normalized = _normalize_for_match(text)
+    groups = [
+        ({"immich", "имич", "иммич"}, "immich"),
+        ({"homelab", "хоумлаб", "хомелаб"}, "homelab"),
+        ({"grafana", "графана"}, "grafana"),
+        ({"adguard", "адгард", "адгуард"}, "adguard"),
+        ({"plex", "плекс"}, "plex"),
+        ({"paperless", "пейпърлес"}, "paperless"),
+        ({"proxmox", "проксмокс"}, "proxmox"),
+        ({"prometheus", "прометеус"}, "prometheus"),
+    ]
+    terms: set[str] = set()
+    for markers, canonical in groups:
+        if any(marker in normalized for marker in markers):
+            terms.add(canonical)
+    return terms
+
+
+def _is_likely_memory_lookup_question(text: str, ranked: list[MemoryEntry]) -> bool:
+    if not ranked:
+        return False
+    normalized = _normalize_for_match(text)
+    direct_lookup_markers = {
+        "порт",
+        "порта",
+        "портът",
+        "адрес",
+        "айпи",
+        "ай пи",
+        "ай пито",
+        "ip",
+        "url",
+        "линк",
+        "port",
+        "address",
+    }
+    if any(marker in normalized for marker in direct_lookup_markers):
+        return True
+    question_markers = {"кой", "коя", "кое", "къде", "какъв", "каква", "where", "which"}
+    entity_markers = {
+        "proxmox",
+        "проксмокс",
+        "homelab",
+        "хоумлаб",
+        "хомелаб",
+        "immich",
+        "имич",
+        "иммич",
+        "grafana",
+        "графана",
+        "adguard",
+        "адгард",
+        "адгуард",
+        "plex",
+        "плекс",
+        "paperless",
+        "пейпърлес",
+        "машина",
+        "machine",
+        "server",
+        "сърв",
+    }
+    return any(marker in normalized for marker in question_markers) and any(
+        marker in normalized for marker in entity_markers
+    )
 
 
 def _wants_new_long_term_memory_file(text: str) -> bool:
@@ -1508,6 +2232,8 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
             "при cloud модел, да записвам спомени след approval, да работя с Telegram във фон и да минавам "
             "рисковите действия през permission engine. Browser и Calendar още не са реално имплементирани."
         )
+    if _looks_bulgarian(text) and "какво си ти" in normalized:
+        return f"Аз съм {agent_name}. Работя локално и пазя действията зад permission engine."
     if normalized in {"кой модел си ти", "какъв модел си", "кой модел използваш"}:
         llm = config.get("llm", {})
         return f"В момента съм настроен да използвам {llm.get('provider', '-')} модел: {llm.get('model', '-')}."
@@ -1561,6 +2287,141 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
             "disabled until explicitly configured."
         )
     return None
+
+
+def _answer_llm_unavailable(text: str, config: dict[str, Any], exc: Exception) -> AgentResponse | None:
+    if not _is_missing_llm_api_key_error(exc) and not _is_local_llm_connection_error(exc):
+        return None
+    normalized = _normalize_for_match(text)
+    bulgarian = _looks_bulgarian(text)
+    llm = config.get("llm", {})
+    provider = str(llm.get("provider") or "LLM")
+    if _is_acknowledgement_text(normalized):
+        return AgentResponse(
+            status="ok",
+            message=(
+                "Ясно, маняк. Кажи какво искаш да направим."
+                if bulgarian
+                else "Got it. Tell me what you want to do next."
+            ),
+            data={"planner": "deterministic", "fallback": "llm_unavailable"},
+        )
+    if _is_missing_llm_api_key_error(exc):
+        env_name = _extract_missing_api_key_env(str(exc))
+        if bulgarian:
+            message = (
+                f"{provider} моделът е избран, но API key не е зареден в текущия процес"
+                f"{f' ({env_name})' if env_name else ''}. "
+                "Локалната memory/tools част още работи; добави ключа от OpenAI таба или превключи към локален модел."
+            )
+        else:
+            message = (
+                f"The {provider} model is selected, but its API key is not loaded in this running process"
+                f"{f' ({env_name})' if env_name else ''}. "
+                "Local memory/tools still work; add the key in the OpenAI tab or switch to a local model."
+            )
+        return AgentResponse(
+            status="ok",
+            message=message,
+            data={"planner": "deterministic", "fallback": "missing_api_key"},
+        )
+    return AgentResponse(
+        status="ok",
+        message=(
+            f"Не мога да се свържа с {provider} модела в момента. Локалните memory/tools fallback-и още работят."
+            if bulgarian
+            else f"I cannot connect to the {provider} model right now. Local memory/tools fallbacks still work."
+        ),
+        data={"planner": "deterministic", "fallback": "llm_unavailable"},
+    )
+
+
+def _is_acknowledgement_text(normalized: str) -> bool:
+    return normalized in {
+        "i know",
+        "i know that",
+        "i know this",
+        "ok",
+        "okay",
+        "got it",
+        "gotcha",
+        "yes",
+        "yep",
+        "yeah",
+        "thanks",
+        "thank you",
+        "sure",
+        "cool",
+        "fine",
+        "разбрах",
+        "ясно",
+        "ок",
+        "окей",
+        "да",
+        "добре",
+        "мерси",
+        "благодаря",
+    }
+
+
+def _is_missing_llm_api_key_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return "requires an api key" in text or "api key" in text and "requires" in text
+
+
+def _is_local_llm_connection_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return "cannot connect" in text or "connection refused" in text
+
+
+def _extract_missing_api_key_env(message: str) -> str:
+    match = re.search(r"\b([A-Z][A-Z0-9_]*API_KEY[A-Z0-9_]*)\b", message)
+    return match.group(1) if match else ""
+
+
+def _is_fast_control_answer(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    exact = {
+        "help",
+        "/help",
+        "hello",
+        "hi",
+        "hey",
+        "how are you",
+        "как си",
+        "здравей",
+        "здрасти",
+        "who are you",
+        "what is your name",
+        "what's your name",
+        "your name?",
+        "кой си",
+        "коя си",
+        "как се казваш",
+        "името ти",
+        "who am i",
+        "what is my name",
+        "what's my name",
+        "my name?",
+        "кой съм аз",
+        "коя съм аз",
+        "аз кой съм",
+        "аз коя съм",
+        "как се казвам",
+        "името ми",
+        "кой модел си ти",
+        "какъв модел си",
+        "кой модел използваш",
+        "какво можеш да правиш",
+        "какво можеш",
+        "какво можеш ти",
+    }
+    return (
+        normalized in exact
+        or "what can you do" in normalized
+        or _is_open_terminal_window_request(normalized)
+        or (_looks_bulgarian(text) and "какво си ти" in normalized)
+    )
 
 
 def _is_open_terminal_window_request(normalized: str) -> bool:
@@ -1766,12 +2627,21 @@ def _load_memory_context(
     *,
     max_chars: int = 12000,
     allow_cloud_context: bool = False,
+    query: str = "",
+    conversation_context: str = "",
 ) -> str:
     if (
         runtime_context.config.get("llm", {}).get("provider") not in {"ollama", "local"}
         and not allow_cloud_context
     ):
         return ""
+    if query.strip():
+        return _load_relevant_memory_context(
+            runtime_context,
+            query=query,
+            conversation_context=conversation_context,
+            max_chars=max_chars,
+        )
     manager = MemoryManager(runtime_context.memory_root)
     manager.bootstrap()
     chunks: list[str] = []
@@ -1793,6 +2663,38 @@ def _load_memory_context(
     return "\n\n".join(chunks)
 
 
+def _load_relevant_memory_context(
+    runtime_context: ToolRuntimeContext,
+    *,
+    query: str,
+    conversation_context: str = "",
+    max_chars: int = 12000,
+    max_entries: int = 14,
+) -> str:
+    query_text = _memory_recall_query_text(query, conversation_context)
+    ranked = _rank_memory_entries(query_text, _load_memory_entries(runtime_context))
+    if not ranked:
+        return ""
+    remaining = max_chars
+    chunks: list[str] = []
+    used: set[tuple[str, str]] = set()
+    for entry in ranked[:max_entries]:
+        key = (entry.path, entry.text)
+        if key in used:
+            continue
+        used.add(key)
+        chunk = f"[{entry.path}]\n{entry.text}"
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining].rstrip()
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk) + 2
+        if remaining <= 0:
+            break
+    return "\n\n".join(chunks)
+
+
 def _strip_frontmatter(markdown: str) -> str:
     if not markdown.startswith("---\n"):
         return markdown
@@ -1805,6 +2707,8 @@ def _strip_frontmatter(markdown: str) -> str:
 def _approval_message(request: ToolRequest, default: str) -> str:
     if request.tool == "memory.write":
         return "I can save that to memory after you approve it."
+    if request.tool == "memory.organize_long_term":
+        return "I can split that long-term memory into modular Markdown files after you approve it."
     if request.tool == "reminders.create":
         return "I can create that local reminder after you approve it."
     return default
@@ -1822,6 +2726,8 @@ def _denial_message(request: ToolRequest, default: str) -> str:
 def _tool_success_message(request: ToolRequest) -> str:
     if request.tool == "memory.write":
         return "Saved to memory."
+    if request.tool == "memory.organize_long_term":
+        return "Long-term memory organized into modular Markdown files."
     if request.tool == "reminders.create":
         return "Reminder saved. I will notify you in Telegram when it is due if Telegram is configured."
     if request.tool == "reminders.complete":
@@ -1829,6 +2735,59 @@ def _tool_success_message(request: ToolRequest) -> str:
     if request.tool == "calendar.create_event":
         return "Saved to local calendar store. Active reminder notifications are not implemented yet."
     return "Tool executed."
+
+
+def _history_text_from_response(response: AgentResponse) -> str:
+    text = response.message.strip()
+    data = response.data or {}
+    if response.status == "approval_required":
+        tool = data.get("tool")
+        approval_id = data.get("approval_id")
+        suffix = f" approval_id={approval_id}" if approval_id is not None else ""
+        return f"{text} [approval_required tool={tool}{suffix}]".strip()
+    if response.status == "ok" and isinstance(data, dict):
+        stdout = str(data.get("stdout") or "").strip()
+        if stdout:
+            return f"{text}\n{stdout[:1200]}"
+        command = data.get("command")
+        if command:
+            return f"{text} command={command}"
+    return text or response.status
+
+
+def _is_clarification_followup(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    if len(normalized) > 80:
+        return False
+    return any(
+        marker in normalized
+        for marker in {
+            "не разбрах",
+            "не разбах",
+            "не схванах",
+            "не разбрах това",
+            "какво имаш предвид",
+            "обясни по просто",
+            "обясни по-просто",
+            "i don't understand",
+            "i didnt understand",
+            "i didn't get it",
+            "explain simpler",
+        }
+    )
+
+
+def _last_assistant_message(turns: list[Any]) -> str | None:
+    for turn in reversed(turns):
+        if getattr(turn, "role", "") != "assistant":
+            continue
+        content = " ".join(str(getattr(turn, "content", "")).split()).strip()
+        if not content:
+            continue
+        if len(content) > 700:
+            content = content[:700].rstrip() + "..."
+        return content
+    return None
 
 
 def _is_unimplemented_browser_request(normalized: str) -> bool:

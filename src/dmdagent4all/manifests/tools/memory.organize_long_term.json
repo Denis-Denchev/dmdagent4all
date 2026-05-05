@@ -1,0 +1,13 @@
+{
+  "name": "memory.organize_long_term",
+  "description": "Split an approved large long-term memory Markdown source into modular category files.",
+  "risk": 2,
+  "permissions": [],
+  "args_schema": {
+    "source_markdown": "large Markdown source to organize; secrets are redacted before writing",
+    "today": "optional YYYY-MM-DD last-updated date"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

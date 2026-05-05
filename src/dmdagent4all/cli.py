@@ -791,11 +791,13 @@ def command_models(args: argparse.Namespace) -> int:
         return _set_model_name(args.model, pull=bool(args.pull))
 
     if args.models_command == "provider":
-        llm = config.setdefault("llm", {})
         provider = str(args.provider)
-        llm["provider"] = provider
-        llm["base_url"] = args.base_url or _default_provider_base_url(provider)
-        llm["api_key_env"] = args.api_key_env or _default_provider_api_key_env(provider)
+        llm = _set_provider_config(
+            config,
+            provider=provider,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+        )
         save_config(config, config_path)
         print(f"Provider set to {provider}.")
         print(f"Base URL: {llm['base_url']}")
@@ -837,9 +839,13 @@ def _set_model_name(model: str, *, pull: bool = False) -> int:
     paths.ensure()
     config_path = write_default_config(paths.config)
     config = load_config(config_path)
-    config.setdefault("llm", {})["model"] = model
-    config["llm"]["planner_model"] = model
-    config["llm"]["mode"] = "custom"
+    llm = config.setdefault("llm", {})
+    llm["provider"] = "ollama"
+    llm["model"] = model
+    llm["planner_model"] = model
+    llm["mode"] = "custom"
+    llm["base_url"] = "http://localhost:11434"
+    llm["api_key_env"] = None
     save_config(config, config_path)
     print(f"Model set to {model}.")
     print(f"Planner model set to {model}.")
@@ -847,6 +853,38 @@ def _set_model_name(model: str, *, pull: bool = False) -> int:
         return _pull_ollama_model(model)
     _print_model_hint(config["llm"])
     return 0
+
+
+def _set_provider_config(
+    config: dict[str, Any],
+    *,
+    provider: str,
+    base_url: str | None = None,
+    api_key_env: str | None = None,
+) -> dict[str, Any]:
+    llm = config.setdefault("llm", {})
+    previous_model = str(llm.get("model") or "").strip()
+    llm["provider"] = provider
+    llm["base_url"] = base_url or _default_provider_base_url(provider)
+    llm["api_key_env"] = api_key_env or _default_provider_api_key_env(provider)
+
+    if provider in {"ollama", "local"}:
+        model = previous_model if previous_model and not _looks_like_cloud_model(previous_model) else "qwen3:8b"
+        llm["mode"] = "fast" if model == "qwen3:8b" else "custom"
+        llm["model"] = model
+        llm["planner_model"] = model
+        llm["api_key_env"] = None
+    elif provider == "openai":
+        model = previous_model if _looks_like_openai_chat_model(previous_model) else "gpt-4o-mini"
+        llm["mode"] = "openai"
+        llm["model"] = model
+        llm["planner_model"] = model
+    else:
+        llm["mode"] = provider
+        if not previous_model:
+            llm["model"] = provider
+            llm["planner_model"] = provider
+    return llm
 
 
 def command_tools(args: argparse.Namespace) -> int:
@@ -2200,6 +2238,16 @@ def _default_provider_api_key_env(provider: str) -> str | None:
     if provider in {"ollama", "local", "lmstudio", "vllm"}:
         return None
     return "DMDAGENT_OPENAI_COMPATIBLE_API_KEY"
+
+
+def _looks_like_openai_chat_model(model: str) -> bool:
+    normalized = model.lower()
+    return normalized.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4"))
+
+
+def _looks_like_cloud_model(model: str) -> bool:
+    normalized = model.lower()
+    return _looks_like_openai_chat_model(normalized) or "/" in normalized
 
 
 def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:

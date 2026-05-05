@@ -27,6 +27,15 @@ class ExplodingPlanner:
         raise AssertionError("planner should not be called")
 
 
+class FailingPlanner:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def plan(self, **kwargs) -> PlanResult:
+        del kwargs
+        raise self.exc
+
+
 class AnsweringPlanner(FakePlanner):
     def __init__(self, result: PlanResult, answer: str) -> None:
         super().__init__(result)
@@ -35,6 +44,16 @@ class AnsweringPlanner(FakePlanner):
     def answer(self, **kwargs) -> str:
         del kwargs
         return self.answer_text
+
+
+class RecordingPlanner:
+    def __init__(self, answer: str = "noted") -> None:
+        self.answer = answer
+        self.calls: list[dict] = []
+
+    def plan(self, **kwargs) -> PlanResult:
+        self.calls.append(kwargs)
+        return PlanResult(final_message=self.answer)
 
 
 class AgentCoreTest(unittest.TestCase):
@@ -47,6 +66,146 @@ class AgentCoreTest(unittest.TestCase):
             response = core.handle_text("tell me one short sentence")
             self.assertEqual(response.status, "ok")
             self.assertEqual(response.message, "Hello from local model")
+
+    def test_recent_conversation_is_passed_to_local_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = RecordingPlanner(answer="разбрах")
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            core.handle_text("Говорим за настройката на memory organizer", session_id="test")
+            core.handle_text("Какво казах преди малко?", session_id="test")
+
+            self.assertGreaterEqual(len(planner.calls), 2)
+            self.assertIn("Говорим за настройката", planner.calls[1]["conversation_context"])
+            self.assertIn("Assistant: разбрах", planner.calls[1]["conversation_context"])
+
+    def test_cloud_planner_does_not_receive_chat_history_without_context_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            core.handle_text("private previous message", session_id="cloud")
+            core.handle_text("what did I just say?", session_id="cloud")
+
+            self.assertEqual(planner.calls[1]["conversation_context"], "")
+
+    def test_missing_openai_key_acknowledgement_falls_back_without_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(
+                Path(tmp),
+                FailingPlanner(RuntimeError("openai requires an API key in DMDAGENT_OPENAI_API_KEY.")),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            response = core.handle_text("i know that")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Got it", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic", "fallback": "llm_unavailable"})
+
+    def test_missing_openai_key_returns_actionable_message_instead_of_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(
+                Path(tmp),
+                FailingPlanner(RuntimeError("openai requires an API key in DMDAGENT_OPENAI_API_KEY.")),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            response = core.handle_text("summarize my current projects")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("API key is not loaded", response.message)
+            self.assertIn("DMDAGENT_OPENAI_API_KEY", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic", "fallback": "missing_api_key"})
+
+    def test_local_planner_receives_retrieved_memory_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "README.md",
+                "\n".join(
+                    [
+                        "`homelab/homelab-primary.md` — Current primary server role, IPs, paths, services and ports.",
+                        "`services/adguard.md` — AdGuard container, config path, ports and DNS exposure rules.",
+                    ]
+                ),
+                metadata={"type": "memory_index", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "services/immich.md",
+                "\n".join(
+                    [
+                        "# Immich",
+                        "Important Immich lesson:",
+                        "- Safe update pattern: cd ~/docker-data/immich && docker compose pull && docker compose up -d",
+                    ]
+                ),
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            planner = RecordingPlanner(answer="готово")
+            core = _build_core(
+                root,
+                planner,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Направи ми кратък план за Immich update")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("[services/immich.md]", planner.calls[0]["memory_context"])
+            self.assertIn("docker compose pull", planner.calls[0]["memory_context"])
+
+    def test_cloud_planner_gets_no_retrieved_memory_without_context_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/immich.md",
+                "Safe update pattern: cd ~/docker-data/immich && docker compose pull && docker compose up -d",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                root,
+                planner,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            core.handle_text("Направи ми кратък план за Immich update")
+
+            self.assertEqual(planner.calls[0]["memory_context"], "")
+
+    def test_cloud_planner_receives_retrieved_memory_after_context_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/immich.md",
+                "Safe update pattern: cd ~/docker-data/immich && docker compose pull && docker compose up -d",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                root,
+                planner,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True, cloud_context_approved=True),
+            )
+
+            core.handle_text("Направи ми кратък план за Immich update")
+
+            self.assertIn("[services/immich.md]", planner.calls[0]["memory_context"])
+            self.assertIn("docker compose pull", planner.calls[0]["memory_context"])
 
     def test_planner_tool_request_runs_through_permission_engine(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,7 +263,7 @@ class AgentCoreTest(unittest.TestCase):
                     "llm": {"response_language": "auto"},
                     "setup": {
                         "agent_name": "jarvis",
-                        "user_name": "Denis",
+                        "user_name": "Test User",
                         "preferred_language": "auto",
                     },
                 },
@@ -113,7 +272,7 @@ class AgentCoreTest(unittest.TestCase):
             who_am_i = core.handle_text("who am i")
             self.assertEqual(who_are_you.status, "ok")
             self.assertIn("jarvis", who_are_you.message)
-            self.assertEqual(who_am_i.message, "You are Denis.")
+            self.assertEqual(who_am_i.message, "You are Test User.")
 
     def test_identity_changes_update_config_and_memory_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,15 +288,15 @@ class AgentCoreTest(unittest.TestCase):
             core = _build_core(root, ExplodingPlanner(), config=config)
 
             agent_response = core.handle_text("call yourself Jarvis")
-            user_response = core.handle_text("my name is Denis")
+            user_response = core.handle_text("my name is Test User")
 
             self.assertEqual(agent_response.status, "ok")
             self.assertEqual(user_response.status, "ok")
             self.assertEqual(config["setup"]["agent_name"], "Jarvis")
-            self.assertEqual(config["setup"]["user_name"], "Denis")
+            self.assertEqual(config["setup"]["user_name"], "Test User")
             profile = (root / "memory" / "long-term" / "profile.md").read_text(encoding="utf-8")
             self.assertIn("Assistant name: Jarvis", profile)
-            self.assertIn("User name: Denis", profile)
+            self.assertIn("User name: Test User", profile)
 
     def test_short_im_name_phrase_updates_identity_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,10 +311,10 @@ class AgentCoreTest(unittest.TestCase):
             }
             core = _build_core(root, ExplodingPlanner(), config=config)
 
-            response = core.handle_text("im Denis")
+            response = core.handle_text("im Test User")
 
             self.assertEqual(response.status, "ok")
-            self.assertEqual(config["setup"]["user_name"], "Denis")
+            self.assertEqual(config["setup"]["user_name"], "Test User")
 
     def test_simple_terminal_phrase_routes_to_terminal_policy_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,13 +460,13 @@ class AgentCoreTest(unittest.TestCase):
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
 
-            response = core.handle_text("Remember that I like ice cream")
+            response = core.handle_text("Remember that I like green tea")
 
             self.assertEqual(response.status, "approval_required")
             approval = audit.list_approvals(status="pending")[0]
             self.assertEqual(approval["tool"], "memory.write")
             self.assertEqual(approval["args"]["path"], "long-term/facts/personal.md")
-            self.assertIn("I like ice cream", approval["args"]["body"])
+            self.assertIn("I like green tea", approval["args"]["body"])
 
     def test_short_term_remember_phrase_requires_approval_and_ttl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,9 +490,9 @@ class AgentCoreTest(unittest.TestCase):
 
     def test_natural_remember_phrases_require_real_memory_write_approval(self) -> None:
         examples = [
-            ("And also remember that I like BMW cars", "I like BMW cars"),
-            ("I like BMW cars remember that", "I like BMW cars"),
-            ("Can you remember that I have Lenovo servers at home", "I have Lenovo servers at home"),
+            ("And also remember that I like red bicycles", "I like red bicycles"),
+            ("I like red bicycles remember that", "I like red bicycles"),
+            ("Can you remember that I have lab servers at home", "I have lab servers at home"),
         ]
         for message, expected_fact in examples:
             with self.subTest(message=message):
@@ -366,7 +525,7 @@ class AgentCoreTest(unittest.TestCase):
             )
 
             response = core.handle_text(
-                "Моля те да запомниш в нов .md дългосрочно че имам два сървъра Lenovo m700s"
+                "Моля те да запомниш в нов .md дългосрочно че имам два тестови сървъра модел TestBox X1"
             )
 
             self.assertEqual(response.status, "approval_required")
@@ -374,15 +533,125 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(approval["tool"], "memory.write")
             self.assertEqual(approval["args"]["path"], "auto")
             self.assertEqual(approval["args"]["memory_scope"], "long-term")
-            self.assertEqual(approval["args"]["body"], "имам два сървъра Lenovo m700s")
+            self.assertEqual(approval["args"]["body"], "имам два тестови сървъра модел TestBox X1")
+
+    def test_bulk_memory_organizer_prompt_does_not_route_to_browser_or_reminders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+            )
+            prompt = """
+Искам да разделиш long-term memory markdown файла на категории.
+Препоръчителна структура: memory/ owner/ profile.md projects/ primary-product/ failover.md
+High priority файлове: memory/README.md
+Не прави един огромен файл.
+and this is the knowlage
+# Long-Term Memory — Test User
+## Owner / User
+Name: Test User
+## Project: DMD Agent 4 All
+Useful scenario: “Напомни ми след 8 минути да извадя яйцата.”
+"""
+
+            response = core.handle_text(prompt)
+
+            self.assertEqual(response.status, "approval_required")
+            approval = audit.list_approvals(status="pending")[0]
+            self.assertEqual(approval["tool"], "memory.organize_long_term")
+            self.assertIn("# Long-Term Memory", approval["args"]["source_markdown"])
+
+    def test_bulk_memory_organizer_writes_modular_files_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+            prompt = """
+Препоръчителна структура: memory/ owner/ profile.md memory/README.md
+High priority файлове: memory/owner/profile.md
+and this is the knowlage
+# Long-Term Memory — Test User ## Owner / User Name: Test User Main working language: Bulgarian ## Project: Example Marketplace Example Marketplace is the user's major marketplace platform. ## Primary Product High Availability / Failover Architecture Avoid split-brain at all costs. Primary server: primary-node Backup server: backup-node ## Security Preferences / Rules Do not expose admin panels publicly. Never run docker compose down -v unless absolutely sure.
+"""
+
+            pending = core.handle_text(prompt)
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(approved.status, "ok")
+            self.assertIn("owner/profile.md", approved.data["files"])
+            self.assertIn("projects/primary-product/failover.md", approved.data["files"])
+            self.assertTrue((root / "memory" / "README.md").exists())
+            self.assertTrue((root / "memory" / "owner" / "profile.md").exists())
+            self.assertIn(
+                "Avoid split-brain",
+                (root / "memory" / "projects" / "primary-product" / "failover.md").read_text(encoding="utf-8"),
+            )
+            self.assertNotIn(
+                "No source notes were found",
+                (root / "memory" / "owner" / "profile.md").read_text(encoding="utf-8"),
+            )
+
+    def test_memory_organizer_correction_without_source_does_not_open_markdown_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+            )
+
+            response = core.handle_text(
+                "Имаш грешка в организирането на memory файловете. "
+                "Не оставяй No source notes were found в memory/owner/profile.md."
+            )
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Нямам достъп до source memory content", response.message)
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_bulgarian_what_are_you_answer_does_not_need_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(
+                Path(tmp),
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "openai", "response_language": "auto"},
+                    "setup": {"agent_name": "jarvis", "user_name": "Test User"},
+                },
+            )
+
+            response = core.handle_text("здравей, имаш ли инфо какво си ти")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("jarvis", response.message)
 
     def test_bulgarian_memory_recall_answers_from_local_long_term_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             MemoryManager(root / "memory").write(
                 "long-term/facts/computers.md",
-                "Имам два сървъра Lenovo m700s.",
+                "Имам два тестови сървъра модел TestBox X1.",
                 metadata={"type": "long_term_note", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "homelab/homelab-primary.md",
+                "Hostname: primary-node\nPrimary server runs many Docker services.",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "facts/personal.md",
+                "- I like green tea.\n- I like red bicycles.",
+                metadata={"type": "personal_fact", "memory_scope": "long-term"},
             )
             core = _build_core(
                 root,
@@ -393,15 +662,176 @@ class AgentCoreTest(unittest.TestCase):
             response = core.handle_text("Какви сървъри имам")
 
             self.assertEqual(response.status, "ok")
-            self.assertIn("Имаш два сървъра Lenovo m700s", response.message)
+            self.assertIn("Имаш два тестови сървъра модел TestBox X1", response.message)
+            self.assertNotIn("Primary server runs many Docker services", response.message)
+            self.assertNotIn("green tea", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic"})
+
+    def test_bulgarian_immich_port_lookup_answers_from_memory_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/immich.md",
+                "\n".join(
+                    [
+                        "# Immich",
+                        "Immich port:",
+                        "- 2283",
+                    ]
+                ),
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            response = core.handle_text("на кой порт е имич")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.message, "Immich е на порт 2283.")
+            self.assertEqual(response.data, {"planner": "deterministic"})
+
+    def test_bulgarian_proxmox_access_recall_uses_local_memory_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "homelab/homelab2-backup.md",
+                "\n".join(
+                    [
+                        "Hostname: backup-node",
+                        "LAN IP: 192.0.2.22",
+                        "Tailscale IP: 198.51.100.22",
+                        "Backup Proxmox web UI: https://192.0.2.25:8006",
+                    ]
+                ),
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "long-term/facts/computers.md",
+                "Имам два тестови сървъра модел TestBox X1.",
+                metadata={"type": "long_term_note", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "projects/dmd-agent-4-all/overview.md",
+                "GitHub: https://github.com/example/local-agent",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            response = core.handle_text("не помня как да си вляза в проксмокс в сървъра")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Proxmox web UI адресът ти е: https://192.0.2.25:8006", response.message)
+            self.assertNotIn("TestBox X1", response.message)
+            self.assertNotIn("github.com", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic"})
+
+    def test_bulgarian_followup_machine_address_uses_recent_context_for_memory_recall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "homelab/homelab2-backup.md",
+                "\n".join(
+                    [
+                        "Hostname: backup-node",
+                        "LAN IP: 192.0.2.22",
+                        "Tailscale IP: 198.51.100.22",
+                        "Backup Proxmox web UI: https://192.0.2.25:8006",
+                    ]
+                ),
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "long-term/facts/computers.md",
+                "Имам два тестови сървъра модел TestBox X1.",
+                metadata={"type": "long_term_note", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "projects/dmd-agent-4-all/overview.md",
+                "GitHub: https://github.com/example/local-agent",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            core.handle_text("не помня как да си вляза в проксмокс в сървъра", session_id="proxmox")
+            response = core.handle_text("не, кажи ми на кой адрес беше машината ми", session_id="proxmox")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("https://192.0.2.25:8006", response.message)
+            self.assertNotIn("TestBox X1", response.message)
+            self.assertNotIn("github.com", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic"})
+
+    def test_bulgarian_machine_address_without_context_prefers_machine_endpoint_over_public_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "projects/dmd-agent-4-all/overview.md",
+                "GitHub: https://github.com/example/local-agent",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "homelab/homelab-primary.md",
+                "\n".join(
+                    [
+                        "Hostname: primary-node",
+                        "LAN IP: 192.0.2.43",
+                        "Tailscale IP: 198.51.100.43",
+                    ]
+                ),
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            response = core.handle_text("кажи ми на кой адрес беше машината ми")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("192.0.2.43", response.message)
+            self.assertNotIn("github.com", response.message)
             self.assertEqual(response.data, {"planner": "deterministic"})
 
     def test_broad_bulgarian_memory_recall_lists_saved_facts_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             MemoryManager(root / "memory").write(
+                "README.md",
+                "\n".join(
+                    [
+                        "# Memory Index",
+                        "Purpose: Index for modular long-term memory files.",
+                        "## High Priority For Retrieval",
+                        "- owner/profile.md",
+                        "- homelab/security.md",
+                    ]
+                ),
+                metadata={"type": "memory_index", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "profile.md",
+                "User name: Test User\nPreferred nickname: buddy\nBulgarian nickname: маняк",
+                metadata={"type": "profile", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
                 "long-term/facts/computers.md",
-                "Имам два сървъра Lenovo m700s.",
+                "Имам два тестови сървъра модел TestBox X1.",
                 metadata={"type": "long_term_note", "memory_scope": "long-term"},
             )
             core = _build_core(
@@ -413,8 +843,35 @@ class AgentCoreTest(unittest.TestCase):
             response = core.handle_text("Искам да ми кажеш всичко което знаеш за мен")
 
             self.assertEqual(response.status, "ok")
-            self.assertIn("В локалната long-term memory знам това:", response.message)
-            self.assertIn("Имаш два сървъра Lenovo m700s", response.message)
+            self.assertIn("В локалната long-term memory знам това за теб:", response.message)
+            self.assertIn("Име: Test User", response.message)
+            self.assertIn("Български прякор: маняк", response.message)
+            self.assertIn("Имаш два тестови сървъра модел TestBox X1", response.message)
+            self.assertNotIn("Memory Index", response.message)
+            self.assertNotIn("High Priority", response.message)
+
+    def test_short_bulgarian_clarification_uses_previous_assistant_turn_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/plex.md",
+                "Plex port: 32400",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            core.handle_text("не помня на кой порт беше плекс", session_id="clarify")
+            response = core.handle_text("не разбах", session_id="clarify")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Казано по-просто:", response.message)
+            self.assertIn("Plex е на порт 32400", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic", "source": "recent_conversation"})
 
     def test_remind_me_phrase_creates_approval_gated_local_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -665,7 +1122,7 @@ class AgentCoreTest(unittest.TestCase):
                 "llm": {"response_language": "auto"},
                 "setup": {
                     "agent_name": "jarvis",
-                    "user_name": "Denis",
+                    "user_name": "Test User",
                     "preferred_language": "auto",
                 },
             }
@@ -681,14 +1138,14 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(config["setup"]["nickname_bg"], "маняк")
             self.assertEqual(answered.status, "ok")
             self.assertIn("маняк", answered.message)
-            self.assertIn("Denis", answered.message)
+            self.assertIn("Test User", answered.message)
 
     def test_memory_tool_result_can_be_synthesized_into_human_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             MemoryManager(root / "memory").write(
                 "facts/personal.md",
-                "- Denis likes ice cream.",
+                "- Test User likes green tea.",
                 metadata={"type": "personal_fact"},
             )
             core = _build_core(
@@ -701,7 +1158,7 @@ class AgentCoreTest(unittest.TestCase):
                             reason="Look up memory.",
                         )
                     ),
-                    "You like ice cream.",
+                    "You like green tea.",
                 ),
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -709,7 +1166,7 @@ class AgentCoreTest(unittest.TestCase):
             response = core.handle_text("What do I like?")
 
             self.assertEqual(response.status, "ok")
-            self.assertEqual(response.message, "You like ice cream.")
+            self.assertEqual(response.message, "You like green tea.")
 
     def test_approved_cloud_memory_read_is_synthesized_into_human_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -717,7 +1174,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             MemoryManager(root / "memory").write(
                 "facts/personal.md",
-                "- Denis likes ice cream.",
+                "- Test User likes green tea.",
                 metadata={"type": "personal_fact"},
             )
             core = _build_core(
@@ -730,7 +1187,7 @@ class AgentCoreTest(unittest.TestCase):
                             reason="Look up memory.",
                         )
                     ),
-                    "You like ice cream.",
+                    "You like green tea.",
                 ),
                 audit=audit,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
@@ -742,7 +1199,7 @@ class AgentCoreTest(unittest.TestCase):
 
             self.assertEqual(pending.status, "approval_required")
             self.assertEqual(approved.status, "ok")
-            self.assertEqual(approved.message, "You like ice cream.")
+            self.assertEqual(approved.message, "You like green tea.")
 
     def test_cloud_memory_approval_applies_for_current_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -750,7 +1207,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             MemoryManager(root / "memory").write(
                 "facts/personal.md",
-                "- Denis likes ice cream.",
+                "- Test User likes green tea.",
                 metadata={"type": "personal_fact"},
             )
             core = _build_core(
@@ -763,7 +1220,7 @@ class AgentCoreTest(unittest.TestCase):
                             reason="Look up memory.",
                         )
                     ),
-                    "You like ice cream.",
+                    "You like green tea.",
                 ),
                 audit=audit,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
@@ -775,7 +1232,7 @@ class AgentCoreTest(unittest.TestCase):
             second = core.handle_text("What do I like?")
 
             self.assertEqual(second.status, "ok")
-            self.assertEqual(second.message, "You like ice cream.")
+            self.assertEqual(second.message, "You like green tea.")
             self.assertEqual(len(audit.list_approvals(status="pending")), 0)
 
 

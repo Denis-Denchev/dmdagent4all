@@ -624,7 +624,7 @@ export function App() {
                   <input
                     value={terminalWorkspaceRoot}
                     onChange={(event) => setTerminalWorkspaceRoot(event.target.value)}
-                    placeholder="/Users/Apple/PycharmProjects/dmdagent4all"
+                    placeholder="/path/to/dmdagent4all"
                   />
                 </label>
                 <label>

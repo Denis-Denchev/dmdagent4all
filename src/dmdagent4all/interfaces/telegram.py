@@ -257,7 +257,7 @@ class TelegramInterface:
             )
             return
 
-        response = self._dispatch_message(text)
+        response = self._dispatch_message(text, session_id=f"telegram-{user_id}")
         reply_markup = _approval_keyboard(response)
         self.api.send_message(
             chat_id,
@@ -347,7 +347,7 @@ class TelegramInterface:
             request_type="callback",
         )
 
-    def _dispatch_message(self, text: str) -> AgentResponse:
+    def _dispatch_message(self, text: str, *, session_id: str = "telegram") -> AgentResponse:
         if text in {"/start", "/help"}:
             return AgentResponse(
                 status="ok",
@@ -376,7 +376,7 @@ class TelegramInterface:
             if approval_id is None:
                 return AgentResponse(status="error", message="Usage: /deny <id>")
             return self._handle_approval_action("deny", approval_id)
-        return self.core_factory().handle_text(text)
+        return self.core_factory().handle_text(text, session_id=session_id)
 
     def _handle_approval_action(self, action: str, approval_id: int) -> AgentResponse:
         if action == "approve":

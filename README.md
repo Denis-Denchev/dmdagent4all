@@ -332,7 +332,7 @@ dmdagent permissions list
 dmdagent permissions grant gmail.readonly
 dmdagent permissions revoke gmail.readonly
 dmdagent terminal status
-dmdagent terminal workspace /Users/Apple/PycharmProjects/dmdagent4all
+dmdagent terminal workspace /path/to/dmdagent4all
 dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal auto-approve on
@@ -398,7 +398,7 @@ chat:
 
 ```text
 call yourself Jarvis
-my name is Denis
+my name is Alex
 ```
 
 The chat starts Ollama automatically when possible. If a model is missing, run:
@@ -480,7 +480,7 @@ Terminal execution is disabled by default and requires all of these:
 
 ```bash
 dmdagent terminal allow git status
-dmdagent terminal workspace /Users/Apple/PycharmProjects/dmdagent4all
+dmdagent terminal workspace /path/to/dmdagent4all
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal run -- git status
 dmdagent approvals approve <id>

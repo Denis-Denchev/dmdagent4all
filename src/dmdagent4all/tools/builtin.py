@@ -23,6 +23,7 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("memory.list", _memory_list)
     registry.register_handler("memory.read", _memory_read)
     registry.register_handler("memory.write", _memory_write)
+    registry.register_handler("memory.organize_long_term", _memory_organize_long_term)
     registry.register_handler("reminders.create", create_reminder)
     registry.register_handler("reminders.list", list_reminders)
     registry.register_handler("reminders.complete", complete_reminder)
@@ -112,6 +113,54 @@ def _memory_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
     return {"path": str(written.relative_to(context.memory_root.resolve()))}
 
 
+def _memory_organize_long_term(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    source = str(args.get("source_markdown") or "").strip()
+    if len(source) < 100:
+        raise ValueError("memory.organize_long_term requires a substantial source_markdown value.")
+    today = str(args.get("today") or datetime.now().date().isoformat())
+    source = redact_text(source)
+    files = _long_term_memory_files(source, today=today)
+    manager = MemoryManager(context.memory_root)
+    written: list[str] = []
+    summaries: dict[str, str] = {}
+    for relative_path, body in files.items():
+        target = manager.write(
+            relative_path,
+            body,
+            metadata={
+                "type": "organized_long_term_memory",
+                "memory_scope": "long-term",
+                "source": "bulk_memory_organizer",
+                "confidence": "medium",
+            },
+        )
+        path = str(target.relative_to(context.memory_root.resolve()))
+        written.append(path)
+        summaries[path] = _first_content_sentence(body)
+    tree = _tree_from_paths(written)
+    high_priority = [
+        "owner/profile.md",
+        "owner/preferences.md",
+        "projects/primary-product/failover.md",
+        "projects/primary-product/infrastructure.md",
+        "projects/dmd-agent-4-all/security-model.md",
+        "homelab/security.md",
+        "security/incident-response.md",
+        "assistant-behavior/emergency-mode.md",
+    ]
+    always = [path for path in high_priority if path in written]
+    return {
+        "files": written,
+        "tree": tree,
+        "summary": summaries,
+        "ambiguities": _memory_ambiguities(source),
+        "retrieval": {
+            "always": always,
+            "on_demand": [path for path in written if path not in set(always)],
+        },
+    }
+
+
 def _memory_scope(args: dict[str, Any], metadata: dict[str, Any]) -> str:
     raw_scope = (
         args.get("memory_scope")
@@ -145,6 +194,588 @@ def _slugify(value: str) -> str:
     slug = re.sub(r"[^\w]+", "-", value.lower(), flags=re.UNICODE).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
     return slug[:80].strip("-")
+
+
+def _long_term_memory_files(source: str, *, today: str) -> dict[str, str]:
+    sections = _markdown_sections(source)
+
+    def section(*names: str) -> str:
+        values = [sections.get(name, "").strip() for name in names if sections.get(name, "").strip()]
+        return "\n\n".join(values).strip()
+
+    owner = section("Owner / User")
+    motivation = section("Personal / Motivation")
+    business = section("Main Business / Brand", "Business / Brand")
+    primary_product = section("Project: Primary Product", "Project: Product")
+    product_strategy = section("Primary Product Strategy", "Product Strategy")
+    product_stack = section("Primary Product Stack", "Product Stack")
+    product_features = section("Primary Product Features", "Product Features")
+    product_deployment = section("Primary Product Deployment Pattern", "Product Deployment Pattern")
+    product_failover = section("Primary Product High Availability / Failover Architecture", "Product High Availability / Failover Architecture")
+    dmd_agent = section("Project: DMD Agent 4 All")
+    homelab = section("Homelab Infrastructure")
+    primary = section("Primary Server: homelab")
+    backup = section("Backup Server: homelab2")
+    older_infra = section("Older / Alternative Infrastructure Notes")
+    immich = section("Immich")
+    other_services = section("Other Homelab Services")
+    npm = section("Nginx Proxy Manager")
+    homepage = section("Homepage")
+    grafana = section("Grafana")
+    monitoring = section("Monitoring Services", "Monitoring")
+    adguard = section("AdGuard Home")
+    plex = section("Plex")
+    paperless = section("Paperless NGX")
+    security = section("Security Preferences / Rules")
+    github = section("GitHub / Open Source Preferences")
+    assistant = section("Preferred Assistant Behavior")
+    commands = section(
+        "Important Commands / Patterns",
+        "Check Docker containers",
+        "Check Docker disk usage",
+        "Safe Docker cleanup",
+        "Check UFW",
+        "Check SSH effective config",
+        "Check active SSH sessions",
+        "Check failed services",
+        "Check logs",
+        "Check zombie processes",
+        "Check Tailscale",
+    )
+    priorities = section("Current Priorities")
+
+    del priorities
+    files: dict[str, str] = {}
+
+    def add(
+        path: str,
+        title: str,
+        purpose: str,
+        content: str,
+        *,
+        important_rules: list[str] | None = None,
+    ) -> None:
+        if not _has_real_memory_content(content):
+            return
+        files[path] = _memory_doc(title, purpose, today, content, important_rules=important_rules)
+
+    add(
+            "owner/profile.md",
+            "Owner Profile",
+            "Stable identity, background, work context and high-level owner facts.",
+            owner,
+        )
+    add(
+            "owner/preferences.md",
+            "Owner Preferences",
+            "Communication, work style and assistant behavior preferences for the owner.",
+            _filter_lines(source, ["preferred", "language", "style", "tone", "assistant"]),
+        )
+    add(
+            "owner/motivation.md",
+            "Motivation",
+            "Long-term motivation, personal context and why stability matters.",
+            motivation,
+        )
+    add(
+            "business/brand.md",
+            "Brand",
+            "Business and brand memory.",
+            business,
+        )
+    add(
+            "business/domains-and-email.md",
+            "Domains And Email",
+            "Domains, email providers and mailbox planning.",
+            _filter_lines(business, ["domain", "email", "mailbox", "@"]),
+        )
+    add(
+            "business/positioning.md",
+            "Positioning",
+            "Brand positioning, tone and business focus.",
+            _filter_lines(business, ["position", "tone", "focus", "automation", "business"]),
+        )
+    add(
+            "projects/primary-product/overview.md",
+            "Primary Product Overview",
+            "High-level product and business context.",
+            primary_product,
+        )
+    add(
+            "projects/primary-product/product-strategy.md",
+            "Primary Product Strategy",
+            "Strategy, monetization and validation priorities.",
+            product_strategy,
+        )
+    add(
+            "projects/primary-product/stack.md",
+            "Primary Product Stack",
+            "Backend, frontend, database and infrastructure stack.",
+            product_stack,
+        )
+    add(
+            "projects/primary-product/infrastructure.md",
+            "Primary Product Infrastructure",
+            "Production infrastructure, paths, containers, Cloudflare and replication context.",
+            "\n\n".join([product_stack, product_failover]),
+            important_rules=[
+                "Do not change IP addresses, container names, paths, tunnel names or replication roles unless the owner confirms.",
+                "Backup cloudflared should stay stopped except during failover.",
+            ],
+        )
+    add(
+            "projects/primary-product/failover.md",
+            "Primary Product Failover",
+            "Canonical high availability and failover procedure.",
+            product_failover,
+            important_rules=[
+                "Avoid split-brain at all costs.",
+                "Confirm the primary is truly down before promoting standby.",
+                "After failover, old primary must not write as primary until carefully re-synced.",
+            ],
+        )
+    add(
+            "projects/primary-product/deployment.md",
+            "Primary Product Deployment",
+            "Deployment workflow and commands.",
+            _commands_to_code_blocks(product_deployment),
+        )
+    add(
+            "projects/primary-product/features.md",
+            "Primary Product Features",
+            "Known product features and integrations.",
+            product_features,
+        )
+    add(
+            "projects/dmd-agent-4-all/overview.md",
+            "DMD Agent 4 All Overview",
+            "High-level memory for the local-first AI control center project.",
+            dmd_agent,
+        )
+    add(
+            "projects/dmd-agent-4-all/current-features.md",
+            "DMD Agent 4 All Current Features",
+            "Current practical capabilities and usage scenarios.",
+            _filter_lines(dmd_agent, ["feature", "current", "scenario", "reminder", "telegram", "dashboard", "terminal"]),
+        )
+    add(
+            "projects/dmd-agent-4-all/security-model.md",
+            "DMD Agent 4 All Security Model",
+            "Security philosophy and constraints for the agent project.",
+            _filter_lines(dmd_agent, ["security", "local-first", "allowlist", "approval", "audit", "secret", "dangerous"]),
+            important_rules=[
+                "No full dangerous shell by default.",
+                "Risky actions require approvals.",
+                "Secrets should never be committed or placed in model context.",
+            ],
+        )
+    add(
+            "projects/dmd-agent-4-all/open-source-strategy.md",
+            "DMD Agent 4 All Open Source Strategy",
+            "Open-source positioning and launch model.",
+            _filter_lines(dmd_agent, ["open-source", "repository", "license", "contribution", "pull request", "launch"]),
+        )
+    add(
+            "projects/dmd-agent-4-all/roadmap.md",
+            "DMD Agent 4 All Roadmap",
+            "Recommended files, branch model and launch next actions.",
+            _filter_lines(dmd_agent, ["recommended", "branch", "main", "dev", "roadmap", "release"]),
+        )
+    add(
+            "homelab/overview.md",
+            "Homelab Overview",
+            "High-level memory for the owner's homelab.",
+            "\n\n".join([homelab, older_infra]),
+        )
+    add(
+            "homelab/homelab-primary.md",
+            "Primary Homelab Server",
+            "Current primary server role, IPs, paths, services and ports.",
+            primary,
+        )
+    add(
+            "homelab/homelab2-backup.md",
+            "Backup Homelab2 Server",
+            "Backup server role, standby database and failover target facts.",
+            backup,
+            important_rules=["Do not promote homelab2 unless the primary is confirmed down."],
+        )
+    add(
+            "homelab/services.md",
+            "Homelab Services",
+            "Service inventory across the homelab.",
+            "\n\n".join(
+                [
+                    _filter_lines(primary, ["container", "service", "port"]),
+                    other_services,
+                    npm,
+                    homepage,
+                    grafana,
+                    monitoring,
+                    adguard,
+                    plex,
+                    paperless,
+                ]
+            ),
+        )
+    add(
+            "homelab/networking.md",
+            "Homelab Networking",
+            "LAN, Tailscale, ports and exposure model.",
+            _filter_lines(source, ["LAN IP", "Tailscale IP", "port", "Cloudflare", "Tailscale", "NPM", "proxy"]),
+        )
+    add(
+            "homelab/security.md",
+            "Homelab Security",
+            "Security posture and hardening rules for homelab services.",
+            "\n\n".join([_filter_lines(primary, ["Security note", "SSH", "UFW", "password", "public"]), security]),
+            important_rules=[
+                "Do not expose admin panels publicly.",
+                "Do not disable SSH password login until key login is confirmed working.",
+                "Do not delete Docker volumes unless explicitly confirmed.",
+            ],
+        )
+    add(
+            "homelab/commands.md",
+            "Homelab Commands",
+            "Reusable diagnostic and maintenance commands.",
+            _commands_to_code_blocks(commands),
+        )
+    add(
+            "services/immich.md",
+            "Immich",
+            "Immich deployment, update lessons, containers and risks.",
+            immich,
+            important_rules=["Do not run docker compose down -v for Immich.", "Back up the database before updates."],
+        )
+    add(
+            "services/nginx-proxy-manager.md",
+            "Nginx Proxy Manager",
+            "NPM container, internal hostnames and admin exposure rules.",
+            npm,
+            important_rules=["Port 81 admin should stay LAN/Tailscale only."],
+        )
+    add(
+            "services/grafana-monitoring.md",
+            "Grafana And Monitoring",
+            "Grafana, Prometheus, node-exporter and cAdvisor notes.",
+            "\n\n".join([grafana, monitoring]),
+            important_rules=["Do not expose Prometheus, node-exporter or cAdvisor publicly."],
+        )
+    add(
+            "services/adguard.md",
+            "AdGuard Home",
+            "AdGuard container, config path, ports and DNS exposure rules.",
+            adguard,
+            important_rules=["Avoid exposing DNS publicly unless intentionally configured."],
+        )
+    add("services/plex.md", "Plex", "Plex media service notes.", plex)
+    add("services/paperless.md", "Paperless NGX", "Paperless NGX and companion services.", paperless)
+    add(
+            "security/ssh-hardening.md",
+            "SSH Hardening",
+            "Desired SSH security settings and current lockout warning.",
+            _filter_lines(security + "\n" + primary, ["SSH", "PasswordAuthentication", "PermitRootLogin", "PubkeyAuthentication", "key"]),
+            important_rules=["Do not disable password login until key-based login works."],
+        )
+    add(
+            "security/firewall-rules.md",
+            "Firewall Rules",
+            "UFW and network exposure preferences.",
+            _filter_lines(security + "\n" + primary, ["UFW", "port", "LAN", "tailscale", "public", "Anywhere"]),
+        )
+    add(
+            "security/secrets-policy.md",
+            "Secrets Policy",
+            "Rules for secrets, env files, GitHub and model context.",
+            _filter_lines(security + "\n" + dmd_agent, ["secret", "token", "API key", ".env", "GitHub", "commit"]),
+            important_rules=["Never write secrets, tokens, API keys, private keys or passwords into memory."],
+        )
+    add(
+            "security/incident-response.md",
+            "Incident Response",
+            "Emergency operating mode, failover and incident response rules.",
+            _filter_lines(source, ["incident", "Emergency", "failover", "down", "burned", "recovery", "verify", "split-brain"]),
+            important_rules=["During incidents, recovery comes before explanation.", "Group commands by machine."],
+        )
+    add(
+            "github/open-source-workflow.md",
+            "Open Source Workflow",
+            "DMD Agent open-source contribution workflow.",
+            github,
+        )
+    add(
+            "github/branch-strategy.md",
+            "Branch Strategy",
+            "Recommended branch model for DMD Agent 4 All.",
+            _filter_lines(github + "\n" + dmd_agent, ["branch", "main", "dev", "feature", "owner-dev"]),
+        )
+    add(
+            "github/repo-protection.md",
+            "Repository Protection",
+            "Rulesets, protected branches, CI and CODEOWNERS.",
+            _filter_lines(github + "\n" + dmd_agent, ["protected", "ruleset", "CI", "CODEOWNERS", "SECURITY", "direct write"]),
+        )
+    add(
+            "github/contribution-model.md",
+            "Contribution Model",
+            "Contributor expectations and community files.",
+            _filter_lines(github + "\n" + dmd_agent, ["contribution", "pull request", "fork", "CODE_OF_CONDUCT", "issue", "PR"]),
+        )
+    add(
+            "assistant-behavior/response-style.md",
+            "Response Style",
+            "How the assistant should communicate with the owner.",
+            assistant,
+        )
+    add(
+            "assistant-behavior/safety-rules.md",
+            "Assistant Safety Rules",
+            "Operational safety rules for DevOps, commands and destructive actions.",
+            _filter_lines(assistant + "\n" + security, ["warn", "destructive", "down -v", "rm -rf", "force push", "DB", "volume"]),
+        )
+    add(
+            "assistant-behavior/emergency-mode.md",
+            "Emergency Mode",
+            "How to respond during live incidents and primary product failover events.",
+            _filter_lines(source, ["Emergency response style", "senior SRE", "failover", "downtime", "split-brain", "recovery"]),
+            important_rules=["Exact recovery commands only during incidents.", "Verify DB role before promotion."],
+        )
+    files["README.md"] = _memory_index(files, today=today)
+    return files
+
+
+def _markdown_sections(source: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current = "Root"
+    sections[current] = []
+    for line in _normalize_inline_markdown_headings(source).splitlines():
+        match = re.match(r"^#{1,3}\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1).strip().strip("# ")
+            sections.setdefault(current, [])
+            continue
+        sections.setdefault(current, []).append(line)
+    return {key: "\n".join(value).strip() for key, value in sections.items()}
+
+
+def _normalize_inline_markdown_headings(source: str) -> str:
+    text = source.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\s+---\s+", "\n---\n", text)
+    heading_titles = [
+        r"Long-Term Memory[^\n#]*",
+        r"Long-term Memory[^\n#]*",
+        r"Owner / User",
+        r"Personal / Motivation",
+        r"Main Business / Brand",
+        r"Business / Brand",
+        r"Project: Primary Product",
+        r"Project: Product",
+        r"Primary Product Strategy",
+        r"Product Strategy",
+        r"Primary Product Stack",
+        r"Product Stack",
+        r"Primary Product Features",
+        r"Product Features",
+        r"Primary Product Deployment Pattern",
+        r"Product Deployment Pattern",
+        r"Primary Product High Availability / Failover Architecture",
+        r"Product High Availability / Failover Architecture",
+        r"Project: DMD Agent 4 All",
+        r"Homelab Infrastructure",
+        r"Primary Server: homelab",
+        r"Backup Server: homelab2",
+        r"Older / Alternative Infrastructure Notes",
+        r"Immich",
+        r"Other Homelab Services",
+        r"Nginx Proxy Manager",
+        r"Homepage",
+        r"Grafana",
+        r"Monitoring Services",
+        r"AdGuard Home",
+        r"Plex",
+        r"Paperless NGX",
+        r"Security Preferences / Rules",
+        r"GitHub / Open Source Preferences",
+        r"Preferred Assistant Behavior",
+        r"Important Commands / Patterns",
+        r"Check Docker containers",
+        r"Check Docker disk usage",
+        r"Safe Docker cleanup",
+        r"Check UFW",
+        r"Check SSH effective config",
+        r"Check active SSH sessions",
+        r"Check failed services",
+        r"Check logs",
+        r"Check zombie processes",
+        r"Check Tailscale",
+        r"Current Priorities",
+    ]
+    pattern = re.compile(r"#{1,3}\s+(?:" + "|".join(heading_titles) + r")", flags=re.IGNORECASE)
+
+    def replace(match: re.Match[str]) -> str:
+        heading = re.sub(r"\s+", " ", match.group(0).strip())
+        return f"\n{heading}\n"
+
+    return pattern.sub(replace, text).strip()
+
+
+def _memory_doc(
+    title: str,
+    purpose: str,
+    today: str,
+    content: str,
+    *,
+    important_rules: list[str] | None = None,
+) -> str:
+    body = _normalize_memory_notes(content)
+    lines = [
+        f"# {title}",
+        "",
+        f"Purpose: {purpose}",
+        f"Last updated: {today}",
+        "",
+    ]
+    if important_rules:
+        lines.extend(["## Important Rules", "", *[f"- {rule}" for rule in important_rules], ""])
+    lines.extend(["## Notes", "", body.rstrip()])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _has_real_memory_content(content: str) -> bool:
+    return bool(_normalize_memory_notes(content).strip())
+
+
+def _normalize_memory_notes(content: str) -> str:
+    text = content.strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+\d+\.\s+", lambda match: f"\n{match.group(0).strip()} ", text)
+    text = re.sub(r"\s+-\s+", "\n- ", text)
+    text = re.sub(
+        r"\s+(Name:|Location:|Role:|Core strategy:|90-day execution priorities:|Early traction / contacts:|Backend:|Frontend:|Infrastructure:|Important paths:|Important containers:|Database:|API:|Cloudflare:|Primary server:|Backup server:|Replication:|Code/uploads sync:|Backup API:|Failover:|Failover order:|Emergency response style:|Goal:|Positioning:|Current practical features:|Useful real scenarios:|Security philosophy:|Desired open-source model:|Recommended branch model:|Recommended repository files:|Recommended license:|Potential launch message:|Known system:|Important services / containers on homelab:|Important ports observed:|Security notes:|Normal state:|Known files/directories:|Immich containers:|Immich port:|Current updated version observed:|Important Immich lesson:|Known issue:|Services:|General rules:|SSH hardening desired:|Correct model:|Recommended launch plan:)\s+",
+        r"\n\1\n",
+        text,
+    )
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _filter_lines(text: str, keywords: list[str]) -> str:
+    lowered_keywords = [keyword.casefold() for keyword in keywords]
+    selected: list[str] = []
+    active_heading = ""
+    for line in _normalize_memory_notes(text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            active_heading = stripped
+        haystack = f"{active_heading}\n{line}".casefold()
+        if any(keyword in haystack for keyword in lowered_keywords):
+            selected.append(line)
+    return "\n".join(selected).strip()
+
+
+def _commands_to_code_blocks(text: str) -> str:
+    lines: list[str] = []
+    in_block = False
+    for raw_line in _normalize_memory_notes(text).splitlines():
+        stripped = raw_line.strip()
+        looks_command = bool(
+            re.match(r"^(cd|git|docker|sudo|ssh|curl|systemctl|journalctl|tailscale|ps|who|w|ss|make)\b", stripped)
+            or stripped.startswith("/")
+            or "SELECT " in stripped
+        )
+        if looks_command and not in_block:
+            lines.append("```bash")
+            in_block = True
+        if not looks_command and in_block:
+            lines.append("```")
+            in_block = False
+        lines.append(raw_line)
+    if in_block:
+        lines.append("```")
+    return "\n".join(lines).strip()
+
+
+def _memory_index(files: dict[str, str], *, today: str) -> str:
+    high_priority = {
+        "owner/profile.md",
+        "owner/preferences.md",
+        "projects/primary-product/failover.md",
+        "projects/primary-product/infrastructure.md",
+        "projects/dmd-agent-4-all/security-model.md",
+        "homelab/security.md",
+        "security/incident-response.md",
+        "assistant-behavior/emergency-mode.md",
+    }
+    lines = [
+        "# Memory Index",
+        "",
+        "Purpose: Index for modular long-term memory files.",
+        f"Last updated: {today}",
+        "",
+        "## High Priority For Retrieval",
+        "",
+        *[f"- {path}" for path in sorted(path for path in high_priority if path in files)],
+        "",
+        "## Files",
+        "",
+    ]
+    for path, body in sorted(files.items()):
+        if path == "README.md":
+            continue
+        lines.append(f"- `{path}` — {_first_content_sentence(body)}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _tree_from_paths(paths: list[str]) -> str:
+    root: dict[str, Any] = {}
+    for path in sorted(paths):
+        node = root
+        for part in path.split("/"):
+            node = node.setdefault(part, {})
+
+    def render(node: dict[str, Any], prefix: str = "") -> list[str]:
+        lines: list[str] = []
+        items = sorted(node.items())
+        for index, (name, child) in enumerate(items):
+            connector = "└── " if index == len(items) - 1 else "├── "
+            lines.append(f"{prefix}{connector}{name}")
+            if child:
+                extension = "    " if index == len(items) - 1 else "│   "
+                lines.extend(render(child, prefix + extension))
+        return lines
+
+    return "\n".join(["memory", *render(root)])
+
+
+def _first_content_sentence(body: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Purpose:"):
+            return stripped.removeprefix("Purpose:").strip()
+    for line in body.splitlines():
+        stripped = line.strip().strip("# ")
+        if stripped:
+            return stripped[:160]
+    return "No summary available."
+
+
+def _memory_ambiguities(source: str) -> list[str]:
+    ambiguities: list[str] = []
+    if "Older / Alternative Infrastructure Notes" in source:
+        ambiguities.append(
+            "Older / Alternative Infrastructure Notes were preserved separately; prefer the newer homelab primary/standby architecture unless the owner says they reverted."
+        )
+    if "SSH password login was still active" in source and "Do not disable SSH password login" in source:
+        ambiguities.append(
+            "SSH hardening is desired, but password login must not be disabled until key-based login is confirmed working."
+        )
+    if "cloudflared should be active on primary" in source and "Backup cloudflared should remain stopped" in source:
+        ambiguities.append(
+            "Cloudflared should normally run only on the active primary; backup tunnel is for failover."
+        )
+    return ambiguities
 
 
 def _terminal_run(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:

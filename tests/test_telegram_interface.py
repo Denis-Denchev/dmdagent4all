@@ -51,7 +51,8 @@ class FakeCore:
         self.messages: list[str] = []
         self.approved: list[int] = []
 
-    def handle_text(self, text: str) -> AgentResponse:
+    def handle_text(self, text: str, *, session_id: str = "default") -> AgentResponse:
+        del session_id
         self.messages.append(text)
         return self.response
 

@@ -14,6 +14,7 @@ from dmdagent4all.server import (
     ReminderRuntime,
     _connector_statuses,
     _openai_status,
+    _set_model_config,
     _set_openai_config,
     _set_openai_limit,
     _set_telegram_token_env,
@@ -86,6 +87,24 @@ class DashboardControlsTest(unittest.TestCase):
                 os.environ.pop(DEFAULT_OPENAI_API_KEY_ENV, None)
 
         self.assertTrue(status["api_key_available"])
+
+    def test_local_model_selection_resets_openai_provider(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+        _set_openai_config(config, model="gpt-test")
+
+        _set_model_config(
+            config,
+            mode="fast",
+            model="qwen3:8b",
+            planner_model="qwen3:8b",
+        )
+
+        self.assertEqual(config["llm"]["provider"], "ollama")
+        self.assertEqual(config["llm"]["mode"], "fast")
+        self.assertEqual(config["llm"]["model"], "qwen3:8b")
+        self.assertEqual(config["llm"]["planner_model"], "qwen3:8b")
+        self.assertEqual(config["llm"]["base_url"], "http://localhost:11434")
+        self.assertIsNone(config["llm"]["api_key_env"])
 
     def test_connector_statuses_include_gmail_as_not_configured(self) -> None:
         registry = build_builtin_registry()
