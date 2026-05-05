@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import calendar
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ from dmdagent4all.agent.planner import LLMPlanner, PlannerError
 from dmdagent4all.config import save_config
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
+from dmdagent4all.sandbox import TerminalPolicy
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.registry import ToolExecutionError, ToolRegistry
 
@@ -57,12 +59,15 @@ class AgentCore:
         identity_update = _handle_identity_update(stripped, self.runtime_context)
         if identity_update is not None:
             return identity_update
-        memory_update = _memory_write_request_from_text(stripped, self.runtime_context)
-        if memory_update is not None:
-            return self.handle_tool_request(memory_update)
+        llm_reminder_request = self._plan_reminder_request(stripped)
+        if llm_reminder_request is not None:
+            return self.handle_tool_request(llm_reminder_request)
         reminder_request = _reminder_request_from_text(stripped)
         if reminder_request is not None:
             return self.handle_tool_request(reminder_request)
+        memory_update = _memory_write_request_from_text(stripped, self.runtime_context)
+        if memory_update is not None:
+            return self.handle_tool_request(memory_update)
         browser_request = _browser_request_from_text(stripped)
         if browser_request is not None:
             return self.handle_tool_request(browser_request)
@@ -227,6 +232,45 @@ class AgentCore:
             return tool_response
         return tool_response
 
+    def _plan_reminder_request(self, text: str) -> ToolRequest | None:
+        if self.planner is None or not _is_reminder_creation_text(text):
+            return None
+        if self.runtime_context.config.get("reminders", {}).get("prefer_llm_parser") is False:
+            return None
+        try:
+            llm_config = self.runtime_context.config.get("llm", {})
+            now = datetime.now().astimezone()
+            plan = self.planner.plan(
+                user_message=text,
+                manifests=self.tool_registry.manifests,
+                profile=_profile_from_config(self.runtime_context.config),
+                memory_context=_load_memory_context(self.runtime_context),
+                enabled_tools=_enabled_tools_from_config(
+                    self.tool_registry.manifests,
+                    self.runtime_context.config,
+                ),
+                response_language=llm_config.get("response_language", "auto"),
+                current_time=now.isoformat(timespec="seconds"),
+                timezone_name=now.tzname() or "",
+                max_tokens=max(512, int(llm_config.get("planner_max_tokens", 192))),
+                temperature=float(llm_config.get("planner_temperature", 0.0)),
+                think=bool(llm_config.get("planner_think", False)),
+            )
+        except Exception:
+            return None
+        request = plan.tool_request
+        if request is None or request.tool != "reminders.create":
+            return None
+        if not _valid_reminder_args(request.args):
+            return None
+        args = dict(request.args)
+        args.setdefault("notes", text)
+        _enrich_reminder_args_from_text(args, text)
+        return _request_with_original_message(
+            ToolRequest(tool=request.tool, args=args, reason=request.reason),
+            text,
+        )
+
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
         auto_approved = _is_auto_approved_terminal_request(request, self.runtime_context.config)
         decision = self.permission_engine.evaluate(
@@ -245,6 +289,15 @@ class AgentCore:
             ),
             result_status="blocked" if not decision.allowed else None,
         )
+
+        if decision.approval_required or decision.allowed:
+            terminal_policy_error = _terminal_policy_error(request, self.runtime_context.config)
+            if terminal_policy_error is not None:
+                return AgentResponse(
+                    status="denied",
+                    message=terminal_policy_error,
+                    data={"missing_permissions": []},
+                )
 
         if decision.approval_required:
             approval_id = self.audit_store.record_approval(
@@ -473,25 +526,307 @@ def _approval_action_from_text(text: str) -> tuple[str, int | None] | None:
 
 def _reminder_request_from_text(text: str) -> ToolRequest | None:
     stripped = text.strip()
-    normalized = _normalize_for_match(stripped)
-    if not any(word in normalized for word in {"remind", "напомни"}):
+    if not _is_reminder_creation_text(stripped):
         return None
 
-    due_at = _relative_reminder_due_at(stripped) or _tomorrow_reminder_due_at(stripped)
-    if due_at is None:
+    reminder = _parse_reminder_details(stripped)
+    if reminder is None:
         return None
-    title = _clean_reminder_title(stripped)
-    if not title:
-        return None
+    args: dict[str, Any] = {
+        "title": reminder["title"],
+        "due_at": reminder["due_at"],
+        "notes": stripped,
+    }
+    if reminder.get("event_at"):
+        args["event_at"] = reminder["event_at"]
+    if reminder.get("remind_before"):
+        args["remind_before"] = reminder["remind_before"]
+    if reminder.get("location"):
+        args["location"] = reminder["location"]
+    if reminder.get("action_url"):
+        args["action_url"] = reminder["action_url"]
     return ToolRequest(
         tool="reminders.create",
-        args={
-            "title": title,
-            "due_at": due_at,
-            "notes": stripped,
-        },
+        args=args,
         reason="User asked the agent to create a local reminder.",
     )
+
+
+def _is_reminder_creation_text(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    if normalized in {
+        "/reminders",
+        "reminders",
+        "list reminders",
+        "show reminders",
+        "напомняния",
+        "покажи напомняния",
+    }:
+        return False
+    return any(
+        phrase in normalized
+        for phrase in {
+            "remind me",
+            "notify me",
+            "remind",
+            "напомни",
+            "напомниш",
+        }
+    )
+
+
+def _valid_reminder_args(args: dict[str, Any]) -> bool:
+    if not isinstance(args, dict):
+        return False
+    due_at = str(args.get("due_at") or "").strip()
+    event_at = str(args.get("event_at") or "").strip()
+    if not str(args.get("title") or "").strip() or not _looks_like_iso_datetime(due_at):
+        return False
+    return not event_at or _looks_like_iso_datetime(event_at)
+
+
+def _enrich_reminder_args_from_text(args: dict[str, Any], text: str) -> None:
+    if not str(args.get("location") or "").strip():
+        location = _extract_location_from_reminder_text(text)
+        if location:
+            args["location"] = location
+
+
+def _looks_like_iso_datetime(value: str) -> bool:
+    if not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _extract_location_from_reminder_text(text: str) -> str | None:
+    patterns = [
+        r"\b(?:за|до|на)\s+адрес\s+(?P<location>.+)$",
+        r"\baddress\s+(?P<location>.+)$",
+        r"\b(?:to|at)\s+(?P<location>(?:boulevard|blvd\.?|street|st\.?)\s+.+)$",
+        r"\b(?P<location>(?:булевард|бул\.?|улица|ул\.?|площад|пл\.?)\s+.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        location = _clean_extracted_location(match.group("location"))
+        if location:
+            return location
+    return None
+
+
+def _clean_extracted_location(value: str) -> str:
+    location = value.strip().strip(" .,!?:;\"'")
+    location = re.split(
+        r"\s+(?:и\s+)?(?:искам\s+да\s+ми\s+)?(?:напомни|напомниш|remind|notify)\b",
+        location,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    location = re.sub(r"\bномер\s+", "No. ", location, flags=re.IGNORECASE)
+    location = re.sub(r"\s+", " ", location).strip().strip(" .,!?:;\"'")
+    return location[:300]
+
+
+def _parse_reminder_details(text: str) -> dict[str, str] | None:
+    event = _relative_event_from_text(text)
+    if event is not None:
+        event_at, match, unit, explicit_event_time = event
+        due_at = _same_day_notification_due_at(text, event_at)
+        remind_before: str | None = None
+        if due_at is None:
+            before_delta = _before_event_notification_delta(text)
+            if before_delta is not None:
+                delta, label = before_delta
+                due_at = event_at - delta
+                remind_before = label
+        if due_at is None:
+            due_at = event_at
+
+        title = _title_after_relative_delay(text, match) or _clean_reminder_title(text)
+        if not title:
+            return None
+        result = {
+            "title": title,
+            "due_at": due_at.isoformat(timespec="seconds"),
+        }
+        if explicit_event_time or remind_before or due_at != event_at:
+            result["event_at"] = event_at.isoformat(timespec="seconds")
+        if remind_before:
+            result["remind_before"] = remind_before
+        _enrich_reminder_args_from_text(result, text)
+        return result
+
+    due_at = _tomorrow_reminder_due_at(text)
+    if due_at is None:
+        return None
+    title = _clean_reminder_title(text)
+    if not title:
+        return None
+    result = {"title": title, "due_at": due_at}
+    _enrich_reminder_args_from_text(result, text)
+    return result
+
+
+def _relative_event_from_text(
+    text: str,
+) -> tuple[datetime, re.Match[str], str, bool] | None:
+    pattern = re.compile(
+        r"(?:\b(?:after|in)\s+(?P<amount_en>\d+|one|a|an)\s+"
+        r"(?P<unit_en>seconds?|minutes?|mins?|hours?|days?|weeks?|months?)|"
+        r"\bслед\s+(?P<amount_bg>\d+|един|една)\s+"
+        r"(?P<unit_bg>секунда|секунди?|минута|минути?|часа?|дни|ден|седмици?|седмица|месеца?|месец))",
+        flags=re.IGNORECASE,
+    )
+    match = pattern.search(text.strip())
+    if not match:
+        return None
+    amount = _parse_amount(match.group("amount_en") or match.group("amount_bg") or "")
+    unit = (match.group("unit_en") or match.group("unit_bg") or "").lower()
+    if amount is None:
+        return None
+
+    now = datetime.now().astimezone()
+    event_at = _add_relative_time(now, amount, unit)
+    if event_at is None:
+        return None
+
+    explicit_event_time = False
+    time_match = re.match(
+        r"\s*(?:at|в)\s+(?P<time>\d{1,2}(?:[:.]\d{2})?)",
+        text[match.end() :],
+        flags=re.IGNORECASE,
+    )
+    if time_match and _unit_is_day_or_larger(unit):
+        parsed_time = _parse_time_of_day(time_match.group("time"))
+        if parsed_time is not None:
+            hour, minute = parsed_time
+            event_at = event_at.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            explicit_event_time = True
+
+    return event_at, match, unit, explicit_event_time
+
+
+def _add_relative_time(current: datetime, amount: int, unit: str) -> datetime | None:
+    if unit.startswith(("second", "секунд")):
+        return current + timedelta(seconds=amount)
+    if unit.startswith(("minute", "min", "минут")):
+        return current + timedelta(minutes=amount)
+    if unit.startswith(("hour", "час")):
+        return current + timedelta(hours=amount)
+    if unit.startswith(("day", "д")) or unit == "ден":
+        return current + timedelta(days=amount)
+    if unit.startswith(("week", "седмиц")):
+        return current + timedelta(weeks=amount)
+    if unit.startswith(("month", "месец", "месеца")):
+        return _add_months(current, amount)
+    return None
+
+
+def _add_months(current: datetime, months: int) -> datetime:
+    month_index = current.month - 1 + months
+    year = current.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(current.day, calendar.monthrange(year, month)[1])
+    return current.replace(year=year, month=month, day=day)
+
+
+def _unit_is_day_or_larger(unit: str) -> bool:
+    return (
+        unit.startswith(("day", "week", "month", "д", "седмиц", "месец", "месеца"))
+        or unit == "ден"
+    )
+
+
+def _same_day_notification_due_at(text: str, event_at: datetime) -> datetime | None:
+    patterns = [
+        r"(?:i\s+want\s+you\s+to\s+remind\s+me|remind\s+me|notify\s+me)"
+        r"\s+at\s+(?P<time>\d{1,2}(?:[:.]\d{2})?)"
+        r".*?\b(?:same\s+day|that\s+day|day\s+of)",
+        r"(?:искам\s+да\s+ми\s+напомниш|напомн(?:и|иш)\s+ми)"
+        r"\s+в\s+(?P<time>\d{1,2}(?:[:.]\d{2})?)"
+        r".*?\b(?:в\s+деня|същия\s+ден)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        parsed_time = _parse_time_of_day(match.group("time"))
+        if parsed_time is None:
+            continue
+        hour, minute = parsed_time
+        return event_at.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return None
+
+
+def _before_event_notification_delta(text: str) -> tuple[timedelta, str] | None:
+    patterns = [
+        r"(?:remind\s+me|notify\s+me)\s+(?P<amount_en>\d+|one|a|an)\s+"
+        r"(?P<unit_en>minutes?|mins?|hours?|days?|weeks?)\s+before",
+        r"напомн(?:и|иш)(?:\s+ми)?\s+(?P<amount_bg>\d+|един|една)\s+"
+        r"(?P<unit_bg>минути?|часа?|дни|ден|седмици?|седмица)\s+преди(?:\s+това)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        amount = _parse_amount(_match_group(match, "amount_en") or _match_group(match, "amount_bg") or "")
+        unit = (_match_group(match, "unit_en") or _match_group(match, "unit_bg") or "").lower()
+        if amount is None:
+            return None
+        if unit.startswith(("minute", "min", "минут")):
+            return timedelta(minutes=amount), f"{amount} minute(s) before"
+        if unit.startswith(("hour", "час")):
+            return timedelta(hours=amount), f"{amount} hour(s) before"
+        if unit.startswith(("day", "д")) or unit == "ден":
+            return timedelta(days=amount), f"{amount} day(s) before"
+        if unit.startswith(("week", "седмиц")):
+            return timedelta(weeks=amount), f"{amount} week(s) before"
+    return None
+
+
+def _match_group(match: re.Match[str], name: str) -> str | None:
+    try:
+        return match.group(name)
+    except IndexError:
+        return None
+
+
+def _parse_time_of_day(value: str) -> tuple[int, int] | None:
+    match = re.match(r"^(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2}))?$", value.strip())
+    if not match:
+        return None
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute") or 0)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def _title_after_relative_delay(text: str, match: re.Match[str]) -> str | None:
+    before = _normalize_for_match(text[: match.start()])
+    if not any(word in before for word in {"remind", "напомни"}):
+        return None
+    tail = text[match.end() :].strip()
+    tail = re.sub(
+        r"^(?:at|в)\s+\d{1,2}(?:[:.]\d{2})?\s*",
+        "",
+        tail,
+        flags=re.IGNORECASE,
+    ).strip(" ,.!?:;")
+    if not tail:
+        return None
+    normalized_tail = _normalize_for_match(tail)
+    if any(
+        marker in normalized_tail
+        for marker in {"same day", "that day", "в деня", "същия ден", "преди това", "искам да ми напомниш"}
+    ):
+        return None
+    return _remove_location_phrase_from_title(tail.strip().strip(" .,!?:;\"'"))[:300]
 
 
 def _relative_reminder_due_at(text: str) -> str | None:
@@ -499,7 +834,7 @@ def _relative_reminder_due_at(text: str) -> str | None:
         r"(?:\b(?:after|in)\s+(?P<amount_en>\d+|one|a|an)\s+"
         r"(?P<unit_en>seconds?|minutes?|mins?|hours?|days?)|"
         r"\bслед\s+(?P<amount_bg>\d+|един|една)\s+"
-        r"(?P<unit_bg>секунди?|минути?|часа?|дни?))\s*$",
+        r"(?P<unit_bg>секунда|секунди?|минута|минути?|часа?|дни?))\s*$",
         flags=re.IGNORECASE,
     )
     match = pattern.search(text.strip())
@@ -542,21 +877,55 @@ def _tomorrow_reminder_due_at(text: str) -> str | None:
 
 def _clean_reminder_title(text: str) -> str:
     title = re.sub(
-        r"(?:\b(?:after|in)\s+(?:\d+|one|a|an)\s+"
-        r"(?:seconds?|minutes?|mins?|hours?|days?)|"
-        r"\bслед\s+(?:\d+|един|една)\s+"
-        r"(?:секунди?|минути?|часа?|дни?))\s*$",
+        r"\s+(?:and\s+)?(?:i\s+want\s+you\s+to\s+)?(?:remind\s+me|notify\s+me)"
+        r"\s+(?:\d+|one|a|an)\s+"
+        r"(?:minutes?|mins?|hours?|days?|weeks?)\s+before.*$",
         "",
         text.strip(),
         flags=re.IGNORECASE,
     )
+    title = re.sub(
+        r"\s+(?:и\s+)?(?:искам\s+да\s+ми\s+)?напомн(?:и|иш)(?:\s+ми)?\s+"
+        r"(?:\d+|един|една)\s+(?:минути?|минута|часа?|дни|ден|седмици?|седмица)"
+        r"\s+преди(?:\s+това)?.*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"\s+(?:and\s+)?(?:i\s+want\s+you\s+to\s+remind\s+me|remind\s+me|notify\s+me)"
+        r"\s+at\s+\d{1,2}(?:[:.]\d{2})?.*?\b(?:same\s+day|that\s+day|day\s+of).*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"\s+(?:и\s+)?(?:искам\s+да\s+ми\s+напомниш|напомн(?:и|иш)\s+ми)"
+        r"\s+в\s+\d{1,2}(?:[:.]\d{2})?.*?\b(?:в\s+деня|същия\s+ден).*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"(?:\b(?:after|in)\s+(?:\d+|one|a|an)\s+"
+        r"(?:seconds?|minutes?|mins?|hours?|days?|weeks?|months?)|"
+        r"\bслед\s+(?:\d+|един|една)\s+"
+        r"(?:секунда|секунди?|минута|минути?|часа?|дни|ден|седмици?|седмица|месеца?|месец)"
+        r"(?:\s+(?:at|в)\s+\d{1,2}(?:[:.]\d{2})?)?)\s*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"^(?:запомни\s+)?(?:и\s+)?ми\s+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^запомни\s+и\s+", "", title, flags=re.IGNORECASE)
     title = re.sub(
         r"^(?:please\s+)?remind\s+me(?:\s+(?:that|to))?\s+",
         "",
         title,
         flags=re.IGNORECASE,
     )
-    title = re.sub(r"^напомни\s+ми(?:\s+(?:че|да))?\s+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^напомни(?:\s+ми)?(?:\s+(?:че|да))?\s+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^съм\s+на\s+", "", title, flags=re.IGNORECASE)
     title = re.sub(
         r"\s+and\s+i\s+want\s+you\s+to\s+remind\s+me\s*$",
         "",
@@ -564,7 +933,23 @@ def _clean_reminder_title(text: str) -> str:
         flags=re.IGNORECASE,
     )
     title = re.sub(r"\s+и\s+искам\s+да\s+ми\s+напомниш\s*$", "", title, flags=re.IGNORECASE)
-    return title.strip().strip(" .,!?:;\"'")
+    return _remove_location_phrase_from_title(title.strip().strip(" .,!?:;\"'"))
+
+
+def _remove_location_phrase_from_title(title: str) -> str:
+    cleaned = re.sub(
+        r"\s+(?:за|до|на)\s+адрес\s+.+$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s+(?:to|at)\s+address\s+.+$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip().strip(" .,!?:;\"'") or title
 
 
 def _parse_amount(value: str) -> int | None:
@@ -608,7 +993,9 @@ def _extract_urlish_target(text: str) -> str | None:
 
 def _terminal_request_from_text(text: str) -> ToolRequest | None:
     normalized = _normalize_for_match(text)
-    if "terminal" not in normalized:
+    mentions_terminal = "terminal" in normalized
+    mentions_readme_cat = re.search(r"\bcat\s+(readme\.md|README\.md)\b", text, flags=re.IGNORECASE)
+    if not mentions_terminal and mentions_readme_cat is None:
         return None
     command: list[str] | None = None
     if re.search(r"\b(?:type|run|execute)\s+ls\b", text, flags=re.IGNORECASE):
@@ -619,6 +1006,9 @@ def _terminal_request_from_text(text: str) -> ToolRequest | None:
         command = ["git", "status"]
     elif re.search(r"\bgit\s+diff\b", text, flags=re.IGNORECASE):
         command = ["git", "diff"]
+    else:
+        if mentions_readme_cat:
+            command = ["cat", mentions_readme_cat.group(1)]
     if command is None:
         return None
     return ToolRequest(
@@ -626,6 +1016,19 @@ def _terminal_request_from_text(text: str) -> ToolRequest | None:
         args={"command": command},
         reason="User asked to run a simple allowlist-style terminal command.",
     )
+
+
+def _terminal_policy_error(request: ToolRequest, config: dict[str, Any]) -> str | None:
+    if request.tool != "terminal.run":
+        return None
+    raw_command = request.args.get("command")
+    if not isinstance(raw_command, list):
+        return "terminal.run requires command as a string array"
+    try:
+        TerminalPolicy.from_config(config).validate([str(part) for part in raw_command])
+    except PermissionError as exc:
+        return str(exc)
+    return None
 
 
 def _is_auto_approved_terminal_request(request: ToolRequest, config: dict[str, Any]) -> bool:
@@ -653,7 +1056,28 @@ def _memory_write_request_from_text(
     fact = _extract_memory_fact(text)
     if fact is None:
         return None
-    path = "facts/personal.md"
+    if _is_short_term_memory_text(text):
+        fact = _clean_short_term_memory_fact(fact)
+        ttl_hours = _short_term_ttl_hours_from_text(text)
+        return ToolRequest(
+            tool="memory.write",
+            args={
+                "path": "auto",
+                "title": fact[:80],
+                "body": fact,
+                "memory_scope": "short-term",
+                "ttl_hours": ttl_hours,
+                "metadata": {
+                    "type": "short_term_note",
+                    "memory_scope": "short-term",
+                    "ttl_hours": ttl_hours,
+                    "source": "chat",
+                    "confidence": "medium",
+                },
+            },
+            reason="User asked the agent to remember temporary context.",
+        )
+    path = "long-term/facts/personal.md"
     manager = MemoryManager(runtime_context.memory_root)
     existing_body = ""
     try:
@@ -672,12 +1096,47 @@ def _memory_write_request_from_text(
             "body": "\n".join(lines),
             "metadata": {
                 "type": "personal_fact",
+                "memory_scope": "long-term",
                 "source": "chat",
                 "confidence": "high",
             },
         },
         reason="User asked the agent to remember a personal fact.",
     )
+
+
+def _is_short_term_memory_text(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "short term",
+            "short-term",
+            "temporary",
+            "temporarily",
+            "временно",
+            "краткосрочно",
+            "за 24 часа",
+            "за 48 часа",
+        }
+    )
+
+
+def _short_term_ttl_hours_from_text(text: str) -> int:
+    normalized = _normalize_for_match(text)
+    if "48" in normalized:
+        return 48
+    return 24
+
+
+def _clean_short_term_memory_fact(fact: str) -> str:
+    cleaned = re.sub(
+        r"^(?:short[-\s]?term|temporary|temporarily|временно|краткосрочно)(?:\s+че|\s+that)?\s+",
+        "",
+        fact.strip(),
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip().strip(" .,!?:;\"'") or fact
 
 
 def _extract_memory_fact(text: str) -> str | None:
@@ -710,6 +1169,16 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
     agent_name = profile["agent_name"]
     user_name = profile["user_name"]
     nickname = profile["nickname_bg"] if _looks_bulgarian(text) else profile["nickname"]
+    if _is_open_terminal_window_request(normalized):
+        if _looks_bulgarian(text):
+            return (
+                "Не мога да отворя нов GUI прозорец на Terminal от dashboard-а. "
+                "Мога да изпълня allowlisted команда през Terminal tool, например: ls, pwd, git status."
+            )
+        return (
+            "I cannot open a new GUI Terminal window from the dashboard. "
+            "I can run allowlisted commands through the Terminal tool, for example: ls, pwd, git status."
+        )
     if _is_unimplemented_browser_request(normalized):
         if _looks_bulgarian(text):
             return "Browser sandbox още не е имплементиран, затова не мога реално да отварям Google или уеб страници оттук."
@@ -780,6 +1249,15 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
             "disabled until explicitly configured."
         )
     return None
+
+
+def _is_open_terminal_window_request(normalized: str) -> bool:
+    if "terminal" not in normalized and "терминал" not in normalized:
+        return False
+    if "open" not in normalized and "отвори" not in normalized:
+        return False
+    runnable_markers = {" ls", " pwd", "git status", "git diff", "cat "}
+    return not any(marker in f" {normalized}" for marker in runnable_markers)
 
 
 def _handle_identity_update(text: str, runtime_context: ToolRuntimeContext) -> AgentResponse | None:
@@ -952,7 +1430,7 @@ def _update_profile(
 
     profile = _profile_from_config(config)
     MemoryManager(runtime_context.memory_root).write(
-        "profile.md",
+        "long-term/profile.md",
         "\n".join(
             [
                 f"User name: {profile['user_name'] or 'not set'}",
@@ -964,6 +1442,7 @@ def _update_profile(
         ),
         metadata={
             "type": "profile",
+            "memory_scope": "long-term",
             "source": "chat_identity",
             "confidence": "high",
         },
@@ -1032,7 +1511,7 @@ def _tool_success_message(request: ToolRequest) -> str:
     if request.tool == "memory.write":
         return "Saved to memory."
     if request.tool == "reminders.create":
-        return "Reminder saved."
+        return "Reminder saved. I will notify you in Telegram when it is due if Telegram is configured."
     if request.tool == "reminders.complete":
         return "Reminder completed."
     if request.tool == "calendar.create_event":

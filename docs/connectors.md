@@ -110,14 +110,19 @@ is used.
 
 Operational notes:
 
-- The bot token is read from `DMDAGENT_TELEGRAM_BOT_TOKEN` by default.
-- The token is not stored in `config.yaml` or sent to the model.
+- The bot token is read from `DMDAGENT_TELEGRAM_BOT_TOKEN` by default, or from
+  the current API process environment when it has been pasted in the dashboard.
+- The token is not stored in `config.yaml`, persisted by the dashboard, or sent
+  to the model.
 - `/id` returns the Telegram user ID needed for the allowlist.
 - `/approvals`, `/approve <id>`, and `/deny <id>` work from Telegram for allowlisted users.
 - Risky actions still go through the same approval queue as CLI and web UI.
 - The dashboard can enable/disable Telegram, configure the token environment
-  variable name, load a token into the current API process environment, and edit
-  the allowlisted user IDs. Long-running polling is still started from the CLI.
+  variable name, load a token into the current API process, and edit the
+  allowlisted user IDs.
+- `start web` starts Telegram polling in the API process when Telegram is
+  enabled and a token is available. Loading a token from the dashboard also
+  starts polling automatically once the user ID is allowlisted.
 
 ## WhatsApp
 

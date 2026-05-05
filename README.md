@@ -115,16 +115,21 @@ Foundation implemented:
   permissions, approval thresholds, and cloud context checks.
 - SQLite audit store with audit logs, tool calls, approvals, connector status,
   LLM requests, and memory events tables.
-- Markdown memory manager with path safety.
+- Markdown memory manager with path safety, long-term/short-term scopes, and
+  automatic TTL purging for approved short-term memory.
 - Deterministic chat routes for help, greetings, memory listing, explicit
-  memory writes, local reminders, and simple browser-open requests.
-- Ollama planner integration for structured tool planning.
+  long-term and short-term memory writes, local reminder fallback parsing, and
+  simple browser-open requests.
+- Ollama planner integration for structured tool planning, including
+  model-first reminder extraction that can use local memory context and
+  model-guided Markdown memory routing into long-term or short-term files.
 - Approval queue with approve-and-execute semantics.
 - FastAPI backend skeleton.
 - React/Vite dashboard MVP.
 - Local model mode presets for light, fast, balanced, and power modes.
 - OpenAI-compatible provider support for API-key and local compatible servers,
-  with API key values kept in environment variables only.
+  with API key values kept in the running process environment only from the
+  dashboard when entered there.
 - `dmdagent doctor` readiness and security diagnostics, also exposed in the
   dashboard Doctor view.
 - Dashboard connector, terminal, and Telegram control views backed by
@@ -134,7 +139,10 @@ Foundation implemented:
 - `terminal.run` handler wired through manifests, permissions, approval queue,
   workspace-only cwd, timeouts, output limits, and redaction.
 - Local `reminders.create`, `reminders.list`, and `reminders.complete` tools
-  with approval-gated writes to the private workspace reminder store.
+  with approval-gated writes to the private workspace reminder store, adaptive
+  low-resource scheduling, event/reminder time separation, optional
+  location/action URLs, and Telegram notifications for due reminders when
+  Telegram is configured.
 - Local calendar store handlers for create, update, delete, today, week, and
   free-slot queries. External calendar sync is still a connector task.
 - Guarded `browser.open` and `browser.extract_text` read tools for HTTP/HTTPS
@@ -146,7 +154,9 @@ Foundation implemented:
 - Gmail tool handlers fail closed with `not_configured` until real OAuth
   connector setup exists, instead of silently running unimplemented actions.
 - Telegram polling interface with allowlist, `/id`, `/help`, `/approvals`,
-  `/approve <id>`, `/deny <id>`, audit logging, and approve/deny inline buttons.
+  `/approve <id>`, `/deny <id>`, audit logging, approve/deny inline buttons,
+  and reminder action buttons for Done, Snooze, Repeat +1d, Cancel, and Maps
+  links when a reminder has an action URL.
 
 Partially implemented or stubbed:
 
@@ -157,10 +167,13 @@ Partially implemented or stubbed:
 - Browser interaction tools require the optional Playwright runtime and Chromium
   browser install. Without that runtime, they fail closed with setup guidance.
 - Web dashboard can view chat, connectors, tools, permissions, approvals,
-  terminal controls, Telegram setup controls, memory, audit, models, and Doctor
-  diagnostics. Telegram polling itself still runs from the CLI process.
-- OS secret store protocol exists, but no concrete OS-backed secret store is
-  implemented yet.
+  terminal controls, Telegram setup controls, OpenAI key/model/usage controls,
+  memory, audit, models, and Doctor diagnostics. `start web` starts Telegram
+  polling in the API process when Telegram is enabled and the bot token is
+  available.
+- Telegram and dashboard-entered OpenAI token values are process-only by
+  default. Restarting the API requires entering them again or exporting the
+  relevant environment variable before launch.
 
 ## Repository Map
 
@@ -249,8 +262,10 @@ For normal use, start everything from one terminal:
 start web
 ```
 
-This starts the local API and dashboard, opens the browser, and keeps both
-services attached to the same terminal. Stop with `Ctrl+C`.
+This starts the local API and dashboard, opens the browser, and also starts
+Telegram polling when Telegram is enabled and a bot token is available from the
+current process environment or `DMDAGENT_TELEGRAM_BOT_TOKEN`. Stop everything
+with `Ctrl+C`.
 
 First-time setup is built into `start session`. To change model later:
 
@@ -271,7 +286,7 @@ Useful everyday controls:
 ```bash
 start session                   # terminal chat
 start ask "Show memory"         # one terminal answer
-start web                       # API + dashboard in one terminal
+start web                       # API + dashboard + Telegram if configured
 start open                      # open the dashboard
 start doctor                    # check local health/security
 start model                     # show current model and modes
@@ -317,6 +332,7 @@ dmdagent permissions list
 dmdagent permissions grant gmail.readonly
 dmdagent permissions revoke gmail.readonly
 dmdagent terminal status
+dmdagent terminal workspace /Users/Apple/PycharmProjects/dmdagent4all
 dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal auto-approve on
@@ -437,6 +453,11 @@ start models set <model-name>
 start doctor
 ```
 
+The dashboard also has an OpenAI view. Paste the API key there to load it into
+the current API process, fetch the model dropdown from OpenAI, choose the model,
+and set a local project spending limit. Local spend is estimated from token
+usage returned to this project; OpenAI billing remains the source of truth.
+
 For a local OpenAI-compatible server:
 
 ```bash
@@ -459,6 +480,7 @@ Terminal execution is disabled by default and requires all of these:
 
 ```bash
 dmdagent terminal allow git status
+dmdagent terminal workspace /Users/Apple/PycharmProjects/dmdagent4all
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal run -- git status
 dmdagent approvals approve <id>
@@ -478,8 +500,10 @@ permission engine. It is disabled by default.
 
 Rules:
 
-- Bot token comes from `DMDAGENT_TELEGRAM_BOT_TOKEN`.
-- Bot token is not stored in `config.yaml`.
+- Bot token comes from the current process environment, normally
+  `DMDAGENT_TELEGRAM_BOT_TOKEN`.
+- Bot token is not stored in `config.yaml` and dashboard-entered tokens are lost
+  on API process restart.
 - `/id` is available so a user can discover their Telegram user ID.
 - All useful access requires an allowlisted Telegram user ID.
 - Every Telegram request is audited as `telegram.request`.
@@ -506,8 +530,9 @@ Useful in-chat controls:
 /back
 ```
 
-The token command loads the token only for the current terminal process. It is
-not stored in `config.yaml`.
+The token command loads the token into the current process. It is never stored
+in `config.yaml`. After a restart, paste it in the dashboard again or export
+`DMDAGENT_TELEGRAM_BOT_TOKEN` before running `start web`.
 
 Available Telegram commands:
 
@@ -567,9 +592,9 @@ Recommended order:
 1. Harden Telegram operational behavior.
    Document a launchd/systemd service example and consider dashboard-driven
    lifecycle controls for starting/stopping polling.
-2. Implement OS-backed secret storage.
-   Provide a concrete secret store for macOS Keychain or another local secure
-   backend. Keep secrets out of config and model context.
+2. Broaden OS-backed secret storage.
+   Extend the local secret store beyond Telegram and add OS-backed secure
+   backends where needed. Keep secrets out of config and model context.
 3. Implement the first real OAuth connector.
    Start with read-only Gmail search or Google Calendar free/busy. Avoid
    send/modify actions until read-only flows are tested.

@@ -14,6 +14,8 @@ from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.config import load_config, write_default_config
 from dmdagent4all.runtime import build_agent_core
 from dmdagent4all.security import redact_text
+from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.reminders import cancel_reminder, complete_reminder, snooze_reminder
 
 
 DEFAULT_TOKEN_ENV = "DMDAGENT_TELEGRAM_BOT_TOKEN"
@@ -137,11 +139,13 @@ class TelegramInterface:
         api: TelegramAPI,
         audit_store: AuditStore,
         core_factory: Callable[[], AgentCore] = build_agent_core,
+        paths: AppPaths | None = None,
     ) -> None:
         self.settings = settings
         self.api = api
         self.audit_store = audit_store
         self.core_factory = core_factory
+        self.paths = paths or AppPaths.default()
 
     @classmethod
     def from_current_config(cls) -> "TelegramInterface":
@@ -150,7 +154,7 @@ class TelegramInterface:
         write_default_config(paths.config)
         config = load_config(paths.config)
         settings = settings_from_config(config)
-        token = os.environ.get(settings.bot_token_env)
+        token = load_telegram_token(settings)
         if not token:
             raise TelegramConfigError(
                 f"Missing Telegram bot token. Export {settings.bot_token_env} before running."
@@ -159,6 +163,7 @@ class TelegramInterface:
             settings=settings,
             api=TelegramBotAPI(token),
             audit_store=AuditStore(paths.audit_db),
+            paths=paths,
         )
 
     def run_polling(
@@ -299,8 +304,24 @@ class TelegramInterface:
             )
             return
 
-        action, approval_id = _parse_approval_callback(data)
-        if action is None or approval_id is None:
+        reminder_action = _parse_reminder_callback(data)
+        if reminder_action is not None:
+            response = self._handle_reminder_action(*reminder_action)
+            self.api.answer_callback_query(callback_id, response.message)
+            self.api.send_message(chat_id, _format_agent_response(response))
+            self._record_request(
+                update=update,
+                user_id=user_id,
+                chat_id=chat_id,
+                text=data,
+                allowed=True,
+                result_status=response.status,
+                request_type="callback",
+            )
+            return
+
+        approval_action, approval_id = _parse_approval_callback(data)
+        if approval_action is None or approval_id is None:
             self.api.answer_callback_query(callback_id, "Unsupported action.")
             self._record_request(
                 update=update,
@@ -313,7 +334,7 @@ class TelegramInterface:
             )
             return
 
-        response = self._handle_approval_action(action, approval_id)
+        response = self._handle_approval_action(approval_action, approval_id)
         self.api.answer_callback_query(callback_id, response.message)
         self.api.send_message(chat_id, _format_agent_response(response))
         self._record_request(
@@ -375,6 +396,60 @@ class TelegramInterface:
             )
         return AgentResponse(status="error", message=f"Unknown approval action: {action}")
 
+    def _handle_reminder_action(
+        self,
+        action: str,
+        reminder_id: int,
+        value: int | None,
+    ) -> AgentResponse:
+        paths = self.paths
+        paths.ensure()
+        write_default_config(paths.config)
+        context = ToolRuntimeContext(
+            memory_root=paths.memory,
+            workspace_root=paths.workspace,
+            config=load_config(paths.config),
+            config_path=paths.config,
+        )
+        try:
+            if action == "done":
+                complete_reminder({"id": reminder_id}, context)
+                self._record_reminder_action(reminder_id, "done")
+                return AgentResponse(status="ok", message="Reminder completed.")
+            if action == "cancel":
+                cancel_reminder({"id": reminder_id}, context)
+                self._record_reminder_action(reminder_id, "cancel")
+                return AgentResponse(status="ok", message="Reminder canceled.")
+            if action == "snooze":
+                seconds = value or 300
+                reminder = snooze_reminder(context, reminder_id, seconds=seconds)
+                if reminder is None:
+                    return AgentResponse(status="not_found", message="Reminder not found.")
+                self._record_reminder_action(reminder_id, "snooze", {"seconds": seconds})
+                return AgentResponse(
+                    status="ok",
+                    message=f"Reminder snoozed for {_human_duration(seconds)}.",
+                )
+        except ValueError as exc:
+            return AgentResponse(status="error", message=str(exc))
+        return AgentResponse(status="error", message=f"Unknown reminder action: {action}")
+
+    def _record_reminder_action(
+        self,
+        reminder_id: int,
+        action: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.audit_store.record_event(
+            AuditEvent(
+                event_type="reminder.action",
+                tool="reminders.create",
+                approved=True,
+                result_status=action,
+                metadata={"reminder_id": reminder_id, **(metadata or {})},
+            )
+        )
+
     def _authorization_denial(self, user_id: int) -> str | None:
         if not self.settings.enabled:
             return "Telegram interface is disabled locally. In terminal chat run: /telegram enable"
@@ -435,6 +510,19 @@ def settings_from_config(config: dict[str, Any]) -> TelegramSettings:
     )
 
 
+def load_telegram_token(settings: TelegramSettings) -> str | None:
+    return os.environ.get(settings.bot_token_env) or None
+
+
+def store_telegram_token(settings: TelegramSettings, token: str) -> str:
+    os.environ[settings.bot_token_env] = token
+    return "process environment"
+
+
+def telegram_token_available(settings: TelegramSettings) -> bool:
+    return bool(load_telegram_token(settings))
+
+
 def _format_agent_response(response: AgentResponse) -> str:
     if response.status == "ok":
         lines = [response.message]
@@ -475,6 +563,39 @@ def _approval_keyboard(response: AgentResponse) -> dict[str, Any] | None:
     }
 
 
+def reminder_notification_text(reminder: dict[str, Any]) -> str:
+    title = str(reminder.get("title") or "Reminder").strip() or "Reminder"
+    lines = [f"Reminder: {title}"]
+    event_at = str(reminder.get("event_at") or "").strip()
+    location = str(reminder.get("location") or "").strip()
+    if event_at:
+        lines.append(f"Event: {event_at}")
+    if location:
+        lines.append(f"Location: {location}")
+    return _fit_message(redact_text("\n".join(lines)))
+
+
+def reminder_keyboard(reminder: dict[str, Any]) -> dict[str, Any]:
+    reminder_id = _as_int(reminder.get("id")) or 0
+    rows: list[list[dict[str, str]]] = [
+        [
+            {"text": "Done", "callback_data": f"reminder:done:{reminder_id}"},
+            {"text": "+5 min", "callback_data": f"reminder:snooze:{reminder_id}:300"},
+            {"text": "+15 min", "callback_data": f"reminder:snooze:{reminder_id}:900"},
+        ],
+        [
+            {"text": "+1 hour", "callback_data": f"reminder:snooze:{reminder_id}:3600"},
+            {"text": "Repeat +1d", "callback_data": f"reminder:snooze:{reminder_id}:86400"},
+            {"text": "Cancel", "callback_data": f"reminder:cancel:{reminder_id}"},
+        ],
+    ]
+    action_url = str(reminder.get("action_url") or "").strip()
+    if action_url.startswith(("https://", "http://")):
+        button_text = "Open Maps" if "google.com/maps" in action_url else "Open action"
+        rows.append([{"text": button_text, "url": action_url}])
+    return {"inline_keyboard": rows}
+
+
 def _parse_approval_callback(data: str) -> tuple[str | None, int | None]:
     if ":" not in data:
         return None, None
@@ -483,6 +604,33 @@ def _parse_approval_callback(data: str) -> tuple[str | None, int | None]:
         return None, None
     approval_id = _as_int(raw_id)
     return action, approval_id
+
+
+def _parse_reminder_callback(data: str) -> tuple[str, int, int | None] | None:
+    parts = data.split(":")
+    if len(parts) < 3 or parts[0] != "reminder":
+        return None
+    action = parts[1]
+    if action not in {"done", "snooze", "cancel"}:
+        return None
+    reminder_id = _as_int(parts[2])
+    if reminder_id is None:
+        return None
+    value = _as_int(parts[3]) if len(parts) >= 4 else None
+    return action, reminder_id, value
+
+
+def _human_duration(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        amount = seconds // 86400
+        return f"{amount} day" + ("" if amount == 1 else "s")
+    if seconds % 3600 == 0:
+        amount = seconds // 3600
+        return f"{amount} hour" + ("" if amount == 1 else "s")
+    if seconds % 60 == 0:
+        amount = seconds // 60
+        return f"{amount} minute" + ("" if amount == 1 else "s")
+    return f"{seconds} seconds"
 
 
 def _fit_message(text: str, *, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:

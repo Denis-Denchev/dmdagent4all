@@ -8,6 +8,7 @@ import {
   type DoctorResponse,
   type MemoryFile,
   type ModelMode,
+  type OpenAIStatus,
   type PermissionItem,
   type Status,
   type TelegramStatus,
@@ -24,6 +25,7 @@ type View =
   | 'permissions'
   | 'terminal'
   | 'telegram'
+  | 'openai'
   | 'memory'
   | 'audit'
   | 'models'
@@ -43,10 +45,15 @@ const views: Array<{ key: View; label: string }> = [
   { key: 'permissions', label: 'Permissions' },
   { key: 'terminal', label: 'Terminal' },
   { key: 'telegram', label: 'Telegram' },
+  { key: 'openai', label: 'OpenAI' },
   { key: 'memory', label: 'Memory' },
   { key: 'audit', label: 'Audit' },
   { key: 'models', label: 'Models' },
 ]
+
+function formatUsd(value: number | null | undefined, digits = 2) {
+  return value === null || value === undefined ? '-' : `$${value.toFixed(digits)}`
+}
 
 export function App() {
   const [activeView, setActiveView] = useState<View>('chat')
@@ -56,6 +63,7 @@ export function App() {
   const [connectors, setConnectors] = useState<ConnectorStatus[]>([])
   const [terminal, setTerminal] = useState<TerminalStatus | null>(null)
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
+  const [openai, setOpenAI] = useState<OpenAIStatus | null>(null)
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
   const [doctor, setDoctor] = useState<DoctorResponse | null>(null)
@@ -67,12 +75,17 @@ export function App() {
   const [terminalCommand, setTerminalCommand] = useState('')
   const [terminalRunCommand, setTerminalRunCommand] = useState('')
   const [terminalCwd, setTerminalCwd] = useState('')
+  const [terminalWorkspaceRoot, setTerminalWorkspaceRoot] = useState('')
   const [terminalTimeout, setTerminalTimeout] = useState('')
   const [terminalMaxOutput, setTerminalMaxOutput] = useState('')
   const [terminalAutoApprove, setTerminalAutoApprove] = useState(false)
   const [telegramUserId, setTelegramUserId] = useState('')
   const [telegramTokenEnv, setTelegramTokenEnv] = useState('')
   const [telegramToken, setTelegramToken] = useState('')
+  const [openaiKey, setOpenAIKey] = useState('')
+  const [openaiModels, setOpenAIModels] = useState<string[]>([])
+  const [openaiSelectedModel, setOpenAISelectedModel] = useState('')
+  const [openaiLimitDraft, setOpenAILimitDraft] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'agent',
@@ -101,6 +114,7 @@ export function App() {
       connectorsResult,
       terminalResult,
       telegramResult,
+      openaiResult,
       approvalsResult,
       auditResult,
       doctorResult,
@@ -114,6 +128,7 @@ export function App() {
         api.connectors(),
         api.terminal(),
         api.telegram(),
+        api.openai(),
         api.approvals(),
         api.audit(),
         api.doctor(),
@@ -126,10 +141,14 @@ export function App() {
     setConnectors(connectorsResult)
     setTerminal(terminalResult)
     setTelegram(telegramResult)
+    setOpenAI(openaiResult)
+    setTerminalWorkspaceRoot(terminalResult.workspace_root)
     setTerminalTimeout(String(terminalResult.timeout_seconds))
     setTerminalMaxOutput(String(terminalResult.max_output_chars))
     setTerminalAutoApprove(terminalResult.auto_approve_allowlisted)
     setTelegramTokenEnv(telegramResult.bot_token_env)
+    setOpenAISelectedModel(openaiResult.provider === 'openai' ? openaiResult.model : '')
+    setOpenAILimitDraft(openaiResult.usage.limit_usd === null ? '' : String(openaiResult.usage.limit_usd))
     setApprovals(approvalsResult)
     setAudit(auditResult)
     setDoctor(doctorResult)
@@ -221,6 +240,7 @@ export function App() {
       () =>
         api.updateTerminalSettings({
           workspace_only: terminal?.workspace_only ?? true,
+          workspace_root: terminalWorkspaceRoot,
           timeout_seconds: Number(terminalTimeout),
           max_output_chars: Number(terminalMaxOutput),
           auto_approve_allowlisted: terminalAutoApprove,
@@ -270,9 +290,68 @@ export function App() {
   async function loadTelegramToken() {
     const token = telegramToken.trim()
     if (!token) return
-    await runAction(() => api.loadTelegramToken(token), 'Telegram token loaded into this API process.')
+    await runAction(() => api.loadTelegramToken(token), 'Telegram token loaded.')
     setTelegramToken('')
   }
+
+  async function toggleTelegramPolling() {
+    await runAction(
+      () => (telegram?.polling ? api.stopTelegram() : api.startTelegram()),
+      telegram?.polling ? 'Telegram polling stopped.' : 'Telegram polling started.',
+    )
+  }
+
+  async function loadOpenAIKey() {
+    const key = openaiKey.trim()
+    if (!key) return
+    await runAction(() => api.loadOpenAIKey(key), 'OpenAI API key loaded for this process.')
+    setOpenAIKey('')
+  }
+
+  async function refreshOpenAIModels() {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const response = await api.openAIModels()
+      setOpenAIModels(response.models)
+      setOpenAI(response.data)
+      if (!openaiSelectedModel && response.models.length > 0) {
+        setOpenAISelectedModel(response.models[0])
+      }
+      setNotice(`Loaded ${response.models.length} OpenAI models.`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Request failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveOpenAIModel() {
+    const model = openaiSelectedModel.trim()
+    if (!model) return
+    await runAction(() => api.setOpenAIModel(model), `OpenAI model set to ${model}.`)
+  }
+
+  async function saveOpenAILimit() {
+    const trimmed = openaiLimitDraft.trim()
+    const limit = trimmed ? Number(trimmed) : null
+    if (limit !== null && (!Number.isFinite(limit) || limit < 0)) {
+      setNotice('OpenAI limit must be empty or a positive number.')
+      return
+    }
+    await runAction(() => api.setOpenAILimit(limit), 'OpenAI local spending limit updated.')
+  }
+
+  async function resetOpenAIUsage() {
+    await runAction(() => api.resetOpenAIUsage(), 'OpenAI local usage counters reset.')
+  }
+
+  const openaiModelOptions = useMemo(() => {
+    const options = new Set(openaiModels)
+    if (openai?.provider === 'openai' && openai.model) options.add(openai.model)
+    if (openaiSelectedModel) options.add(openaiSelectedModel)
+    return Array.from(options).sort((left, right) => left.localeCompare(right))
+  }, [openai?.model, openaiModels, openaiSelectedModel])
 
   return (
     <div className="app-shell">
@@ -536,8 +615,18 @@ export function App() {
                 <strong>{terminal?.tool_enabled ? 'enabled' : 'disabled'}</strong>
                 <span>Permission</span>
                 <strong>{terminal?.permission_granted ? 'granted' : 'missing'}</strong>
+                <span>Workspace</span>
+                <strong>{terminal?.workspace_root ?? '-'}</strong>
               </div>
               <div className="settings-form">
+                <label className="setting-wide">
+                  Workspace root
+                  <input
+                    value={terminalWorkspaceRoot}
+                    onChange={(event) => setTerminalWorkspaceRoot(event.target.value)}
+                    placeholder="/Users/Apple/PycharmProjects/dmdagent4all"
+                  />
+                </label>
                 <label>
                   Timeout seconds
                   <input
@@ -649,20 +738,30 @@ export function App() {
               <div className="settings-header">
                 <div>
                   <strong>Telegram Remote Access</strong>
-                  <span>{telegram?.ready ? 'Ready for allowlisted polling' : 'Needs token, enablement, and an allowlisted user'}</span>
+                  <span>{telegram?.polling ? 'Polling for allowlisted messages' : 'Needs token, enablement, and an allowlisted user'}</span>
                 </div>
-                <button
-                  className={telegram?.enabled ? 'button button-danger' : 'button'}
-                  type="button"
-                  onClick={() =>
-                    void runAction(
-                      () => (telegram?.enabled ? api.disableTelegram() : api.enableTelegram()),
-                      telegram?.enabled ? 'Telegram disabled.' : 'Telegram enabled.',
-                    )
-                  }
-                >
-                  {telegram?.enabled ? 'Disable' : 'Enable'}
-                </button>
+                <div className="row-actions">
+                  <button
+                    className={telegram?.enabled ? 'button button-danger' : 'button'}
+                    type="button"
+                    onClick={() =>
+                      void runAction(
+                        () => (telegram?.enabled ? api.disableTelegram() : api.enableTelegram()),
+                        telegram?.enabled ? 'Telegram disabled.' : 'Telegram enabled.',
+                      )
+                    }
+                  >
+                    {telegram?.enabled ? 'Disable' : 'Enable'}
+                  </button>
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    onClick={() => void toggleTelegramPolling()}
+                    disabled={!telegram?.ready}
+                  >
+                    {telegram?.polling ? 'Stop Polling' : 'Start Polling'}
+                  </button>
+                </div>
               </div>
               <div className="status-grid">
                 <span>Token env</span>
@@ -671,6 +770,14 @@ export function App() {
                 <strong>{telegram?.bot_token_available ? 'yes' : 'no'}</strong>
                 <span>Allowed users</span>
                 <strong>{telegram?.allowed_user_ids.length ?? 0}</strong>
+                <span>Polling</span>
+                <strong>{telegram?.polling ? 'running' : 'stopped'}</strong>
+                {telegram?.polling_error ? (
+                  <>
+                    <span>Error</span>
+                    <strong>{telegram.polling_error}</strong>
+                  </>
+                ) : null}
               </div>
             </div>
 
@@ -678,7 +785,7 @@ export function App() {
               <div className="settings-header">
                 <div>
                   <strong>Token Environment</strong>
-                  <span>Token values are loaded only into the running API process.</span>
+                  <span>Token is loaded into this API process only; restart requires entering it again.</span>
                 </div>
               </div>
               <form
@@ -754,6 +861,143 @@ export function App() {
                   </article>
                 ))}
               </div>
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'openai' ? (
+          <section className="openai-layout">
+            <div className="panel settings-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>OpenAI Runtime</strong>
+                  <span>{openai?.api_key_available ? 'API key is loaded for this process' : 'Paste an API key after each restart'}</span>
+                </div>
+              </div>
+              <div className="status-grid">
+                <span>Provider</span>
+                <strong>{openai?.provider || '-'}</strong>
+                <span>Model</span>
+                <strong>{openai?.model || '-'}</strong>
+                <span>Base URL</span>
+                <strong>{openai?.base_url || '-'}</strong>
+                <span>Key env</span>
+                <strong>{openai?.api_key_env || '-'}</strong>
+                <span>Key loaded</span>
+                <strong>{openai?.api_key_available ? 'yes' : 'no'}</strong>
+              </div>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>API Key</strong>
+                  <span>The key is kept in memory for the running API process.</span>
+                </div>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void loadOpenAIKey()
+                }}
+              >
+                <input
+                  type="password"
+                  value={openaiKey}
+                  onChange={(event) => setOpenAIKey(event.target.value)}
+                  placeholder="sk-..."
+                />
+                <button className="button" type="submit" disabled={busy}>Load Key</button>
+              </form>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Model</strong>
+                  <span>Fetches the dropdown from OpenAI with the loaded key.</span>
+                </div>
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => void refreshOpenAIModels()}
+                  disabled={busy || !openai?.api_key_available}
+                >
+                  Load Models
+                </button>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void saveOpenAIModel()
+                }}
+              >
+                <select
+                  value={openaiSelectedModel}
+                  onChange={(event) => setOpenAISelectedModel(event.target.value)}
+                >
+                  {openaiModelOptions.map((model) => (
+                    <option value={model} key={model}>{model}</option>
+                  ))}
+                </select>
+                <button className="button" type="submit" disabled={busy || !openaiSelectedModel}>
+                  Use Model
+                </button>
+              </form>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Local Spend Limit</strong>
+                  <span>Tracked from OpenAI token usage returned to this project.</span>
+                </div>
+                <button
+                  className="button button-danger"
+                  type="button"
+                  onClick={() => void resetOpenAIUsage()}
+                  disabled={busy}
+                >
+                  Reset Usage
+                </button>
+              </div>
+              <div className="status-grid">
+                <span>Requests</span>
+                <strong>{openai?.usage.requests ?? 0}</strong>
+                <span>Prompt tokens</span>
+                <strong>{openai?.usage.prompt_tokens ?? 0}</strong>
+                <span>Completion tokens</span>
+                <strong>{openai?.usage.completion_tokens ?? 0}</strong>
+                <span>Total tokens</span>
+                <strong>{openai?.usage.total_tokens ?? 0}</strong>
+                <span>Estimated spend</span>
+                <strong>{formatUsd(openai?.usage.estimated_cost_usd, 4)}</strong>
+                <span>Limit</span>
+                <strong>{openai ? (openai.usage.limit_usd === null ? 'none' : formatUsd(openai.usage.limit_usd)) : '-'}</strong>
+                <span>Remaining</span>
+                <strong>{formatUsd(openai?.usage.remaining_usd)}</strong>
+                <span>Status</span>
+                <strong>{openai?.usage.limit_reached ? 'limit reached' : 'available'}</strong>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void saveOpenAILimit()
+                }}
+              >
+                <input
+                  value={openaiLimitDraft}
+                  onChange={(event) => setOpenAILimitDraft(event.target.value)}
+                  placeholder="USD limit, empty for none"
+                  inputMode="decimal"
+                />
+                <button className="button button-secondary" type="submit" disabled={busy}>
+                  Save Limit
+                </button>
+              </form>
             </div>
           </section>
         ) : null}

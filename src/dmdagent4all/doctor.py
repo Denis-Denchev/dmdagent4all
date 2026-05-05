@@ -111,7 +111,7 @@ def _check_secret_config(config: dict[str, Any]) -> list[DoctorCheck]:
                 "fail",
                 "secrets",
                 "Telegram config contains a direct token field.",
-                "Use bot_token_env and keep the token in the process environment or OS secret store.",
+                "Use bot_token_env and load the token into the process environment.",
             )
         )
     return checks

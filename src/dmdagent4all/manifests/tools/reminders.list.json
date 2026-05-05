@@ -4,7 +4,7 @@
   "risk": 0,
   "permissions": [],
   "args_schema": {
-    "status": "optional filter: pending, completed, or all"
+    "status": "optional filter: pending, notified, completed, canceled, or all"
   },
   "approval_required": false,
   "cloud_allowed": false,

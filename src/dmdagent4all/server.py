@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shlex
+import threading
+import urllib.error
+import urllib.request
 from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -11,17 +17,41 @@ from pydantic import BaseModel
 
 from dmdagent4all import __version__
 from dmdagent4all.app_paths import AppPaths
-from dmdagent4all.audit import AuditStore
+from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.config import load_config, update_config, write_default_config
 from dmdagent4all.doctor import doctor_summary, run_doctor
-from dmdagent4all.interfaces.telegram import DEFAULT_TOKEN_ENV, settings_from_config
+from dmdagent4all.interfaces.telegram import (
+    DEFAULT_TOKEN_ENV,
+    TelegramConfigError,
+    TelegramError,
+    TelegramInterface,
+    reminder_keyboard,
+    reminder_notification_text,
+    settings_from_config,
+    store_telegram_token,
+    telegram_token_available,
+)
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.memory.manager import MemoryPathError
 from dmdagent4all.model_presets import MODEL_MODES
+from dmdagent4all.llm.openai_usage import (
+    DEFAULT_OPENAI_API_KEY_ENV,
+    openai_usage_summary,
+    reset_openai_usage,
+)
 from dmdagent4all.permissions import ToolRequest
 from dmdagent4all.runtime import build_agent_core
 from dmdagent4all.sandbox import TerminalPolicy
 from dmdagent4all.tools import build_builtin_registry
+from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.reminders import (
+    due_reminders,
+    mark_reminder_notified,
+    next_pending_reminder_due_at,
+    reminder_change_version,
+    wait_for_reminder_change_since,
+    wake_reminder_waiters,
+)
 
 
 class ChatRequest(BaseModel):
@@ -48,6 +78,7 @@ class PermissionRequest(BaseModel):
 
 class TerminalSettingsRequest(BaseModel):
     workspace_only: bool | None = None
+    workspace_root: str | None = None
     timeout_seconds: int | None = None
     max_output_chars: int | None = None
     auto_approve_allowlisted: bool | None = None
@@ -70,13 +101,34 @@ class TelegramTokenRequest(BaseModel):
     token: str
 
 
+class OpenAIKeyRequest(BaseModel):
+    api_key: str
+
+
+class OpenAILimitRequest(BaseModel):
+    limit_usd: float | None = None
+
+
 def create_app() -> FastAPI:
     paths = AppPaths.default()
     paths.ensure()
     write_default_config(paths.config)
     registry = build_builtin_registry()
+    telegram_runtime = TelegramRuntime()
+    reminder_runtime = ReminderRuntime(paths, telegram_runtime)
 
     app = FastAPI(title="DMD Agent 4 All", version="1.0.0")
+
+    @app.on_event("startup")
+    def start_background_services() -> None:
+        if os.environ.get("DMDAGENT_NO_TELEGRAM") != "1":
+            telegram_runtime.start(load_config(paths.config))
+        reminder_runtime.start()
+
+    @app.on_event("shutdown")
+    def stop_background_services() -> None:
+        reminder_runtime.stop()
+        telegram_runtime.stop()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -303,6 +355,71 @@ def create_app() -> FastAPI:
             "data": config["llm"],
         }
 
+    @app.get("/v1/openai")
+    def openai_status() -> dict[str, Any]:
+        return _openai_status(load_config(paths.config), paths)
+
+    @app.post("/v1/openai/key")
+    def openai_key(request: OpenAIKeyRequest) -> dict[str, Any]:
+        api_key = request.api_key.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="OpenAI API key is required.")
+        os.environ[DEFAULT_OPENAI_API_KEY_ENV] = api_key
+        config = update_config(
+            lambda current: _set_openai_config(
+                current,
+                model=_default_openai_model(current),
+            ),
+            paths.config,
+        )
+        return {
+            "status": "ok",
+            "message": "OpenAI API key loaded into this API process environment.",
+            "data": _openai_status(config, paths),
+        }
+
+    @app.post("/v1/openai/model")
+    def openai_model(request: ModelRequest) -> dict[str, Any]:
+        model = request.model.strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="OpenAI model is required.")
+        config = update_config(lambda current: _set_openai_config(current, model=model), paths.config)
+        return {
+            "status": "ok",
+            "message": f"OpenAI model set to {model}.",
+            "data": _openai_status(config, paths),
+        }
+
+    @app.get("/v1/openai/models")
+    def openai_models() -> dict[str, Any]:
+        config = load_config(paths.config)
+        return {
+            "status": "ok",
+            "models": _fetch_openai_models(config),
+            "data": _openai_status(config, paths),
+        }
+
+    @app.post("/v1/openai/limit")
+    def openai_limit(request: OpenAILimitRequest) -> dict[str, Any]:
+        config = update_config(
+            lambda current: _set_openai_limit(current, request.limit_usd),
+            paths.config,
+        )
+        return {
+            "status": "ok",
+            "message": "OpenAI local project limit updated.",
+            "data": _openai_status(config, paths),
+        }
+
+    @app.post("/v1/openai/usage/reset")
+    def openai_usage_reset() -> dict[str, Any]:
+        reset_openai_usage(paths.audit_db)
+        return {
+            "status": "ok",
+            "message": "OpenAI local usage counters reset.",
+            "data": _openai_status(load_config(paths.config), paths),
+        }
+
     @app.get("/v1/connectors")
     def connectors() -> list[dict[str, Any]]:
         config = load_config(paths.config)
@@ -385,24 +502,26 @@ def create_app() -> FastAPI:
     @app.get("/v1/telegram")
     def telegram_status() -> dict[str, Any]:
         config = load_config(paths.config)
-        return _telegram_status(config)
+        return telegram_runtime.status(config)
 
     @app.post("/v1/telegram/enable")
     def telegram_enable() -> dict[str, Any]:
         config = update_config(lambda current: _set_telegram_enabled(current, True), paths.config)
+        telegram_runtime.start(config)
         return {
             "status": "ok",
             "message": "Telegram interface enabled.",
-            "data": _telegram_status(config),
+            "data": telegram_runtime.status(config),
         }
 
     @app.post("/v1/telegram/disable")
     def telegram_disable() -> dict[str, Any]:
         config = update_config(lambda current: _set_telegram_enabled(current, False), paths.config)
+        telegram_runtime.stop()
         return {
             "status": "ok",
             "message": "Telegram interface disabled.",
-            "data": _telegram_status(config),
+            "data": telegram_runtime.status(config),
         }
 
     @app.post("/v1/telegram/allow")
@@ -411,10 +530,11 @@ def create_app() -> FastAPI:
             lambda current: _set_telegram_user_allowed(current, request.user_id, True),
             paths.config,
         )
+        telegram_runtime.start(config)
         return {
             "status": "ok",
             "message": f"Telegram user allowed: {request.user_id}",
-            "data": _telegram_status(config),
+            "data": telegram_runtime.status(config),
         }
 
     @app.post("/v1/telegram/remove")
@@ -423,10 +543,12 @@ def create_app() -> FastAPI:
             lambda current: _set_telegram_user_allowed(current, request.user_id, False),
             paths.config,
         )
+        if not settings_from_config(config).allowed_user_ids:
+            telegram_runtime.stop()
         return {
             "status": "ok",
             "message": f"Telegram user removed: {request.user_id}",
-            "data": _telegram_status(config),
+            "data": telegram_runtime.status(config),
         }
 
     @app.post("/v1/telegram/token-env")
@@ -435,10 +557,12 @@ def create_app() -> FastAPI:
             lambda current: _set_telegram_token_env(current, request.bot_token_env),
             paths.config,
         )
+        telegram_runtime.stop()
+        telegram_runtime.start(config)
         return {
             "status": "ok",
             "message": f"Telegram token environment variable set to {request.bot_token_env}.",
-            "data": _telegram_status(config),
+            "data": telegram_runtime.status(config),
         }
 
     @app.post("/v1/telegram/token")
@@ -452,14 +576,213 @@ def create_app() -> FastAPI:
             .get("telegram", {})
             .get("bot_token_env", DEFAULT_TOKEN_ENV)
         )
-        os.environ[token_env] = token
+        settings = settings_from_config(config)
+        storage = store_telegram_token(settings, token)
+        telegram_runtime.start(config)
         return {
             "status": "ok",
-            "message": f"Telegram token loaded into this API process environment as {token_env}.",
-            "data": _telegram_status(config),
+            "message": f"Telegram token loaded into {storage} as {token_env}.",
+            "data": telegram_runtime.status(config),
+        }
+
+    @app.post("/v1/telegram/start")
+    def telegram_start() -> dict[str, Any]:
+        config = load_config(paths.config)
+        started = telegram_runtime.start(config)
+        return {
+            "status": "ok" if started else "not_ready",
+            "message": "Telegram polling started." if started else "Telegram polling is not ready.",
+            "data": telegram_runtime.status(config),
+        }
+
+    @app.post("/v1/telegram/stop")
+    def telegram_stop() -> dict[str, Any]:
+        telegram_runtime.stop()
+        config = load_config(paths.config)
+        return {
+            "status": "ok",
+            "message": "Telegram polling stopped.",
+            "data": telegram_runtime.status(config),
         }
 
     return app
+
+
+class TelegramRuntime:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop_event: threading.Event | None = None
+        self._last_error: str | None = None
+
+    def start(self, config: dict[str, Any]) -> bool:
+        settings = settings_from_config(config)
+        if not settings.enabled or not settings.allowed_user_ids or not telegram_token_available(settings):
+            return False
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return True
+            self._last_error = None
+            self._stop_event = threading.Event()
+            try:
+                interface = TelegramInterface.from_current_config()
+            except TelegramConfigError as exc:
+                self._last_error = str(exc)
+                return False
+
+            def run() -> None:
+                try:
+                    interface.run_polling(timeout_seconds=2, stop_event=self._stop_event)
+                except TelegramError as exc:
+                    self._last_error = str(exc)
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._last_error = str(exc)
+
+            self._thread = threading.Thread(target=run, name="dmdagent-api-telegram", daemon=True)
+            self._thread.start()
+            return True
+
+    def stop(self) -> None:
+        with self._lock:
+            stop_event = self._stop_event
+            thread = self._thread
+            self._stop_event = None
+            self._thread = None
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+
+    def status(self, config: dict[str, Any]) -> dict[str, Any]:
+        status = _telegram_status(config)
+        thread = self._thread
+        polling = thread is not None and thread.is_alive()
+        status["polling"] = polling
+        status["polling_error"] = self._last_error
+        return status
+
+    def send_to_allowed_users(
+        self,
+        config: dict[str, Any],
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        settings = settings_from_config(config)
+        if not settings.enabled or not settings.allowed_user_ids or not telegram_token_available(settings):
+            return False
+        try:
+            interface = TelegramInterface.from_current_config()
+        except TelegramConfigError as exc:
+            self._last_error = str(exc)
+            return False
+        sent = False
+        for user_id in sorted(settings.allowed_user_ids):
+            try:
+                interface.api.send_message(user_id, text, reply_markup=reply_markup)
+                sent = True
+            except TelegramError as exc:
+                self._last_error = str(exc)
+        return sent
+
+
+class ReminderRuntime:
+    idle_sleep_seconds = 3600.0
+    max_sleep_seconds = 3600.0
+    precision_window_seconds = 120.0
+    due_retry_sleep_seconds = 30.0
+    immediate_due_sleep_seconds = 0.5
+
+    def __init__(self, paths: AppPaths, telegram_runtime: TelegramRuntime) -> None:
+        self._paths = paths
+        self._telegram_runtime = telegram_runtime
+        self._thread: threading.Thread | None = None
+        self._stop_event: threading.Event | None = None
+        self._last_due_attempt_count = 0
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="dmdagent-reminders", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        stop_event = self._stop_event
+        thread = self._thread
+        self._stop_event = None
+        self._thread = None
+        if stop_event is not None:
+            stop_event.set()
+            wake_reminder_waiters()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+
+    def _run(self) -> None:
+        while self._stop_event is None or not self._stop_event.is_set():
+            self.tick()
+            if self._stop_event is None:
+                return
+            version = reminder_change_version()
+            sleep_seconds = self.next_sleep_seconds()
+            wait_for_reminder_change_since(version, sleep_seconds)
+
+    def next_sleep_seconds(self, *, now: datetime | None = None) -> float:
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        config = load_config(self._paths.config)
+        context = ToolRuntimeContext(
+            memory_root=self._paths.memory,
+            workspace_root=self._paths.workspace,
+            config=config,
+            config_path=self._paths.config,
+        )
+        next_due = next_pending_reminder_due_at(context)
+        if next_due is None:
+            return self.idle_sleep_seconds
+
+        seconds_until_due = (next_due - current).total_seconds()
+        if seconds_until_due <= 0:
+            if self._last_due_attempt_count > 0:
+                return self.due_retry_sleep_seconds
+            return self.immediate_due_sleep_seconds
+        if seconds_until_due <= self.precision_window_seconds:
+            return seconds_until_due
+        seconds_until_precision_window = seconds_until_due - self.precision_window_seconds
+        if seconds_until_precision_window <= 0:
+            return self.immediate_due_sleep_seconds
+        return min(seconds_until_precision_window, self.max_sleep_seconds)
+
+    def tick(self) -> int:
+        config = load_config(self._paths.config)
+        context = ToolRuntimeContext(
+            memory_root=self._paths.memory,
+            workspace_root=self._paths.workspace,
+            config=config,
+            config_path=self._paths.config,
+        )
+        sent_count = 0
+        due_attempt_count = 0
+        for reminder in due_reminders(context):
+            reminder_id = int(reminder.get("id") or 0)
+            if reminder_id <= 0:
+                continue
+            due_attempt_count += 1
+            text = reminder_notification_text(reminder)
+            reply_markup = reminder_keyboard(reminder)
+            if self._telegram_runtime.send_to_allowed_users(config, text, reply_markup=reply_markup):
+                mark_reminder_notified(context, reminder_id, channel="telegram")
+                AuditStore(self._paths.audit_db).record_event(
+                    AuditEvent(
+                        event_type="reminder.notification",
+                        tool="reminders.create",
+                        approved=True,
+                        result_status="sent",
+                        metadata={"reminder_id": reminder_id, "channel": "telegram"},
+                    )
+                )
+                sent_count += 1
+        self._last_due_attempt_count = due_attempt_count
+        return sent_count
 
 
 def _set_tool_enabled(paths: AppPaths, tool_name: str, enabled: bool) -> dict[str, Any]:
@@ -518,6 +841,105 @@ def _set_model_config(
     config.setdefault("llm", {})["mode"] = mode
     config["llm"]["model"] = model
     config["llm"]["planner_model"] = planner_model
+
+
+def _set_openai_config(config: dict[str, Any], *, model: str) -> None:
+    llm = config.setdefault("llm", {})
+    llm["provider"] = "openai"
+    llm["mode"] = "openai"
+    llm["model"] = model
+    llm["planner_model"] = model
+    llm["base_url"] = "https://api.openai.com/v1"
+    llm["api_key_env"] = DEFAULT_OPENAI_API_KEY_ENV
+
+
+def _set_openai_limit(config: dict[str, Any], limit_usd: float | None) -> None:
+    usage = config.setdefault("openai_usage", {})
+    usage["limit_usd"] = None if limit_usd is None else max(0.0, float(limit_usd))
+
+
+def _openai_status(config: dict[str, Any], paths: AppPaths) -> dict[str, Any]:
+    llm = config.get("llm", {})
+    api_key_env = _openai_api_key_env(config)
+    return {
+        "provider": str(llm.get("provider", "")),
+        "model": str(llm.get("model", "")),
+        "planner_model": llm.get("planner_model"),
+        "base_url": str(llm.get("base_url") or "https://api.openai.com/v1"),
+        "api_key_env": api_key_env,
+        "api_key_available": bool(os.environ.get(api_key_env, "").strip()),
+        "usage": openai_usage_summary(paths.audit_db, config=config),
+    }
+
+
+def _fetch_openai_models(config: dict[str, Any]) -> list[str]:
+    api_key_env = _openai_api_key_env(config)
+    api_key = os.environ.get(api_key_env, "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"OpenAI API key is not loaded in this process: {api_key_env}.",
+        )
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/models",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI models request failed with HTTP {exc.code}: {detail}",
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to OpenAI models API: {exc.reason}",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="OpenAI models response was not JSON.") from exc
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise HTTPException(status_code=502, detail="OpenAI models response did not include a data list.")
+    models = {
+        str(item.get("id")).strip()
+        for item in data
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    return sorted(models, key=_openai_model_sort_key)
+
+
+def _openai_api_key_env(config: dict[str, Any]) -> str:
+    value = config.get("llm", {}).get("api_key_env")
+    return str(value or DEFAULT_OPENAI_API_KEY_ENV)
+
+
+def _default_openai_model(config: dict[str, Any]) -> str:
+    llm = config.get("llm", {})
+    provider = str(llm.get("provider", "")).lower()
+    model = str(llm.get("model") or "").strip()
+    if provider == "openai" and _looks_like_openai_chat_model(model):
+        return model
+    return "gpt-4o-mini"
+
+
+def _openai_model_sort_key(model: str) -> tuple[int, str]:
+    normalized = model.lower()
+    if _looks_like_openai_chat_model(normalized):
+        return (0, normalized)
+    return (1, normalized)
+
+
+def _looks_like_openai_chat_model(model: str) -> bool:
+    normalized = model.lower()
+    return normalized.startswith(("gpt-", "chatgpt-")) or re.match(r"o\d", normalized) is not None
 
 
 def _set_permission_config(
@@ -616,6 +1038,7 @@ def _terminal_status(config: dict[str, Any]) -> dict[str, Any]:
         "permission_granted": permission_granted,
         "ready": policy_enabled and tool_enabled and permission_granted,
         "workspace_only": bool(terminal.get("workspace_only", True)),
+        "workspace_root": _terminal_workspace_root(config),
         "timeout_seconds": int(terminal.get("timeout_seconds", 30)),
         "max_output_chars": int(terminal.get("max_output_chars", 20000)),
         "auto_approve_allowlisted": bool(terminal.get("auto_approve_allowlisted", False)),
@@ -628,14 +1051,31 @@ def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:
     terminal.setdefault("enabled", False)
     terminal.setdefault("mode", "allowlist")
     terminal.setdefault("workspace_only", True)
+    terminal.setdefault("workspace_root", "")
     terminal.setdefault("timeout_seconds", 30)
     terminal.setdefault("max_output_chars", 20000)
     terminal.setdefault("auto_approve_allowlisted", False)
     terminal.setdefault(
         "allowed_commands",
-        [["pwd"], ["ls"], ["git", "status"], ["git", "diff"], ["npm", "test"], ["pytest"]],
+        [
+            ["pwd"],
+            ["ls"],
+            ["git", "status"],
+            ["git", "diff"],
+            ["cat", "README.md"],
+            ["cat", "readme.md"],
+            ["npm", "test"],
+            ["pytest"],
+        ],
     )
     return terminal
+
+
+def _terminal_workspace_root(config: dict[str, Any]) -> str:
+    raw_root = _terminal_config_section(config).get("workspace_root")
+    if isinstance(raw_root, str) and raw_root.strip():
+        return str(Path(raw_root).expanduser())
+    return str(AppPaths.default().workspace)
 
 
 def _terminal_allowed_commands(terminal: dict[str, Any]) -> list[tuple[str, ...]]:
@@ -665,6 +1105,15 @@ def _update_terminal_settings(
     terminal = _terminal_config_section(config)
     if request.workspace_only is not None:
         terminal["workspace_only"] = bool(request.workspace_only)
+    if request.workspace_root is not None:
+        value = request.workspace_root.strip()
+        if value:
+            root = Path(value).expanduser()
+            if not root.is_absolute():
+                raise HTTPException(status_code=400, detail="workspace_root must be an absolute path.")
+            terminal["workspace_root"] = str(root)
+        else:
+            terminal["workspace_root"] = ""
     if request.auto_approve_allowlisted is not None:
         terminal["auto_approve_allowlisted"] = bool(request.auto_approve_allowlisted)
     if request.timeout_seconds is not None:
@@ -715,7 +1164,7 @@ def _set_terminal_allowlist_command(
 
 def _telegram_status(config: dict[str, Any]) -> dict[str, Any]:
     settings = settings_from_config(config)
-    token_available = bool(os.environ.get(settings.bot_token_env))
+    token_available = telegram_token_available(settings)
     allowed_user_ids = sorted(settings.allowed_user_ids)
     return {
         "enabled": settings.enabled,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
@@ -80,22 +82,69 @@ def _memory_list(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str,
 
 
 def _memory_read(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
-    path = str(args.get("path", "profile.md"))
+    path = str(args.get("path", "long-term/profile.md"))
     manager = MemoryManager(context.memory_root)
     return {"path": path, "content": manager.read(path)}
 
 
 def _memory_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
-    path = str(args.get("path") or "")
+    path = str(args.get("path") or "").strip()
     body = str(args.get("body") or "")
-    if not path or not body:
-        raise ValueError("memory.write requires path and body.")
     metadata = args.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
         raise ValueError("metadata must be an object when provided")
+    if path.lower() == "auto":
+        path = ""
+    if not path or not body:
+        title = str(args.get("title") or "").strip()
+        if not body:
+            raise ValueError("memory.write requires body.")
+        path = _memory_auto_path(title=title, body=body, args=args)
+    metadata = dict(metadata or {})
+    scope = _memory_scope(args, metadata)
+    metadata["memory_scope"] = scope
+    if "ttl_hours" in args and "ttl_hours" not in metadata:
+        metadata["ttl_hours"] = args["ttl_hours"]
+    if scope == "short-term" and not path.startswith("short-term/"):
+        path = f"short-term/{path}"
     manager = MemoryManager(context.memory_root)
     written = manager.write(path, body, metadata=metadata)
     return {"path": str(written.relative_to(context.memory_root.resolve()))}
+
+
+def _memory_scope(args: dict[str, Any], metadata: dict[str, Any]) -> str:
+    raw_scope = (
+        args.get("memory_scope")
+        or args.get("scope")
+        or metadata.get("memory_scope")
+        or metadata.get("scope")
+        or "long-term"
+    )
+    scope = str(raw_scope).strip().lower().replace("_", "-")
+    return "short-term" if scope in {"short", "short-term", "temporary", "temp"} else "long-term"
+
+
+def _memory_auto_path(*, title: str, body: str, args: dict[str, Any]) -> str:
+    scope = _memory_scope(args, dict(args.get("metadata") or {}))
+    raw_title = title or _first_meaningful_line(body) or "memory"
+    slug = _slugify(raw_title) or "memory"
+    prefix = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    folder = "short-term" if scope == "short-term" else "long-term/notes"
+    return f"{folder}/{prefix}-{slug}.md"
+
+
+def _first_meaningful_line(body: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip().strip("# ").strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^\w]+", "-", value.lower(), flags=re.UNICODE).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug[:80].strip("-")
 
 
 def _terminal_run(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
@@ -109,7 +158,7 @@ def _terminal_run(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
 
     result = run_workspace_command(
         command,
-        workspace=context.workspace_root,
+        workspace=_terminal_workspace_root(context),
         policy=TerminalPolicy.from_config(context.config),
         cwd=cwd,
     )
@@ -118,6 +167,13 @@ def _terminal_run(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
         "stdout": redact_text(str(result.get("stdout", ""))),
         "stderr": redact_text(str(result.get("stderr", ""))),
     }
+
+
+def _terminal_workspace_root(context: ToolRuntimeContext) -> Path:
+    raw_root = context.config.get("terminal", {}).get("workspace_root")
+    if isinstance(raw_root, str) and raw_root.strip():
+        return Path(raw_root).expanduser()
+    return context.workspace_root
 
 
 def _browser_not_implemented(

@@ -63,6 +63,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_text_chars": 12000,
     },
     "tools": {},
+    "openai_usage": {
+        "limit_usd": None,
+    },
     "permissions": {
         "granted": [],
         "approval_required_at_risk": 3,

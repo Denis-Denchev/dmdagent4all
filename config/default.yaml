@@ -47,6 +47,9 @@ browser:
 
 tools: {}
 
+openai_usage:
+  limit_usd:
+
 permissions:
   granted: []
   approval_required_at_risk: 3

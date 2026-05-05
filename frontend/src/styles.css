@@ -35,6 +35,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -273,6 +274,7 @@ code {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid #c8d0d9;
@@ -284,6 +286,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: var(--brand);
   box-shadow: 0 0 0 3px rgba(27, 127, 107, 0.14);
@@ -443,6 +446,11 @@ textarea:focus {
   align-items: center;
 }
 
+.status-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .connector-meter span,
 .status-grid span,
 .settings-header span,
@@ -511,7 +519,8 @@ label {
 }
 
 .terminal-layout,
-.telegram-layout {
+.telegram-layout,
+.openai-layout {
   display: grid;
   gap: 1rem;
 }
@@ -560,6 +569,10 @@ label {
   gap: 0.35rem;
   font-size: 0.84rem;
   font-weight: 750;
+}
+
+.setting-wide {
+  grid-column: 1 / -1;
 }
 
 .setting-check {

@@ -15,7 +15,7 @@ DMD Agent 4 All launcher
 Beginner commands from the project folder:
   ./start session              Open terminal chat
   ./start ask "hello"          Ask once and exit
-  ./start web                  Start API + browser dashboard
+  ./start web                  Start API + dashboard + Telegram if configured
   ./start model fast --pull    Set and pull the default local model
   ./start model light --pull   Set and pull a smaller local model
   ./start doctor               Check health/security

@@ -27,7 +27,10 @@ from dmdagent4all.interfaces.telegram import (
     TelegramConfigError,
     TelegramError,
     TelegramInterface,
+    load_telegram_token,
     settings_from_config,
+    store_telegram_token,
+    telegram_token_available,
 )
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.model_presets import (
@@ -77,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-ollama",
         action="store_true",
         help="Do not try to start Ollama automatically.",
+    )
+    start_parser.add_argument(
+        "--no-telegram",
+        action="store_true",
+        help="Do not start Telegram polling with the control center.",
     )
     start_parser.add_argument("--verbose", action="store_true", help="Show child process logs.")
     open_parser = subcommands.add_parser("open", help="Open the local dashboard.")
@@ -163,6 +171,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Toggle automatic approval for exact allowlisted commands.",
     )
     terminal_auto_approve.add_argument("state", choices=("on", "off"))
+    terminal_workspace = terminal_subcommands.add_parser(
+        "workspace",
+        help="Set the root directory used by terminal.run.",
+    )
+    terminal_workspace.add_argument("path", help="Absolute path, or '-' to reset to the private workspace.")
     terminal_allow = terminal_subcommands.add_parser("allow", help="Add an exact command allowlist entry.")
     terminal_allow.add_argument("command", nargs=argparse.REMAINDER)
     terminal_remove = terminal_subcommands.add_parser("remove", help="Remove an exact command allowlist entry.")
@@ -226,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             open_browser=not args.no_open,
             pull_model=args.pull_model,
             start_ollama=not args.no_ollama,
+            start_telegram=not args.no_telegram,
             verbose=args.verbose,
         )
     if args.command == "open":
@@ -332,6 +346,7 @@ def command_start(
     open_browser: bool,
     pull_model: bool,
     start_ollama: bool,
+    start_telegram: bool,
     verbose: bool,
 ) -> int:
     paths = AppPaths.default()
@@ -361,7 +376,12 @@ def command_start(
         if pull_model:
             _pull_ollama_model(str(config.get("llm", {}).get("model", "")))
 
-        api_process = _ensure_api(host=host, port=api_port, verbose=verbose)
+        api_process = _ensure_api(
+            host=host,
+            port=api_port,
+            verbose=verbose,
+            start_telegram=start_telegram,
+        )
         if api_process is not None:
             spawned.append(("API", api_process))
 
@@ -378,6 +398,10 @@ def command_start(
         print(_style("Ready", "1;32"))
         print(f"Dashboard: {ui_url}")
         print(f"API:       {api_url}")
+        if start_telegram:
+            telegram_status = _http_json(f"{api_url}/v1/telegram")
+            telegram_running = bool(telegram_status.get("polling")) if telegram_status else False
+            print(f"Telegram: {'running' if telegram_running else 'not running'}")
         print("")
         print("Controls:")
         print("- Stop this session: Ctrl+C")
@@ -700,7 +724,7 @@ def _write_onboarding_memory(
 ) -> None:
     manager = MemoryManager(paths.memory)
     manager.write(
-        "profile.md",
+        "long-term/profile.md",
         "\n".join(
             [
                 f"User name: {user_name or 'not set'}",
@@ -710,12 +734,13 @@ def _write_onboarding_memory(
         ),
         metadata={
             "type": "profile",
+            "memory_scope": "long-term",
             "source": "terminal_onboarding",
             "confidence": "high",
         },
     )
     manager.write(
-        "preferences.md",
+        "long-term/preferences.md",
         "\n".join(
             [
                 "The assistant should keep terminal interaction simple.",
@@ -725,6 +750,7 @@ def _write_onboarding_memory(
         ),
         metadata={
             "type": "preferences",
+            "memory_scope": "long-term",
             "source": "terminal_onboarding",
             "confidence": "high",
         },
@@ -909,6 +935,7 @@ def command_terminal(args: argparse.Namespace) -> int:
                 ["terminal.run tool", _yes_no(tool_enabled)],
                 ["terminal.run permission", _yes_no("terminal.run" in permissions)],
                 ["Workspace only", _yes_no(bool(terminal.get("workspace_only", True)))],
+                ["Workspace root", _terminal_workspace_root(terminal)],
                 ["Timeout", f"{terminal.get('timeout_seconds', 30)}s"],
                 ["Max output", str(terminal.get("max_output_chars", 20000))],
                 ["Auto-approve allowlist", _yes_no(bool(terminal.get("auto_approve_allowlisted", False)))],
@@ -949,6 +976,20 @@ def command_terminal(args: argparse.Namespace) -> int:
         terminal["auto_approve_allowlisted"] = args.state == "on"
         save_config(config, config_path)
         print(f"Auto-approve exact allowlist: {args.state}.")
+        return 0
+
+    if args.terminal_command == "workspace":
+        if args.path == "-":
+            terminal["workspace_root"] = ""
+            print("Terminal workspace reset to the private app workspace.")
+        else:
+            root = Path(args.path).expanduser()
+            if not root.is_absolute():
+                print("Workspace path must be absolute.", file=sys.stderr)
+                return 1
+            terminal["workspace_root"] = str(root)
+            print(f"Terminal workspace root: {root}")
+        save_config(config, config_path)
         return 0
 
     if args.terminal_command in {"allow", "remove"}:
@@ -1071,7 +1112,7 @@ def command_telegram(args: argparse.Namespace) -> int:
             )
         )
         print(f"Bot token env: {token_env}")
-        print(f"Bot token available: {'yes' if os.environ.get(token_env) else 'no'}")
+        print(f"Bot token available: {'yes' if telegram_token_available(settings) else 'no'}")
         print(f"Polling timeout: {settings.polling_timeout_seconds}s")
         return 0
 
@@ -1108,9 +1149,9 @@ def command_telegram(args: argparse.Namespace) -> int:
         spawned: list[tuple[str, subprocess.Popen[Any]]] = []
         try:
             settings = settings_from_config(config)
-            if not os.environ.get(settings.bot_token_env):
+            if not load_telegram_token(settings):
                 raise TelegramConfigError(
-                    f"Missing Telegram bot token. Load it in chat with /telegram token <bot_token> "
+                    f"Missing Telegram bot token. Load it with /telegram token <bot_token> "
                     f"or export {settings.bot_token_env} before running."
                 )
             if str(config.get("llm", {}).get("provider", "ollama")).lower() in {"ollama", "local"}:
@@ -1216,7 +1257,7 @@ def _handle_chat_command(
         return "handled"
     if command == "/read":
         if not args:
-            print("Usage: /read profile.md")
+            print("Usage: /read long-term/profile.md")
         else:
             _print_memory_file(args[0])
         return "handled"
@@ -1335,15 +1376,15 @@ def _start_telegram_background_if_ready(
         if explicit:
             print("Telegram: no allowed user IDs. Use /telegram setup or /telegram allow <id>.")
         return False
-    if not os.environ.get(settings.bot_token_env):
+    if not load_telegram_token(settings):
         if explicit:
             print(
                 "Missing Telegram bot token. Use /telegram token <bot_token> "
-                f"or export {settings.bot_token_env} before start session."
+                f"or export {settings.bot_token_env} before starting."
             )
         else:
             print(f"Telegram: enabled, but {settings.bot_token_env} is not loaded.")
-            print("Use /telegram token <bot_token> or export it before start session.")
+            print("Use /telegram token <bot_token> once, or export it before start web.")
         return False
 
     try:
@@ -1427,12 +1468,12 @@ def _handle_telegram_panel_command(
     if action == "token":
         if not rest:
             print("Usage: /telegram token <bot_token>")
-            print("The token is kept only in this terminal process, not config.yaml.")
+            print("The token is loaded into this process environment only, never config.yaml.")
             return
         config = load_config(write_default_config(AppPaths.default().config))
-        token_env = settings_from_config(config).bot_token_env or DEFAULT_TOKEN_ENV
-        os.environ[token_env] = " ".join(rest).strip()
-        print(f"Telegram token loaded for this terminal only: {token_env}")
+        settings = settings_from_config(config)
+        storage = store_telegram_token(settings, " ".join(rest).strip())
+        print(f"Telegram token loaded into {storage} as {settings.bot_token_env}.")
         _start_telegram_background_if_ready(config, background_services, explicit=False)
         return
     if action in {"run", "start"}:
@@ -1465,7 +1506,7 @@ def _print_telegram_panel() -> None:
         ],
     )
     print("")
-    print("Security: the bot token value is never saved in config.yaml.")
+    print("Security: the bot token value is never saved in config.yaml and is lost on process restart.")
 
 
 def _run_telegram_setup_wizard(background_services: list[BackgroundService]) -> None:
@@ -1478,10 +1519,10 @@ def _run_telegram_setup_wizard(background_services: list[BackgroundService]) -> 
 
     _print_title("Telegram Setup")
     print("This setup stays inside the current terminal chat.")
-    print("Token values are kept only in this process environment, not config.yaml.")
+    print("Token values are loaded into this process environment only, never config.yaml.")
     print("")
 
-    if os.environ.get(token_env):
+    if load_telegram_token(settings):
         print(f"Bot token: available in {token_env}")
     else:
         if sys.stdin.isatty():
@@ -1491,8 +1532,8 @@ def _run_telegram_setup_wizard(background_services: list[BackgroundService]) -> 
         if not token:
             print("No token loaded. Use /telegram token <bot_token> or run /telegram setup again.")
             return
-        os.environ[token_env] = token
-        print("Bot token loaded for this terminal only.")
+        storage = store_telegram_token(settings, token)
+        print(f"Bot token loaded into {storage}.")
 
     raw_user_id = _ask_text(
         "Telegram user ID (paste it, or press Enter to poll /id once)",
@@ -1652,7 +1693,7 @@ def _print_chat_help() -> None:
         ["/doctor", "Check local health and security."],
         ["/setup", "Run first-time setup again."],
         ["/memory", "List local memory files."],
-        ["/read profile.md", "Read a memory file."],
+        ["/read long-term/profile.md", "Read a memory file."],
         ["/tools", "List tools and risk levels."],
         ["/tool enable <tool>", "Enable a tool in this chat."],
         ["/permissions", "Show access and permission controls."],
@@ -1688,7 +1729,7 @@ def _print_help_topic(topic: str) -> None:
         print("Memory is stored as local Markdown files.")
         print("Commands:")
         print("  /memory")
-        print("  /read profile.md")
+        print("  /read long-term/profile.md")
         print("Writes require approval when routed through tools.")
         return
     if normalized in {"approvals", "approval"}:
@@ -1747,7 +1788,7 @@ def _print_telegram_setup_guide() -> None:
     print("Security rules:")
     print("- Telegram is disabled by default.")
     print("- Only allowed Telegram user IDs can use it.")
-    print("- The bot token is kept in an environment variable, not config.yaml.")
+    print("- The bot token is loaded into the current process environment, not config.yaml.")
     print("- Risky actions still require approval.")
     print("")
     print("Step 1: create a bot in Telegram")
@@ -1756,8 +1797,9 @@ def _print_telegram_setup_guide() -> None:
     print("3. Choose a display name and username.")
     print("4. Copy the token BotFather gives you.")
     print("")
-    print("Step 2: export the token in this terminal")
-    print("  export DMDAGENT_TELEGRAM_BOT_TOKEN=\"123456:your-token\"")
+    print("Step 2: load the token once")
+    print("  /telegram token 123456:your-token")
+    print("  # or: export DMDAGENT_TELEGRAM_BOT_TOKEN=\"123456:your-token\"")
     print("")
     print("Step 3: find your Telegram user ID")
     print("1. Run:")
@@ -1921,11 +1963,18 @@ def _ensure_ollama(config: dict[str, Any], *, verbose: bool) -> subprocess.Popen
     return process
 
 
-def _ensure_api(*, host: str, port: int, verbose: bool) -> subprocess.Popen[Any] | None:
+def _ensure_api(
+    *,
+    host: str,
+    port: int,
+    verbose: bool,
+    start_telegram: bool = True,
+) -> subprocess.Popen[Any] | None:
     if _http_ok(f"http://{host}:{port}/health"):
         print(f"API: already running on {host}:{port}")
         return None
     print(f"API: starting on {host}:{port}")
+    env = os.environ if start_telegram else {**os.environ, "DMDAGENT_NO_TELEGRAM": "1"}
     process = _start_process(
         [
             sys.executable,
@@ -1939,6 +1988,7 @@ def _ensure_api(*, host: str, port: int, verbose: bool) -> subprocess.Popen[Any]
         ],
         cwd=_repo_root(),
         verbose=verbose,
+        env=env,
     )
     if not _wait_http(f"http://{host}:{port}/health", timeout_seconds=15):
         raise RuntimeError("API did not become ready. Run `dmdagent doctor` for details.")
@@ -2020,6 +2070,19 @@ def _http_ok(url: str) -> bool:
             return 200 <= int(response.status) < 500
     except (OSError, URLError):
         return False
+
+
+def _http_json(url: str) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            raw = response.read().decode("utf-8")
+    except (OSError, URLError):
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _wait_http(url: str, *, timeout_seconds: int) -> bool:
@@ -2144,14 +2207,31 @@ def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:
     terminal.setdefault("enabled", False)
     terminal.setdefault("mode", "allowlist")
     terminal.setdefault("workspace_only", True)
+    terminal.setdefault("workspace_root", "")
     terminal.setdefault("timeout_seconds", 30)
     terminal.setdefault("max_output_chars", 20000)
     terminal.setdefault("auto_approve_allowlisted", False)
     terminal.setdefault(
         "allowed_commands",
-        [["pwd"], ["ls"], ["git", "status"], ["git", "diff"], ["npm", "test"], ["pytest"]],
+        [
+            ["pwd"],
+            ["ls"],
+            ["git", "status"],
+            ["git", "diff"],
+            ["cat", "README.md"],
+            ["cat", "readme.md"],
+            ["npm", "test"],
+            ["pytest"],
+        ],
     )
     return terminal
+
+
+def _terminal_workspace_root(terminal: dict[str, Any]) -> str:
+    raw_root = terminal.get("workspace_root")
+    if isinstance(raw_root, str) and raw_root.strip():
+        return str(Path(raw_root).expanduser())
+    return str(AppPaths.default().workspace)
 
 
 def _terminal_allowed_commands(terminal: dict[str, Any]) -> list[tuple[str, ...]]:

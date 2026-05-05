@@ -4,9 +4,12 @@
   "risk": 2,
   "permissions": [],
   "args_schema": {
-    "path": "relative Markdown path such as facts/personal.md",
+    "path": "optional relative Markdown path such as long-term/facts/personal.md or short-term/task-context.md; use auto/empty to let backend create a title-based path",
+    "title": "optional title used for auto-generated Markdown path",
     "body": "complete Markdown body to write",
-    "metadata": "optional object with type, source, confidence"
+    "memory_scope": "long-term for durable memory, short-term for temporary memory",
+    "ttl_hours": "optional short-term TTL from 1 to 48 hours; default 24",
+    "metadata": "optional object with type, source, confidence, memory_scope, ttl_hours"
   },
   "approval_required": true,
   "cloud_allowed": false,

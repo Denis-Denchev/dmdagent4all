@@ -82,6 +82,7 @@ export type TerminalStatus = {
   permission_granted: boolean
   ready: boolean
   workspace_only: boolean
+  workspace_root: string
   timeout_seconds: number
   max_output_chars: number
   auto_approve_allowlisted: boolean
@@ -95,6 +96,35 @@ export type TelegramStatus = {
   bot_token_available: boolean
   polling_timeout_seconds: number
   ready: boolean
+  polling: boolean
+  polling_error?: string | null
+}
+
+export type OpenAIUsage = {
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  estimated_cost_usd: number
+  limit_usd: number | null
+  remaining_usd: number | null
+  limit_reached: boolean
+}
+
+export type OpenAIStatus = {
+  provider: string
+  model: string
+  planner_model?: string | null
+  base_url: string
+  api_key_env: string
+  api_key_available: boolean
+  usage: OpenAIUsage
+}
+
+export type OpenAIModelsResponse = {
+  status: string
+  models: string[]
+  data: OpenAIStatus
 }
 
 export type ConnectorStatus = {
@@ -160,7 +190,14 @@ async function request<T>(
     },
   })
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`)
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body)
+    } catch {
+      detail = await response.text()
+    }
+    throw new Error(`${response.status} ${response.statusText}${detail ? `: ${detail}` : ''}`)
   }
   return response.json() as Promise<T>
 }
@@ -215,6 +252,7 @@ export const api = {
   disableTerminal: () => request<AgentResponse>('/v1/terminal/disable', { method: 'POST' }),
   updateTerminalSettings: (settings: {
     workspace_only?: boolean
+    workspace_root?: string
     timeout_seconds?: number
     max_output_chars?: number
     auto_approve_allowlisted?: boolean
@@ -241,6 +279,8 @@ export const api = {
   telegram: () => request<TelegramStatus>('/v1/telegram'),
   enableTelegram: () => request<AgentResponse>('/v1/telegram/enable', { method: 'POST' }),
   disableTelegram: () => request<AgentResponse>('/v1/telegram/disable', { method: 'POST' }),
+  startTelegram: () => request<AgentResponse>('/v1/telegram/start', { method: 'POST' }),
+  stopTelegram: () => request<AgentResponse>('/v1/telegram/stop', { method: 'POST' }),
   allowTelegramUser: (user_id: number) =>
     request<AgentResponse>('/v1/telegram/allow', {
       method: 'POST',
@@ -261,4 +301,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ token }),
     }),
+  openai: () => request<OpenAIStatus>('/v1/openai'),
+  loadOpenAIKey: (api_key: string) =>
+    request<AgentResponse>('/v1/openai/key', {
+      method: 'POST',
+      body: JSON.stringify({ api_key }),
+    }),
+  openAIModels: () => request<OpenAIModelsResponse>('/v1/openai/models'),
+  setOpenAIModel: (model: string) =>
+    request<AgentResponse>('/v1/openai/model', {
+      method: 'POST',
+      body: JSON.stringify({ model }),
+    }),
+  setOpenAILimit: (limit_usd: number | null) =>
+    request<AgentResponse>('/v1/openai/limit', {
+      method: 'POST',
+      body: JSON.stringify({ limit_usd }),
+    }),
+  resetOpenAIUsage: () => request<AgentResponse>('/v1/openai/usage/reset', { method: 'POST' }),
 }

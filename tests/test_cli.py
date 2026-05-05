@@ -92,7 +92,7 @@ class CliTest(unittest.TestCase):
                 ):
                     result = main(["chat", "--no-ollama"])
                 with open(
-                    os.path.join(tmp, "dmdagent4all", "memory", "profile.md"),
+                    os.path.join(tmp, "dmdagent4all", "memory", "long-term", "profile.md"),
                     encoding="utf-8",
                 ) as profile_file:
                     profile = profile_file.read()
@@ -169,6 +169,49 @@ class CliTest(unittest.TestCase):
         self.assertIn("Permission granted: calendar.events", value)
         self.assertIn("approval required>", value)
         self.assertNotIn("Tool is disabled: calendar.create_event", value)
+
+    def test_start_web_reports_api_managed_telegram_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_home = os.environ.get("XDG_DATA_HOME")
+            os.environ["XDG_DATA_HOME"] = tmp
+            try:
+                with (
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    mock.patch("dmdagent4all.cli._ensure_api", return_value=None),
+                    mock.patch("dmdagent4all.cli._ensure_dashboard", return_value=None),
+                    mock.patch("dmdagent4all.cli._http_json", return_value={"polling": True}) as http_json,
+                ):
+                    result = main(["start", "--no-open", "--no-ollama"])
+            finally:
+                if old_home is None:
+                    os.environ.pop("XDG_DATA_HOME", None)
+                else:
+                    os.environ["XDG_DATA_HOME"] = old_home
+
+        self.assertEqual(result, 0)
+        http_json.assert_called_once()
+        self.assertIn("Telegram: running", output.getvalue())
+
+    def test_start_web_can_skip_telegram(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_home = os.environ.get("XDG_DATA_HOME")
+            os.environ["XDG_DATA_HOME"] = tmp
+            try:
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    mock.patch("dmdagent4all.cli._ensure_api", return_value=None),
+                    mock.patch("dmdagent4all.cli._ensure_dashboard", return_value=None),
+                    mock.patch("dmdagent4all.cli._http_json") as http_json,
+                ):
+                    result = main(["start", "--no-open", "--no-ollama", "--no-telegram"])
+            finally:
+                if old_home is None:
+                    os.environ.pop("XDG_DATA_HOME", None)
+                else:
+                    os.environ["XDG_DATA_HOME"] = old_home
+
+        self.assertEqual(result, 0)
+        http_json.assert_not_called()
 
 
 if __name__ == "__main__":

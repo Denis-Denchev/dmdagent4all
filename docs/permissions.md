@@ -73,6 +73,7 @@ Operational flow:
 
 ```bash
 dmdagent terminal status
+dmdagent terminal workspace /Users/Apple/PycharmProjects/dmdagent4all
 dmdagent terminal allow git status
 dmdagent terminal enable --tool --grant-permission
 dmdagent terminal run -- git status
@@ -88,7 +89,8 @@ approval. Blocked commands, non-allowlisted commands, and unsafe cwd values stay
 blocked.
 
 The web dashboard exposes the same policy state, exact allowlist editing,
-settings, the auto-approve toggle, and run requests through the Terminal view.
+workspace root, settings, the auto-approve toggle, and run requests through the
+Terminal view.
 
 ## Cloud Context
 

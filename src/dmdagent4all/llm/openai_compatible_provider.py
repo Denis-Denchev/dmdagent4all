@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 from dmdagent4all.llm.base import LLMMessage, LLMResponse
+from dmdagent4all.llm.openai_usage import check_openai_budget_available, record_openai_usage
 
 
 @dataclass
@@ -51,6 +52,8 @@ class OpenAICompatibleProvider:
                 f"{self.provider_name} requires an API key in "
                 f"{self.api_key_env or 'the configured api_key_env'}."
             )
+        if self.provider_name == "openai":
+            check_openai_budget_available()
 
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}/chat/completions",
@@ -74,10 +77,14 @@ class OpenAICompatibleProvider:
         choices = data.get("choices")
         first_choice = choices[0] if isinstance(choices, list) and choices else {}
         content = first_choice.get("message", {}).get("content", "")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+        if self.provider_name == "openai" and usage is not None:
+            record_openai_usage(provider=self.provider_name, model=self.model, usage=usage)
         return LLMResponse(
             content=str(content),
             model=self.model,
             provider=self.provider_name,
+            usage=usage,
         )
 
 

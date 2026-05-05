@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,7 +6,14 @@ from typing import Any
 
 from dmdagent4all.agent import AgentResponse
 from dmdagent4all.audit import AuditStore
-from dmdagent4all.interfaces.telegram import TelegramInterface, TelegramSettings
+from dmdagent4all.interfaces.telegram import (
+    TelegramInterface,
+    TelegramSettings,
+    load_telegram_token,
+    store_telegram_token,
+)
+from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.reminders import create_reminder, list_reminders
 
 
 class FakeTelegramAPI:
@@ -156,6 +164,89 @@ class TelegramInterfaceTest(unittest.TestCase):
             self.assertIn("Approval executed", api.callback_answers[0]["text"])
             self.assertEqual(api.sent_messages[0]["text"], "Approval executed.")
 
+    def test_reminder_done_callback_completes_notified_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = _FakePaths(root)
+            api = FakeTelegramAPI()
+            created = create_reminder(
+                {
+                    "title": "Check tickets",
+                    "due_at": "2026-05-04T12:00:00+00:00",
+                },
+                ToolRuntimeContext(
+                    memory_root=paths.memory,
+                    workspace_root=paths.workspace,
+                    config={},
+                    config_path=paths.config,
+                ),
+            )
+            interface = TelegramInterface(
+                settings=TelegramSettings(
+                    enabled=True,
+                    allowed_user_ids=frozenset({100}),
+                ),
+                api=api,
+                audit_store=AuditStore(paths.audit_db),
+                core_factory=lambda: FakeCore(AgentResponse(status="ok", message="unused")),
+                paths=paths,
+            )
+
+            interface.handle_update(
+                _callback_update(user_id=100, data=f"reminder:done:{created['reminder']['id']}")
+            )
+            listed = list_reminders(
+                {"status": "all"},
+                ToolRuntimeContext(
+                    memory_root=paths.memory,
+                    workspace_root=paths.workspace,
+                    config={},
+                    config_path=paths.config,
+                ),
+            )["reminders"]
+
+        self.assertIn("completed", api.callback_answers[0]["text"].lower())
+        self.assertEqual(api.sent_messages[0]["text"], "Reminder completed.")
+        self.assertEqual(listed[0]["status"], "completed")
+
+    def test_reminder_snooze_callback_moves_due_time_back_to_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = _FakePaths(root)
+            context = ToolRuntimeContext(
+                memory_root=paths.memory,
+                workspace_root=paths.workspace,
+                config={},
+                config_path=paths.config,
+            )
+            api = FakeTelegramAPI()
+            created = create_reminder(
+                {
+                    "title": "Stretch",
+                    "due_at": "2026-05-04T12:00:00+00:00",
+                },
+                context,
+            )
+            interface = TelegramInterface(
+                settings=TelegramSettings(
+                    enabled=True,
+                    allowed_user_ids=frozenset({100}),
+                ),
+                api=api,
+                audit_store=AuditStore(paths.audit_db),
+                core_factory=lambda: FakeCore(AgentResponse(status="ok", message="unused")),
+                paths=paths,
+            )
+
+            interface.handle_update(
+                _callback_update(user_id=100, data=f"reminder:snooze:{created['reminder']['id']}:300")
+            )
+            listed = list_reminders({"status": "all"}, context)["reminders"]
+
+        self.assertIn("snoozed", api.callback_answers[0]["text"].lower())
+        self.assertEqual(listed[0]["status"], "pending")
+        self.assertEqual(listed[0]["snooze_seconds"], 300)
+
     def test_disabled_interface_does_not_route_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             api = FakeTelegramAPI()
@@ -174,6 +265,22 @@ class TelegramInterfaceTest(unittest.TestCase):
 
             self.assertEqual(core.messages, [])
             self.assertIn("disabled locally", api.sent_messages[0]["text"])
+
+    def test_token_helpers_store_and_load_from_process_environment(self) -> None:
+        settings = TelegramSettings(
+            enabled=True,
+            allowed_user_ids=frozenset({100}),
+            bot_token_env="DMDAGENT_TEST_TELEGRAM_TOKEN",
+        )
+        os.environ.pop(settings.bot_token_env, None)
+
+        storage = store_telegram_token(settings, "secret-token")
+
+        self.assertEqual(storage, "process environment")
+        self.assertEqual(os.environ[settings.bot_token_env], "secret-token")
+        self.assertEqual(load_telegram_token(settings), "secret-token")
+        os.environ.pop(settings.bot_token_env, None)
+        self.assertIsNone(load_telegram_token(settings))
 
 
 def _message_update(user_id: int, text: str) -> dict[str, Any]:
@@ -201,6 +308,22 @@ def _callback_update(user_id: int, data: str) -> dict[str, Any]:
             "data": data,
         },
     }
+
+
+class _FakePaths:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.config = root / "config.yaml"
+        self.memory = root / "memory"
+        self.workspace = root / "workspace"
+        self.audit_db = root / "audit.db"
+        self.ensure()
+        self.config.write_text("llm:\n  provider: ollama\n", encoding="utf-8")
+
+    def ensure(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.memory.mkdir(parents=True, exist_ok=True)
+        self.workspace.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":

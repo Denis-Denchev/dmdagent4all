@@ -6,6 +6,10 @@
   "args_schema": {
     "title": "short reminder text",
     "due_at": "ISO datetime when the reminder is due",
+    "event_at": "optional ISO datetime for the event being remembered",
+    "remind_before": "optional human-readable offset before event_at",
+    "location": "optional address/place from user text or memory context",
+    "action_url": "optional link for the reminder action, such as a Google Maps directions/search URL",
     "notes": "optional notes or original user request"
   },
   "approval_required": true,
