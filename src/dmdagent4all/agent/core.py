@@ -24,6 +24,12 @@ class AgentResponse:
     data: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class MemoryEntry:
+    path: str
+    text: str
+
+
 class AgentCore:
     def __init__(
         self,
@@ -68,6 +74,9 @@ class AgentCore:
         memory_update = _memory_write_request_from_text(stripped, self.runtime_context)
         if memory_update is not None:
             return self.handle_tool_request(memory_update)
+        memory_answer = _answer_memory_recall_question(stripped, self.runtime_context)
+        if memory_answer is not None:
+            return memory_answer
         browser_request = _browser_request_from_text(stripped)
         if browser_request is not None:
             return self.handle_tool_request(browser_request)
@@ -993,14 +1002,18 @@ def _extract_urlish_target(text: str) -> str | None:
 
 def _terminal_request_from_text(text: str) -> ToolRequest | None:
     normalized = _normalize_for_match(text)
-    mentions_terminal = "terminal" in normalized
+    mentions_terminal = "terminal" in normalized or "терминал" in normalized
     mentions_readme_cat = re.search(r"\bcat\s+(readme\.md|README\.md)\b", text, flags=re.IGNORECASE)
     if not mentions_terminal and mentions_readme_cat is None:
         return None
     command: list[str] | None = None
-    if re.search(r"\b(?:type|run|execute)\s+ls\b", text, flags=re.IGNORECASE):
+    if re.search(r"\b(?:type|run|execute|напиши|изпълни|пусни|въведи)\s+ls\b", text, flags=re.IGNORECASE):
         command = ["ls"]
-    elif re.search(r"\b(?:type|run|execute)\s+pwd\b", text, flags=re.IGNORECASE):
+    elif mentions_terminal and re.search(r"\bls\b", text, flags=re.IGNORECASE):
+        command = ["ls"]
+    elif re.search(r"\b(?:type|run|execute|напиши|изпълни|пусни|въведи)\s+pwd\b", text, flags=re.IGNORECASE):
+        command = ["pwd"]
+    elif mentions_terminal and re.search(r"\bpwd\b", text, flags=re.IGNORECASE):
         command = ["pwd"]
     elif re.search(r"\bgit\s+status\b", text, flags=re.IGNORECASE):
         command = ["git", "status"]
@@ -1077,6 +1090,24 @@ def _memory_write_request_from_text(
             },
             reason="User asked the agent to remember temporary context.",
         )
+    fact = _clean_long_term_memory_fact(fact)
+    if _wants_new_long_term_memory_file(text):
+        return ToolRequest(
+            tool="memory.write",
+            args={
+                "path": "auto",
+                "title": fact[:80],
+                "body": fact,
+                "memory_scope": "long-term",
+                "metadata": {
+                    "type": "long_term_note",
+                    "memory_scope": "long-term",
+                    "source": "chat",
+                    "confidence": "high",
+                },
+            },
+            reason="User asked the agent to remember a long-term fact in a new memory file.",
+        )
     path = "long-term/facts/personal.md"
     manager = MemoryManager(runtime_context.memory_root)
     existing_body = ""
@@ -1103,6 +1134,286 @@ def _memory_write_request_from_text(
         },
         reason="User asked the agent to remember a personal fact.",
     )
+
+
+def _answer_memory_recall_question(
+    text: str,
+    runtime_context: ToolRuntimeContext,
+) -> AgentResponse | None:
+    if not _is_memory_recall_question(text):
+        return None
+
+    entries = _load_memory_entries(runtime_context)
+    bulgarian = _looks_bulgarian(text)
+    if not entries:
+        return AgentResponse(
+            status="ok",
+            message=(
+                "Не намирам запазени факти в локалната memory още."
+                if bulgarian
+                else "I do not have saved facts in local memory yet."
+            ),
+            data={"planner": "deterministic"},
+        )
+
+    if _is_broad_memory_recall_question(text):
+        matches = entries[:12]
+    else:
+        matches = _rank_memory_entries(text, entries)[:6]
+
+    if not matches:
+        return AgentResponse(
+            status="ok",
+            message=(
+                "Не намирам това в локалната memory още."
+                if bulgarian
+                else "I do not have that in local memory yet."
+            ),
+            data={"planner": "deterministic"},
+        )
+
+    return AgentResponse(
+        status="ok",
+        message=_format_memory_recall_answer(matches, text),
+        data={"planner": "deterministic"},
+    )
+
+
+def _load_memory_entries(runtime_context: ToolRuntimeContext) -> list[MemoryEntry]:
+    manager = MemoryManager(runtime_context.memory_root)
+    manager.bootstrap()
+    entries: list[MemoryEntry] = []
+    seen: set[str] = set()
+    for relative_path in manager.list_files():
+        try:
+            content = _strip_frontmatter(manager.read(relative_path)).strip()
+        except (FileNotFoundError, ValueError):
+            continue
+        for line in _memory_content_lines(content):
+            normalized = _normalize_for_match(line)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            entries.append(MemoryEntry(path=relative_path, text=line))
+    return entries
+
+
+def _memory_content_lines(content: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*]\s+", "", line).strip()
+        if not line or _is_placeholder_memory_line(line):
+            continue
+        lines.append(line)
+    if lines:
+        return lines
+    compact = re.sub(r"\s+", " ", content).strip()
+    if compact and not _is_placeholder_memory_line(compact):
+        return [compact]
+    return []
+
+
+def _is_placeholder_memory_line(line: str) -> bool:
+    normalized = _normalize_for_match(line)
+    if normalized.endswith("not set"):
+        return True
+    return normalized in {
+        "user profile notes live here",
+        "user preferences live here",
+        "personal facts approved by the user live here",
+        "technical facts approved by the user live here",
+        "business facts approved by the user live here",
+    }
+
+
+def _rank_memory_entries(text: str, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+    terms = _memory_query_terms(text)
+    if not terms:
+        return []
+    scored: list[tuple[int, int, MemoryEntry]] = []
+    for index, entry in enumerate(entries):
+        haystack = f"{_normalize_for_match(entry.path)} {_normalize_for_match(entry.text)}"
+        score = 0
+        for term in terms:
+            if term in haystack:
+                score += 3
+            elif len(term) >= 5 and any(token.startswith(term[:5]) for token in _tokenize(haystack)):
+                score += 1
+        if _asks_about_servers(text) and any(marker in haystack for marker in {"server", "servers", "сърв", "lenovo"}):
+            score += 4
+        if _asks_about_models(text) and any(marker in haystack for marker in {"model", "модел", "m700", "lenovo"}):
+            score += 2
+        if score > 0:
+            scored.append((score, -index, entry))
+    scored.sort(reverse=True)
+    return [entry for _, __, entry in scored]
+
+
+def _memory_query_terms(text: str) -> set[str]:
+    stopwords = {
+        "a",
+        "an",
+        "are",
+        "about",
+        "do",
+        "for",
+        "have",
+        "i",
+        "me",
+        "my",
+        "the",
+        "what",
+        "which",
+        "you",
+        "аз",
+        "бяха",
+        "вече",
+        "да",
+        "за",
+        "знам",
+        "знаеш",
+        "имам",
+        "какви",
+        "какво",
+        "казах",
+        "което",
+        "ми",
+        "ме",
+        "моля",
+        "напомни",
+        "помниш",
+        "съм",
+        "ти",
+    }
+    terms = {token for token in _tokenize(_normalize_for_match(text)) if token not in stopwords}
+    aliases: set[str] = set()
+    for term in terms:
+        if term.startswith("сърв"):
+            aliases.update({"сърв", "server", "servers"})
+        if term in {"server", "servers"}:
+            aliases.update({"сърв", "server", "servers"})
+        if term.startswith("модел"):
+            aliases.update({"модел", "model"})
+        if term.startswith("комп"):
+            aliases.update({"комп", "computer", "computers"})
+    return terms | aliases
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-zа-я0-9]+", text, flags=re.IGNORECASE)
+
+
+def _format_memory_recall_answer(matches: list[MemoryEntry], text: str) -> str:
+    bulgarian = _looks_bulgarian(text)
+    facts = [_memory_fact_for_user(entry.text, bulgarian=bulgarian) for entry in matches]
+    if len(facts) == 1 and not _is_broad_memory_recall_question(text):
+        return facts[0]
+    prefix = (
+        "В локалната long-term memory знам това:"
+        if bulgarian
+        else "Here is what I have in local long-term memory:"
+    )
+    return "\n".join([prefix, *[f"- {fact}" for fact in facts]])
+
+
+def _memory_fact_for_user(line: str, *, bulgarian: bool) -> str:
+    value = line.strip().strip(" .")
+    if bulgarian:
+        profile_labels = {
+            "User name": "Име",
+            "Preferred nickname": "Предпочитан прякор",
+            "Bulgarian nickname": "Български прякор",
+            "Assistant name": "Име на асистента",
+            "Preferred response language": "Предпочитан език за отговор",
+        }
+        for source, label in profile_labels.items():
+            profile_match = re.match(rf"{re.escape(source)}:\s*(.+)$", value, flags=re.IGNORECASE)
+            if profile_match:
+                return f"{label}: {profile_match.group(1).strip().rstrip('.')}"
+        value = re.sub(r"^Аз\s+имам\b", "Имаш", value, flags=re.IGNORECASE)
+        value = re.sub(r"^Имам\b", "Имаш", value, flags=re.IGNORECASE)
+        value = re.sub(r"^I\s+have\b", "Имаш", value, flags=re.IGNORECASE)
+        value = re.sub(r"^I\s+like\b", "Харесваш", value, flags=re.IGNORECASE)
+        return value.rstrip(".") + "."
+    value = re.sub(r"^I\s+have\b", "You have", value, flags=re.IGNORECASE)
+    value = re.sub(r"^My\b", "Your", value, flags=re.IGNORECASE)
+    return value.rstrip(".") + "."
+
+
+def _is_memory_recall_question(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    if _is_broad_memory_recall_question(text):
+        return True
+    recall_markers = {
+        "what do i have",
+        "what have i told you",
+        "what do you remember",
+        "remind me what",
+        "какви сървъри имам",
+        "какви модели",
+        "какво съм ти казал",
+        "какво помниш",
+        "напомни ми какви",
+        "напомни ми какво",
+    }
+    if any(marker in normalized for marker in recall_markers):
+        return True
+    return bool(re.search(r"\b(?:what|which)\b.+\b(?:do i have|are mine)\b", normalized)) or bool(
+        re.search(r"\bкакви\b.+\bимам\b", normalized)
+    )
+
+
+def _is_broad_memory_recall_question(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "what do you know about me",
+            "what do you remember about me",
+            "tell me everything you know about me",
+            "какво знаеш за мен",
+            "какво помниш за мен",
+            "кажи ми всичко което знаеш за мен",
+            "всичко което знаеш за мен",
+        }
+    )
+
+
+def _asks_about_servers(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(marker in normalized for marker in {"server", "servers", "сърв"})
+
+
+def _asks_about_models(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(marker in normalized for marker in {"model", "models", "модел"})
+
+
+def _wants_new_long_term_memory_file(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    wants_new_file = any(
+        marker in normalized
+        for marker in {"new md", "new .md", "new markdown", "нов md", "нов .md", "нов мд", "нов markdown"}
+    )
+    wants_long_term = any(marker in normalized for marker in {"long term", "long-term", "дългосрочно"})
+    return wants_new_file or wants_long_term
+
+
+def _clean_long_term_memory_fact(fact: str) -> str:
+    cleaned = fact.strip()
+    cleaned = re.sub(
+        r"^(?:в\s+)?(?:нов\s+)?(?:\.?md|мд|markdown)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^дългосрочно\s+(?:че\s+)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:long[-\s]?term)\s+(?:that\s+)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^че\s+", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip().strip(" .,!?:;\"'") or fact
 
 
 def _is_short_term_memory_text(text: str) -> bool:
@@ -1147,6 +1458,7 @@ def _extract_memory_fact(text: str) -> str | None:
         r"^(?:please\s+)?keep\s+in\s+mind(?:\s+that)?\s+(.+)$",
         r"^(.+?)\s*,?\s+(?:please\s+)?remember(?:\s+that|this)?$",
         r"^(?:и\s+)?(?:също\s+)?запомни(?:\s+че)?\s+(.+)$",
+        r"^(?:моля\s+те\s+да\s+)?запомни(?:ш)?(?:\s+че)?\s+(.+)$",
         r"^(?:можеш\s+ли\s+да\s+)?запомниш(?:\s+че)?\s+(.+)$",
         r"^запази(?:\s+че)?\s+(.+)$",
         r"^(.+?)\s*,?\s+запомни(?:\s+това)?$",

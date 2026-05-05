@@ -166,6 +166,35 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(response.status, "denied")
             self.assertIn("Tool is disabled: terminal.run", response.message)
 
+    def test_bulgarian_terminal_ls_phrase_runs_allowlisted_command_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "marker.txt").write_text("ok\n", encoding="utf-8")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["ls"]],
+                        "auto_approve_allowlisted": True,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_text("Отвори терминала и напиши ls върни ми резултат")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.data["command"], ["ls"])
+            self.assertIn("marker.txt", response.data["stdout"])
+
     def test_open_terminal_phrase_does_not_create_unrunnable_terminal_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -324,6 +353,68 @@ class AgentCoreTest(unittest.TestCase):
                     approval = audit.list_approvals(status="pending")[0]
                     self.assertEqual(approval["tool"], "memory.write")
                     self.assertIn(expected_fact, approval["args"]["body"])
+
+    def test_bulgarian_new_long_term_memory_file_request_uses_auto_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                audit,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text(
+                "Моля те да запомниш в нов .md дългосрочно че имам два сървъра Lenovo m700s"
+            )
+
+            self.assertEqual(response.status, "approval_required")
+            approval = audit.list_approvals(status="pending")[0]
+            self.assertEqual(approval["tool"], "memory.write")
+            self.assertEqual(approval["args"]["path"], "auto")
+            self.assertEqual(approval["args"]["memory_scope"], "long-term")
+            self.assertEqual(approval["args"]["body"], "имам два сървъра Lenovo m700s")
+
+    def test_bulgarian_memory_recall_answers_from_local_long_term_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "long-term/facts/computers.md",
+                "Имам два сървъра Lenovo m700s.",
+                metadata={"type": "long_term_note", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Какви сървъри имам")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Имаш два сървъра Lenovo m700s", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic"})
+
+    def test_broad_bulgarian_memory_recall_lists_saved_facts_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "long-term/facts/computers.md",
+                "Имам два сървъра Lenovo m700s.",
+                metadata={"type": "long_term_note", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Искам да ми кажеш всичко което знаеш за мен")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("В локалната long-term memory знам това:", response.message)
+            self.assertIn("Имаш два сървъра Lenovo m700s", response.message)
 
     def test_remind_me_phrase_creates_approval_gated_local_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
