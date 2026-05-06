@@ -1,0 +1,16 @@
+{
+  "name": "browser.scrape_markdown",
+  "description": "Scrape a public HTTP/HTTPS page, convert readable content to Markdown, return it, and save it under the local scrapefiles folder.",
+  "risk": 1,
+  "permissions": ["browser.read"],
+  "args_schema": {
+    "url": "HTTP or HTTPS URL/domain to scrape",
+    "instructions": "optional user instructions describing what information to extract or emphasize",
+    "filename": "optional Markdown filename; path traversal is ignored",
+    "max_chars": "optional maximum Markdown characters to return and save"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false,
+  "sandbox_required": true
+}

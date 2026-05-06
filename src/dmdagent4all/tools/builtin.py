@@ -14,7 +14,7 @@ from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.browser_automation import browser_click, browser_fill_form, browser_submit
 from dmdagent4all.tools.reminders import complete_reminder, create_reminder, list_reminders
 from dmdagent4all.tools.registry import ToolRegistry, load_builtin_manifests
-from dmdagent4all.tools.web import browser_extract_text, browser_open
+from dmdagent4all.tools.web import browser_extract_text, browser_open, browser_scrape_markdown
 
 
 def build_builtin_registry() -> ToolRegistry:
@@ -30,6 +30,7 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("terminal.run", _terminal_run)
     registry.register_handler("browser.open", browser_open)
     registry.register_handler("browser.extract_text", browser_extract_text)
+    registry.register_handler("browser.scrape_markdown", browser_scrape_markdown)
     registry.register_handler("browser.click", browser_click)
     registry.register_handler("browser.fill_form", browser_fill_form)
     registry.register_handler("browser.submit", browser_submit)

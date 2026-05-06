@@ -1108,6 +1108,9 @@ def _parse_amount(value: str) -> int | None:
 def _browser_request_from_text(text: str) -> ToolRequest | None:
     if _is_bulk_memory_organization_text(text):
         return None
+    scrape_request = _browser_scrape_markdown_request_from_text(text)
+    if scrape_request is not None:
+        return scrape_request
     normalized = _normalize_for_match(text)
     if not any(word in normalized for word in {"open", "visit", "отвори", "отвориш"}):
         return None
@@ -1119,6 +1122,71 @@ def _browser_request_from_text(text: str) -> ToolRequest | None:
         args={"url": url},
         reason="User asked the agent to open a web page through the guarded browser-read tool.",
     )
+
+
+def _browser_scrape_markdown_request_from_text(text: str) -> ToolRequest | None:
+    normalized = _normalize_for_match(text)
+    if not _is_browser_scrape_markdown_text(normalized):
+        return None
+    url = _extract_urlish_target(text)
+    if url is None:
+        return None
+    args: dict[str, Any] = {
+        "url": url,
+        "instructions": text.strip(),
+    }
+    filename = _extract_requested_markdown_filename(text)
+    if filename:
+        args["filename"] = filename
+    return ToolRequest(
+        tool="browser.scrape_markdown",
+        args=args,
+        reason="User asked the agent to scrape a web page and save the result as Markdown.",
+    )
+
+
+def _is_browser_scrape_markdown_text(normalized: str) -> bool:
+    return any(
+        phrase in normalized
+        for phrase in {
+            "scrape",
+            "scraping",
+            "scraped",
+            "scrapefiles",
+            "collect information",
+            "collect info",
+            "extract information",
+            "extract info",
+            "extract content",
+            "save as markdown",
+            "convert to markdown",
+            "markdown format",
+            "md format",
+            "скрейп",
+            "скрейпва",
+            "скрейпни",
+            "изскрейп",
+            "събери информация",
+            "събереш информация",
+            "събери инфо",
+            "извлечи информация",
+            "извади информация",
+            "запази като markdown",
+            "запази в markdown",
+            "md формат",
+        }
+    )
+
+
+def _extract_requested_markdown_filename(text: str) -> str | None:
+    match = re.search(
+        r"(?:filename|file|файл|име)\s*[:=]\s*(?P<name>[\w.\-]+\.md)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group("name").strip(" .,!?:;\"'")
 
 
 def _extract_urlish_target(text: str) -> str | None:
@@ -2728,6 +2796,8 @@ def _tool_success_message(request: ToolRequest) -> str:
         return "Saved to memory."
     if request.tool == "memory.organize_long_term":
         return "Long-term memory organized into modular Markdown files."
+    if request.tool == "browser.scrape_markdown":
+        return "Scraped page saved as Markdown."
     if request.tool == "reminders.create":
         return "Reminder saved. I will notify you in Telegram when it is due if Telegram is configured."
     if request.tool == "reminders.complete":

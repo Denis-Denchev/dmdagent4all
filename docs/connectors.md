@@ -64,9 +64,11 @@ Rules:
 - downloads only to workspace
 - approval required for clicks, form fills, submits, logins, and purchases
 
-Current build status: `browser.open` and `browser.extract_text` use guarded
-HTTP reads. `browser.click`, `browser.fill_form`, and `browser.submit` use an
-isolated Playwright profile when optional browser support is installed:
+Current build status: `browser.open`, `browser.extract_text`, and
+`browser.scrape_markdown` use guarded HTTP reads. Scraped Markdown is saved
+locally under `scrapefiles`. `browser.click`, `browser.fill_form`, and
+`browser.submit` use an isolated Playwright profile when optional browser
+support is installed:
 
 ```bash
 pip install -e ".[browser]"

@@ -24,6 +24,7 @@ build/
 *.sqlite
 *.sqlite3
 tokens.enc
+scrapefiles/
 
 node_modules/
 frontend/dist/

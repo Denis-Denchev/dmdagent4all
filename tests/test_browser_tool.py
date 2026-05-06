@@ -9,6 +9,7 @@ from dmdagent4all.tools.web import (
     FetchedPage,
     assert_public_http_url,
     browser_extract_text,
+    browser_scrape_markdown,
     extract_metadata,
     extract_readable_text,
 )
@@ -62,6 +63,65 @@ class BrowserToolTest(unittest.TestCase):
 
         self.assertIn("api_key=[REDACTED_SECRET]", result["text"])
         self.assertNotIn("abcdefghijklmnop", result["text"])
+
+    def test_browser_scrape_markdown_saves_markdown_and_redacts_secret_like_output(self) -> None:
+        html = """
+        <html>
+          <head><title>Example Page</title></head>
+          <body>
+            <main>
+              <h1>Launch Notes</h1>
+              <p>Read the <a href="/docs">docs</a>.</p>
+              <ul>
+                <li>Alpha item</li>
+                <li>Beta item api_key=abcdefghijklmnop</li>
+              </ul>
+              <script>hiddenSecret()</script>
+            </main>
+          </body>
+        </html>
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            context = ToolRuntimeContext(
+                memory_root=Path(tmp) / "memory",
+                workspace_root=workspace,
+                config={"browser": {"max_text_chars": 12000}},
+            )
+            page = FetchedPage(
+                url="https://example.com/posts",
+                final_url="https://example.com/posts",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=512,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                result = browser_scrape_markdown(
+                    {
+                        "url": "https://example.com/posts",
+                        "instructions": "Only capture launch notes.",
+                        "filename": "launch.md",
+                    },
+                    context,
+                )
+
+            output_path = Path(result["path"])
+            saved_markdown = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["relative_path"], "scrapefiles/launch.md")
+        self.assertEqual(result["markdown"], saved_markdown)
+        self.assertIn("# Example Page", saved_markdown)
+        self.assertIn("## Scrape Instructions", saved_markdown)
+        self.assertIn("Only capture launch notes.", saved_markdown)
+        self.assertIn("## Content", saved_markdown)
+        self.assertIn("# Launch Notes", saved_markdown)
+        self.assertIn("[docs](https://example.com/docs)", saved_markdown)
+        self.assertIn("- Alpha item", saved_markdown)
+        self.assertIn("api_key=[REDACTED_SECRET]", saved_markdown)
+        self.assertNotIn("abcdefghijklmnop", saved_markdown)
+        self.assertNotIn("hiddenSecret", saved_markdown)
 
     def test_browser_click_reports_missing_optional_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

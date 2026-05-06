@@ -254,6 +254,15 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(response.status, "denied")
             self.assertIn("Tool is disabled: browser.open", response.message)
 
+    def test_browser_scrape_request_routes_to_policy_before_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), ExplodingPlanner())
+            response = core.handle_text(
+                "събери информация от https://example.com за цените и запази в markdown"
+            )
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Tool is disabled: browser.scrape_markdown", response.message)
+
     def test_identity_answers_use_setup_config_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(

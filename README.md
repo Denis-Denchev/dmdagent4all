@@ -145,9 +145,10 @@ Foundation implemented:
   Telegram is configured.
 - Local calendar store handlers for create, update, delete, today, week, and
   free-slot queries. External calendar sync is still a connector task.
-- Guarded `browser.open` and `browser.extract_text` read tools for HTTP/HTTPS
-  pages with URL validation, private/local network blocking, timeouts, output
-  limits, and secret redaction.
+- Guarded `browser.open`, `browser.extract_text`, and
+  `browser.scrape_markdown` read tools for HTTP/HTTPS pages with URL
+  validation, private/local network blocking, timeouts, output limits, secret
+  redaction, and local Markdown saves under `scrapefiles`.
 - Approval-gated `browser.click`, `browser.fill_form`, and `browser.submit`
   handlers for an isolated Playwright profile when optional browser runtime
   support is installed.
