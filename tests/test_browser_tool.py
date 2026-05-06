@@ -123,6 +123,64 @@ class BrowserToolTest(unittest.TestCase):
         self.assertNotIn("abcdefghijklmnop", saved_markdown)
         self.assertNotIn("hiddenSecret", saved_markdown)
 
+    def test_browser_scrape_markdown_uses_meta_description_when_body_has_no_text(self) -> None:
+        html = """
+        <html>
+          <head>
+            <title>JS App</title>
+            <meta name="description" content="Useful fallback summary">
+          </head>
+          <body><div id="root"></div><script src="/app.js"></script></body>
+        </html>
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            context = ToolRuntimeContext(
+                memory_root=Path(tmp) / "memory",
+                workspace_root=Path(tmp) / "workspace",
+                config={"browser": {"max_text_chars": 12000}},
+            )
+            page = FetchedPage(
+                url="https://example.com",
+                final_url="https://example.com",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=256,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                result = browser_scrape_markdown({"url": "https://example.com"}, context)
+
+        self.assertIn("# JS App", result["markdown"])
+        self.assertIn("Useful fallback summary", result["markdown"])
+        self.assertNotIn("_No readable page content extracted._", result["markdown"])
+
+    def test_browser_scrape_markdown_honors_configured_downloads_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads_root = Path(tmp) / "internet-files"
+            context = ToolRuntimeContext(
+                memory_root=Path(tmp) / "memory",
+                workspace_root=Path(tmp) / "workspace",
+                config={
+                    "browser": {"max_text_chars": 12000},
+                    "storage": {"downloads_root": str(downloads_root)},
+                },
+            )
+            page = FetchedPage(
+                url="https://example.com",
+                final_url="https://example.com",
+                status=200,
+                content_type="text/html",
+                body="<html><head><title>Saved Page</title></head><body><p>Body</p></body></html>",
+                bytes_read=128,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                result = browser_scrape_markdown({"url": "https://example.com"}, context)
+
+        self.assertTrue(str(result["path"]).startswith(str(downloads_root.resolve())))
+        self.assertEqual(result["relative_path"], "scrapefiles/saved-page.md")
+
     def test_browser_click_reports_missing_optional_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = ToolRuntimeContext(

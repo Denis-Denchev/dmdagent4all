@@ -87,10 +87,11 @@ class LLMPlanner:
         max_tokens: int = 192,
         temperature: float = 0.0,
         think: bool = False,
+        system_prompt: str | None = None,
     ) -> PlanResult:
         response = self.provider.chat(
             [
-                LLMMessage(role="system", content=SYSTEM_PROMPT),
+                LLMMessage(role="system", content=system_prompt or SYSTEM_PROMPT),
                 LLMMessage(
                     role="user",
                     content=_build_planning_prompt(
@@ -124,10 +125,11 @@ class LLMPlanner:
         max_tokens: int = 384,
         temperature: float = 0.2,
         think: bool = False,
+        system_prompt: str | None = None,
     ) -> str:
         response = self.provider.chat(
             [
-                LLMMessage(role="system", content=ANSWER_PROMPT),
+                LLMMessage(role="system", content=system_prompt or ANSWER_PROMPT),
                 LLMMessage(
                     role="user",
                     content=json.dumps(

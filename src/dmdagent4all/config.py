@@ -25,6 +25,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "planner_max_tokens": 192,
         "planner_temperature": 0.0,
         "planner_think": False,
+        "system_prompts": {
+            "planner": "",
+            "answer": "",
+        },
     },
     "privacy": {
         "local_first": True,
@@ -61,6 +65,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timeout_seconds": 15,
         "max_response_bytes": 1000000,
         "max_text_chars": 12000,
+    },
+    "storage": {
+        "downloads_root": "",
     },
     "tools": {},
     "openai_usage": {

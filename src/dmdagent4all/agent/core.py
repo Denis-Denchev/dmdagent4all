@@ -179,6 +179,7 @@ class AgentCore:
                 max_tokens=max(512, int(llm_config.get("planner_max_tokens", 192))),
                 temperature=float(llm_config.get("planner_temperature", 0.0)),
                 think=bool(llm_config.get("planner_think", False)),
+                system_prompt=_llm_system_prompt(llm_config, "planner"),
             )
         except Exception as exc:
             fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
@@ -292,6 +293,7 @@ class AgentCore:
                 max_tokens=max(256, int(llm_config.get("planner_max_tokens", 192))),
                 temperature=0.2,
                 think=bool(llm_config.get("planner_think", False)),
+                system_prompt=_llm_system_prompt(llm_config, "answer"),
             )
             if answer:
                 return AgentResponse(status="ok", message=answer, data={"planner": "llm"})
@@ -327,6 +329,7 @@ class AgentCore:
                 max_tokens=max(384, int(llm_config.get("planner_max_tokens", 192))),
                 temperature=0.25,
                 think=bool(llm_config.get("planner_think", False)),
+                system_prompt=_llm_system_prompt(llm_config, "answer"),
             )
             if answer:
                 return AgentResponse(status="ok", message=answer, data={"planner": "llm", "source": "memory_recall"})
@@ -363,6 +366,7 @@ class AgentCore:
                 max_tokens=max(512, int(llm_config.get("planner_max_tokens", 192))),
                 temperature=float(llm_config.get("planner_temperature", 0.0)),
                 think=bool(llm_config.get("planner_think", False)),
+                system_prompt=_llm_system_prompt(llm_config, "planner"),
             )
         except Exception:
             return None
@@ -2615,6 +2619,17 @@ def _profile_from_config(config: dict[str, Any]) -> dict[str, str]:
         "nickname": str(setup.get("nickname") or ""),
         "nickname_bg": str(setup.get("nickname_bg") or setup.get("nickname") or ""),
     }
+
+
+def _llm_system_prompt(llm_config: dict[str, Any], key: str) -> str | None:
+    prompts = llm_config.get("system_prompts", {})
+    if not isinstance(prompts, dict):
+        return None
+    value = prompts.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _enabled_tools_from_config(

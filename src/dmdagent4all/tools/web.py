@@ -14,6 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from dmdagent4all.security import redact_text
 from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.storage import internet_files_dir
 
 
 DEFAULT_TIMEOUT_SECONDS = 15
@@ -74,6 +75,8 @@ def browser_scrape_markdown(args: dict[str, Any], context: ToolRuntimeContext) -
     title = metadata.get("title", "").strip() or _title_from_url(page.final_url)
     instructions = _clean_optional_text(args.get("instructions"), max_chars=2000)
     content = html_to_markdown(page.body, page.content_type, base_url=page.final_url)
+    if not content.strip():
+        content = _metadata_fallback_markdown(metadata)
     markdown = _build_scrape_markdown(
         title=title,
         source_url=page.url,
@@ -89,7 +92,7 @@ def browser_scrape_markdown(args: dict[str, Any], context: ToolRuntimeContext) -
     if markdown_truncated:
         markdown = markdown[:max_chars].rstrip() + "\n\n[content truncated]\n"
 
-    output_dir = context.workspace_root.resolve() / "scrapefiles"
+    output_dir = internet_files_dir(context.config, default_root=context.workspace_root, folder="scrapefiles")
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = _safe_markdown_filename(
         raw_filename=args.get("filename"),
@@ -99,7 +102,7 @@ def browser_scrape_markdown(args: dict[str, Any], context: ToolRuntimeContext) -
     output_path = _unique_markdown_path(output_dir, filename)
     output_path.write_text(markdown, encoding="utf-8")
 
-    workspace_root = context.workspace_root.resolve()
+    workspace_root = output_dir.parent.resolve()
     try:
         relative_path = str(output_path.relative_to(workspace_root))
     except ValueError:
@@ -311,6 +314,13 @@ def _build_scrape_markdown(
         )
     lines.extend(["## Content", "", content.strip() or "_No readable page content extracted._", ""])
     return "\n".join(lines)
+
+
+def _metadata_fallback_markdown(metadata: dict[str, str]) -> str:
+    description = _collapse_space(metadata.get("description", ""))
+    if not description:
+        return ""
+    return description
 
 
 def _clean_optional_text(value: Any, *, max_chars: int) -> str:

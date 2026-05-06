@@ -46,6 +46,36 @@ export type MemoryFile = {
   content: string
 }
 
+export type WorkspaceFile = {
+  path: string
+  name: string
+  folder: string
+  label: string
+  size: number
+  modified_at: string
+  content_type: string
+  previewable: boolean
+}
+
+export type WorkspaceRoot = {
+  name: string
+  label: string
+  path: string
+  exists: boolean
+  count: number
+}
+
+export type WorkspaceFilesResponse = {
+  workspace: string
+  roots: WorkspaceRoot[]
+  files: WorkspaceFile[]
+}
+
+export type WorkspaceFileContent = WorkspaceFile & {
+  content: string
+  truncated: boolean
+}
+
 export type Status = {
   version: string
   data_dir: string
@@ -196,6 +226,73 @@ export type DoctorResponse = {
   checks: DoctorCheck[]
 }
 
+export type AgentConfiguration = {
+  paths: {
+    data_dir: string
+    config: string
+    memory: string
+    workspace: string
+    downloads_root: string
+    downloads_root_custom: boolean
+    audit_db: string
+  }
+  setup: Record<string, unknown>
+  llm: Status['llm'] & {
+    planner_max_tokens?: number
+    planner_temperature?: number
+    planner_think?: boolean
+  }
+  browser: {
+    enabled?: boolean
+    isolated_profile?: boolean
+    downloads_to_workspace?: boolean
+    approval_required_for_submit?: boolean
+    timeout_seconds?: number
+    max_response_bytes?: number
+    max_text_chars?: number
+  }
+  terminal: Record<string, unknown>
+  privacy: Record<string, unknown>
+  permissions: {
+    granted?: string[]
+    approval_required_at_risk?: number
+  }
+  storage: {
+    downloads_root?: string
+  }
+  system_prompts: {
+    planner: {
+      default: string
+      custom: string
+      effective: string
+      customized: boolean
+    }
+    answer: {
+      default: string
+      custom: string
+      effective: string
+      customized: boolean
+    }
+  }
+}
+
+export type AgentConfigurationUpdate = {
+  downloads_root?: string
+  agent_name?: string
+  user_name?: string
+  preferred_language?: string
+  response_language?: string
+  planner_max_tokens?: number
+  planner_temperature?: number
+  planner_think?: boolean
+  planner_system_prompt?: string
+  answer_system_prompt?: string
+  browser_timeout_seconds?: number
+  browser_max_response_bytes?: number
+  browser_max_text_chars?: number
+  approval_required_at_risk?: number
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -245,6 +342,12 @@ export const api = {
     request<AgentResponse>(`/v1/approvals/${id}/deny`, { method: 'POST' }),
   audit: () => request<AuditEvent[]>('/v1/audit?limit=30'),
   doctor: () => request<DoctorResponse>('/v1/doctor?check_network=false'),
+  configuration: () => request<AgentConfiguration>('/v1/configuration'),
+  updateConfiguration: (settings: AgentConfigurationUpdate) =>
+    request<AgentResponse>('/v1/configuration', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    }),
   memory: () => request<MemoryList>('/v1/memory'),
   memoryFile: (path: string) =>
     request<MemoryFile>(`/v1/memory/file?path=${encodeURIComponent(path)}`),
@@ -253,6 +356,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path, body }),
     }),
+  workspaceFiles: () => request<WorkspaceFilesResponse>('/v1/workspace-files'),
+  workspaceFile: (path: string) =>
+    request<WorkspaceFileContent>(`/v1/workspace-files/file?path=${encodeURIComponent(path)}`),
+  workspaceFileDownloadUrl: (path: string) =>
+    `/v1/workspace-files/download?path=${encodeURIComponent(path)}`,
   models: () => request<ModelsResponse>('/v1/models'),
   setModelMode: (mode: string) =>
     request<AgentResponse>('/v1/models/mode', {

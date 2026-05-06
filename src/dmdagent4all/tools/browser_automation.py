@@ -5,6 +5,7 @@ from typing import Any
 
 from dmdagent4all.security import redact_text
 from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.storage import internet_files_dir
 from dmdagent4all.tools.web import assert_public_http_url, normalize_url
 
 
@@ -72,7 +73,7 @@ def _run_browser_action(
     browser_config = context.config.get("browser", {})
     timeout_ms = int(browser_config.get("timeout_seconds", 15)) * 1000
     profile_dir = _browser_profile_dir(context)
-    downloads_dir = context.workspace_root / "browser-downloads"
+    downloads_dir = internet_files_dir(context.config, default_root=context.workspace_root, folder="browser-downloads")
     profile_dir.mkdir(parents=True, exist_ok=True)
     downloads_dir.mkdir(parents=True, exist_ok=True)
 

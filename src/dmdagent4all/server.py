@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import mimetypes
 import re
 import shlex
 import threading
@@ -13,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from dmdagent4all import __version__
+from dmdagent4all.agent.planner import ANSWER_PROMPT, SYSTEM_PROMPT
 from dmdagent4all.app_paths import AppPaths
 from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.config import load_config, update_config, write_default_config
@@ -44,6 +47,7 @@ from dmdagent4all.runtime import build_agent_core
 from dmdagent4all.sandbox import TerminalPolicy
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.storage import downloads_root_from_config
 from dmdagent4all.tools.reminders import (
     due_reminders,
     mark_reminder_notified,
@@ -58,6 +62,24 @@ DEFAULT_DEEPSEEK_API_KEY_ENV = "DMDAGENT_DEEPSEEK_API_KEY"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEEPSEEK_MODEL_FALLBACKS = ["deepseek-v4-flash", "deepseek-v4-pro"]
+WORKSPACE_FILE_ROOTS = {
+    "scrapefiles": "Scraped Markdown",
+    "browser-downloads": "Browser Downloads",
+}
+WORKSPACE_TEXT_SUFFIXES = {
+    ".csv",
+    ".htm",
+    ".html",
+    ".json",
+    ".log",
+    ".markdown",
+    ".md",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+WORKSPACE_MAX_PREVIEW_BYTES = 200_000
 
 
 class ChatRequest(BaseModel):
@@ -89,6 +111,23 @@ class TerminalSettingsRequest(BaseModel):
     timeout_seconds: int | None = None
     max_output_chars: int | None = None
     auto_approve_allowlisted: bool | None = None
+
+
+class AgentConfigurationRequest(BaseModel):
+    downloads_root: str | None = None
+    agent_name: str | None = None
+    user_name: str | None = None
+    preferred_language: str | None = None
+    response_language: str | None = None
+    planner_max_tokens: int | None = None
+    planner_temperature: float | None = None
+    planner_think: bool | None = None
+    planner_system_prompt: str | None = None
+    answer_system_prompt: str | None = None
+    browser_timeout_seconds: int | None = None
+    browser_max_response_bytes: int | None = None
+    browser_max_text_chars: int | None = None
+    approval_required_at_risk: int | None = None
 
 
 class TerminalCommandRequest(BaseModel):
@@ -277,6 +316,42 @@ def create_app() -> FastAPI:
             )
         )
         return asdict(response)
+
+    @app.get("/v1/workspace-files")
+    def workspace_files() -> dict[str, Any]:
+        return _workspace_files_response(paths, load_config(paths.config))
+
+    @app.get("/v1/workspace-files/file")
+    def workspace_file(path: str) -> dict[str, Any]:
+        config = load_config(paths.config)
+        file_path = _resolve_workspace_file(paths, config, path)
+        if not _is_previewable_workspace_file(file_path):
+            raise HTTPException(status_code=415, detail="Workspace file is not text-previewable.")
+        content, truncated = _read_workspace_text_preview(file_path)
+        item = _workspace_file_item(paths, config, file_path)
+        return {
+            **item,
+            "content": content,
+            "truncated": truncated,
+        }
+
+    @app.get("/v1/workspace-files/download")
+    def workspace_file_download(path: str) -> FileResponse:
+        file_path = _resolve_workspace_file(paths, load_config(paths.config), path)
+        return FileResponse(file_path, filename=file_path.name)
+
+    @app.get("/v1/configuration")
+    def configuration() -> dict[str, Any]:
+        return _configuration_response(paths, load_config(paths.config))
+
+    @app.post("/v1/configuration")
+    def configuration_update(request: AgentConfigurationRequest) -> dict[str, Any]:
+        config = update_config(lambda current: _update_agent_configuration(current, request), paths.config)
+        return {
+            "status": "ok",
+            "message": "Agent configuration updated.",
+            "data": _configuration_response(paths, config),
+        }
 
     @app.get("/v1/status")
     def status() -> dict[str, Any]:
@@ -880,6 +955,205 @@ def _set_permission(paths: AppPaths, permission: str, granted: bool) -> dict[str
         "message": f"Permission {permission} {'granted' if granted else 'revoked'}.",
         "data": {"permission": permission, "granted": granted},
     }
+
+
+def _configuration_response(paths: AppPaths, config: dict[str, Any]) -> dict[str, Any]:
+    downloads_root = downloads_root_from_config(config, default_root=paths.workspace)
+    llm = config.get("llm", {})
+    return {
+        "paths": {
+            "data_dir": str(paths.root),
+            "config": str(paths.config),
+            "memory": str(paths.memory),
+            "workspace": str(paths.workspace),
+            "downloads_root": str(downloads_root),
+            "downloads_root_custom": bool(str(config.get("storage", {}).get("downloads_root") or "").strip()),
+            "audit_db": str(paths.audit_db),
+        },
+        "setup": config.get("setup", {}),
+        "llm": llm,
+        "system_prompts": _system_prompts_response(llm),
+        "browser": config.get("browser", {}),
+        "terminal": config.get("terminal", {}),
+        "privacy": config.get("privacy", {}),
+        "permissions": config.get("permissions", {}),
+        "storage": config.get("storage", {}),
+    }
+
+
+def _update_agent_configuration(config: dict[str, Any], request: AgentConfigurationRequest) -> None:
+    if request.downloads_root is not None:
+        value = request.downloads_root.strip()
+        if value:
+            root = Path(value).expanduser()
+            if not root.is_absolute():
+                raise HTTPException(status_code=400, detail="downloads_root must be an absolute path or empty.")
+            root.mkdir(parents=True, exist_ok=True)
+            config.setdefault("storage", {})["downloads_root"] = str(root.resolve())
+        else:
+            config.setdefault("storage", {})["downloads_root"] = ""
+    setup = config.setdefault("setup", {})
+    for key, value in {
+        "agent_name": request.agent_name,
+        "user_name": request.user_name,
+        "preferred_language": request.preferred_language,
+    }.items():
+        if value is not None:
+            setup[key] = value.strip()
+    llm = config.setdefault("llm", {})
+    if request.response_language is not None:
+        llm["response_language"] = request.response_language.strip() or "auto"
+    if request.planner_max_tokens is not None:
+        llm["planner_max_tokens"] = max(128, min(int(request.planner_max_tokens), 8192))
+    if request.planner_temperature is not None:
+        llm["planner_temperature"] = max(0.0, min(float(request.planner_temperature), 2.0))
+    if request.planner_think is not None:
+        llm["planner_think"] = bool(request.planner_think)
+    prompts = llm.setdefault("system_prompts", {})
+    if request.planner_system_prompt is not None:
+        prompts["planner"] = _stored_system_prompt(request.planner_system_prompt, SYSTEM_PROMPT)
+    if request.answer_system_prompt is not None:
+        prompts["answer"] = _stored_system_prompt(request.answer_system_prompt, ANSWER_PROMPT)
+    browser = config.setdefault("browser", {})
+    if request.browser_timeout_seconds is not None:
+        browser["timeout_seconds"] = max(1, min(int(request.browser_timeout_seconds), 120))
+    if request.browser_max_response_bytes is not None:
+        browser["max_response_bytes"] = max(100_000, min(int(request.browser_max_response_bytes), 20_000_000))
+    if request.browser_max_text_chars is not None:
+        browser["max_text_chars"] = max(500, min(int(request.browser_max_text_chars), 1_000_000))
+    if request.approval_required_at_risk is not None:
+        config.setdefault("permissions", {})["approval_required_at_risk"] = max(
+            0,
+            min(int(request.approval_required_at_risk), 5),
+        )
+
+
+def _system_prompts_response(llm: dict[str, Any]) -> dict[str, Any]:
+    prompts = llm.get("system_prompts", {})
+    if not isinstance(prompts, dict):
+        prompts = {}
+    planner_custom = str(prompts.get("planner") or "")
+    answer_custom = str(prompts.get("answer") or "")
+    return {
+        "planner": {
+            "default": SYSTEM_PROMPT,
+            "custom": planner_custom,
+            "effective": planner_custom.strip() or SYSTEM_PROMPT,
+            "customized": bool(planner_custom.strip()),
+        },
+        "answer": {
+            "default": ANSWER_PROMPT,
+            "custom": answer_custom,
+            "effective": answer_custom.strip() or ANSWER_PROMPT,
+            "customized": bool(answer_custom.strip()),
+        },
+    }
+
+
+def _stored_system_prompt(value: str, default: str) -> str:
+    stripped = value.strip()
+    return "" if stripped == default.strip() else stripped
+
+
+def _workspace_files_response(paths: AppPaths, config: dict[str, Any]) -> dict[str, Any]:
+    paths.ensure()
+    files = _list_workspace_files(paths, config)
+    grouped_counts = {name: 0 for name in WORKSPACE_FILE_ROOTS}
+    for item in files:
+        folder = str(item["folder"])
+        grouped_counts[folder] = grouped_counts.get(folder, 0) + 1
+    storage_root = downloads_root_from_config(config, default_root=paths.workspace)
+    return {
+        "workspace": str(storage_root),
+        "roots": [
+            {
+                "name": name,
+                "label": label,
+                "path": str(storage_root / name),
+                "exists": (storage_root / name).exists(),
+                "count": grouped_counts.get(name, 0),
+            }
+            for name, label in WORKSPACE_FILE_ROOTS.items()
+        ],
+        "files": files,
+    }
+
+
+def _list_workspace_files(paths: AppPaths, config: dict[str, Any]) -> list[dict[str, Any]]:
+    storage_root = downloads_root_from_config(config, default_root=paths.workspace)
+    items: list[dict[str, Any]] = []
+    for folder in WORKSPACE_FILE_ROOTS:
+        folder_path = (storage_root / folder).resolve()
+        if not folder_path.is_dir():
+            continue
+        for file_path in folder_path.rglob("*"):
+            try:
+                resolved = file_path.resolve()
+                resolved.relative_to(folder_path)
+            except (OSError, ValueError):
+                continue
+            if resolved.is_file():
+                items.append(_workspace_file_item(paths, config, resolved))
+    items.sort(key=lambda item: str(item["modified_at"]), reverse=True)
+    return items[:500]
+
+
+def _workspace_file_item(paths: AppPaths, config: dict[str, Any], file_path: Path) -> dict[str, Any]:
+    storage_root = downloads_root_from_config(config, default_root=paths.workspace)
+    resolved = file_path.resolve()
+    relative_path = resolved.relative_to(storage_root).as_posix()
+    stat = resolved.stat()
+    folder = relative_path.split("/", 1)[0]
+    content_type, _ = mimetypes.guess_type(resolved.name)
+    if resolved.suffix.lower() in {".md", ".markdown"}:
+        content_type = "text/markdown"
+    return {
+        "path": relative_path,
+        "name": resolved.name,
+        "folder": folder,
+        "label": WORKSPACE_FILE_ROOTS.get(folder, folder),
+        "size": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+        "content_type": content_type or "application/octet-stream",
+        "previewable": _is_previewable_workspace_file(resolved),
+    }
+
+
+def _resolve_workspace_file(paths: AppPaths, config: dict[str, Any], raw_path: str) -> Path:
+    requested = Path(raw_path)
+    if requested.is_absolute():
+        raise HTTPException(status_code=400, detail="Workspace file path must be relative.")
+    storage_root = downloads_root_from_config(config, default_root=paths.workspace)
+    candidate = (storage_root / requested).resolve()
+    allowed = False
+    for folder in WORKSPACE_FILE_ROOTS:
+        root = (storage_root / folder).resolve()
+        try:
+            candidate.relative_to(root)
+            allowed = True
+            break
+        except ValueError:
+            continue
+    if not allowed:
+        raise HTTPException(status_code=400, detail="Workspace file path is not in an allowed download folder.")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Workspace file not found.")
+    return candidate
+
+
+def _is_previewable_workspace_file(file_path: Path) -> bool:
+    content_type, _ = mimetypes.guess_type(file_path.name)
+    if content_type and content_type.startswith("text/"):
+        return True
+    return file_path.suffix.lower() in WORKSPACE_TEXT_SUFFIXES
+
+
+def _read_workspace_text_preview(file_path: Path) -> tuple[str, bool]:
+    body = file_path.read_bytes()
+    truncated = len(body) > WORKSPACE_MAX_PREVIEW_BYTES
+    if truncated:
+        body = body[:WORKSPACE_MAX_PREVIEW_BYTES]
+    return body.decode("utf-8", errors="replace"), truncated
 
 
 def _set_model_config(
