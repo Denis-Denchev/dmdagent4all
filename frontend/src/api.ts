@@ -287,6 +287,7 @@ export type AgentConfigurationUpdate = {
   planner_think?: boolean
   planner_system_prompt?: string
   answer_system_prompt?: string
+  send_chat_history_to_cloud?: boolean
   browser_timeout_seconds?: number
   browser_max_response_bytes?: number
   browser_max_text_chars?: number
@@ -319,10 +320,10 @@ async function request<T>(
 
 export const api = {
   status: () => request<Status>('/v1/status'),
-  chat: (message: string) =>
+  chat: (message: string, session_id = 'dashboard') =>
     request<AgentResponse>('/v1/chat', {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, session_id }),
     }),
   tools: () => request<Tool[]>('/v1/tools'),
   setTool: (tool: string, enabled: boolean) =>

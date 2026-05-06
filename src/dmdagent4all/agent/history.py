@@ -16,7 +16,7 @@ class ChatTurn:
 
 
 class ChatHistory:
-    def __init__(self, path: Path, *, max_turns: int = 40, max_chars_per_turn: int = 2000) -> None:
+    def __init__(self, path: Path, *, max_turns: int = 200, max_chars_per_turn: int = 2000) -> None:
         self.path = path.expanduser().resolve()
         self.max_turns = max(4, int(max_turns))
         self.max_chars_per_turn = max(200, int(max_chars_per_turn))
@@ -63,6 +63,9 @@ class ChatHistory:
 
     def format_recent(self, session_id: str = "default", *, limit: int = 12, max_chars: int = 6000) -> str:
         lines: list[str] = []
+        first = self.first_user_message(session_id)
+        if first:
+            lines.append(f"First user message in this session: {first.content}")
         for turn in self.recent(session_id, limit=limit):
             prefix = "User" if turn.role == "user" else "Assistant"
             lines.append(f"{prefix}: {turn.content}")
@@ -70,6 +73,24 @@ class ChatHistory:
         if len(text) > max_chars:
             return text[-max_chars:].lstrip()
         return text
+
+    def first_user_message(self, session_id: str = "default") -> ChatTurn | None:
+        with self._lock:
+            data = self._load()
+        raw_turns = data.get(_safe_session_id(session_id), [])
+        if not isinstance(raw_turns, list):
+            return None
+        for item in raw_turns:
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = str(item.get("content") or "").strip()
+            if content:
+                return ChatTurn(
+                    role="user",
+                    content=content,
+                    created_at=str(item.get("created_at") or "").strip(),
+                )
+        return None
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():

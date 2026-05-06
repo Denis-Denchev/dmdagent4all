@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type AgentConfiguration,
   type AgentResponse,
@@ -56,6 +56,7 @@ type ConfigDraft = {
   plannerThink: boolean
   plannerSystemPrompt: string
   answerSystemPrompt: string
+  sendChatHistoryToCloud: boolean
   browserTimeout: string
   browserMaxResponseBytes: string
   browserMaxTextChars: string
@@ -141,6 +142,7 @@ function dataObject(value: unknown): Record<string, unknown> {
 }
 
 function approvalIdFromResponse(response?: AgentResponse) {
+  if (response?.status !== 'approval_required') return null
   const approvalId = dataObject(response?.data).approval_id
   return typeof approvalId === 'number' ? approvalId : null
 }
@@ -157,6 +159,7 @@ function initialConfigDraft(): ConfigDraft {
     plannerThink: false,
     plannerSystemPrompt: '',
     answerSystemPrompt: '',
+    sendChatHistoryToCloud: false,
     browserTimeout: '15',
     browserMaxResponseBytes: '1000000',
     browserMaxTextChars: '12000',
@@ -167,6 +170,8 @@ function initialConfigDraft(): ConfigDraft {
 export function App() {
   const [activeView, setActiveView] = useState<View>('chat')
   const [railCollapsed, setRailCollapsed] = useState(false)
+  const chatLogRef = useRef<HTMLDivElement | null>(null)
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
   const [status, setStatus] = useState<Status | null>(null)
   const [configuration, setConfiguration] = useState<AgentConfiguration | null>(null)
   const [tools, setTools] = useState<Tool[]>([])
@@ -275,6 +280,18 @@ export function App() {
     }
   }, [activeView, tourOpen, tourStep])
 
+  useEffect(() => {
+    if (activeView !== 'chat') return
+    const frame = window.requestAnimationFrame(() => {
+      const chatLog = chatLogRef.current
+      if (chatLog) {
+        chatLog.scrollTop = chatLog.scrollHeight
+      }
+      chatEndRef.current?.scrollIntoView({ block: 'end' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeView, busy, messages.length])
+
   async function refreshAll() {
     const [
       statusResult,
@@ -348,6 +365,7 @@ export function App() {
       plannerThink: Boolean(configurationResult.llm.planner_think),
       plannerSystemPrompt: configurationResult.system_prompts.planner.effective,
       answerSystemPrompt: configurationResult.system_prompts.answer.effective,
+      sendChatHistoryToCloud: Boolean(configurationResult.privacy.send_chat_history_to_cloud),
       browserTimeout: String(configurationResult.browser.timeout_seconds ?? 15),
       browserMaxResponseBytes: String(configurationResult.browser.max_response_bytes ?? 1000000),
       browserMaxTextChars: String(configurationResult.browser.max_text_chars ?? 12000),
@@ -409,7 +427,7 @@ export function App() {
     setMessages((current) => [...current, { id: `${Date.now()}-user`, role: 'user', text: message }])
     setBusy(true)
     try {
-      const response = await api.chat(message)
+      const response = await api.chat(message, 'dashboard')
       appendAgentResponse(response)
       await refreshAll()
     } catch (error) {
@@ -423,6 +441,14 @@ export function App() {
       ])
     } finally {
       setBusy(false)
+    }
+  }
+
+  function handleChatKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== 'Enter' || event.shiftKey) return
+    event.preventDefault()
+    if (!busy && chatInput.trim()) {
+      void sendChat()
     }
   }
 
@@ -496,6 +522,7 @@ export function App() {
           planner_think: configDraft.plannerThink,
           planner_system_prompt: configDraft.plannerSystemPrompt,
           answer_system_prompt: configDraft.answerSystemPrompt,
+          send_chat_history_to_cloud: configDraft.sendChatHistoryToCloud,
           browser_timeout_seconds: toNumber(configDraft.browserTimeout),
           browser_max_response_bytes: toNumber(configDraft.browserMaxResponseBytes),
           browser_max_text_chars: toNumber(configDraft.browserMaxTextChars),
@@ -702,7 +729,7 @@ export function App() {
         {activeView === 'chat' ? (
           <section className="chat-workspace" data-tour="tour-chat">
             <div className="chat-main panel">
-              <div className="chat-log">
+              <div className="chat-log" ref={chatLogRef}>
                 {messages.map((message) => (
                   <article key={message.id} className={`message message--${message.role}`}>
                     <div className="message-avatar">{message.role === 'user' ? 'YOU' : message.role === 'system' ? 'SYS' : 'AI'}</div>
@@ -725,6 +752,7 @@ export function App() {
                     </div>
                   </article>
                 ))}
+                <div ref={chatEndRef} aria-hidden="true" />
               </div>
               <form
                 className="chat-composer"
@@ -736,6 +764,7 @@ export function App() {
                 <textarea
                   value={chatInput}
                   onChange={(event) => setChatInput(event.target.value)}
+                  onKeyDown={handleChatKeyDown}
                   placeholder="Message the agent. Example: scrape fibank.bg and return Markdown"
                   rows={3}
                 />
@@ -967,6 +996,10 @@ export function App() {
                 <label className="setting-check">
                   <input type="checkbox" checked={configDraft.plannerThink} onChange={(event) => setConfigDraft({ ...configDraft, plannerThink: event.target.checked })} />
                   <span><strong>Planner think mode</strong><small>Passes the think flag to compatible local/cloud providers.</small></span>
+                </label>
+                <label className="setting-check">
+                  <input type="checkbox" checked={configDraft.sendChatHistoryToCloud} onChange={(event) => setConfigDraft({ ...configDraft, sendChatHistoryToCloud: event.target.checked })} />
+                  <span><strong>Send recent chat context to cloud models</strong><small>Allows OpenAI, DeepSeek, and compatible cloud providers to receive the recent chat window for follow-up questions.</small></span>
                 </label>
                 <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Configuration</button>
               </div>

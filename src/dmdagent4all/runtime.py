@@ -15,13 +15,13 @@ from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
 
 
-def build_agent_core() -> AgentCore:
+def build_agent_core(*, planner_enabled: bool = True) -> AgentCore:
     paths = AppPaths.default()
     paths.ensure()
     write_default_config(paths.config)
     config = load_config(paths.config)
     registry = build_builtin_registry()
-    provider = _provider_from_config(config)
+    provider = _provider_from_config(config) if planner_enabled else None
     return AgentCore(
         permission_engine=PermissionEngine(registry.manifests),
         tool_registry=registry,
@@ -33,7 +33,7 @@ def build_agent_core() -> AgentCore:
             config_path=paths.config,
         ),
         audit_store=AuditStore(paths.audit_db),
-        planner=LLMPlanner(provider),
+        planner=LLMPlanner(provider) if provider is not None else None,
     )
 
 

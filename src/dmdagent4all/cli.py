@@ -526,7 +526,8 @@ def command_chat(message: str, *, start_ollama: bool = True) -> int:
         if ollama_process is not None:
             spawned.append(("Ollama", ollama_process))
 
-    core = build_agent_core()
+    local_provider = str(config.get("llm", {}).get("provider", "ollama")).lower() in {"ollama", "local"}
+    core = build_agent_core(planner_enabled=not (message.strip() and not start_ollama and local_provider))
     if not message.strip():
         _start_telegram_background_if_ready(config, background_services, explicit=False)
 

@@ -124,6 +124,7 @@ class AgentConfigurationRequest(BaseModel):
     planner_think: bool | None = None
     planner_system_prompt: str | None = None
     answer_system_prompt: str | None = None
+    send_chat_history_to_cloud: bool | None = None
     browser_timeout_seconds: int | None = None
     browser_max_response_bytes: int | None = None
     browser_max_text_chars: int | None = None
@@ -1014,6 +1015,8 @@ def _update_agent_configuration(config: dict[str, Any], request: AgentConfigurat
         prompts["planner"] = _stored_system_prompt(request.planner_system_prompt, SYSTEM_PROMPT)
     if request.answer_system_prompt is not None:
         prompts["answer"] = _stored_system_prompt(request.answer_system_prompt, ANSWER_PROMPT)
+    if request.send_chat_history_to_cloud is not None:
+        config.setdefault("privacy", {})["send_chat_history_to_cloud"] = bool(request.send_chat_history_to_cloud)
     browser = config.setdefault("browser", {})
     if request.browser_timeout_seconds is not None:
         browser["timeout_seconds"] = max(1, min(int(request.browser_timeout_seconds), 120))

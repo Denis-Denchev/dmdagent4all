@@ -98,6 +98,42 @@ class AgentCoreTest(unittest.TestCase):
 
             self.assertEqual(planner.calls[1]["conversation_context"], "")
 
+    def test_cloud_planner_receives_chat_history_when_privacy_setting_allows_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={
+                    "llm": {"provider": "openai", "response_language": "auto"},
+                    "privacy": {"send_chat_history_to_cloud": True},
+                },
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            core.handle_text("private previous message", session_id="cloud")
+            core.handle_text("what did I just say?", session_id="cloud")
+
+            self.assertIn("First user message in this session: private previous message", planner.calls[1]["conversation_context"])
+            self.assertIn("User: private previous message", planner.calls[1]["conversation_context"])
+
+    def test_first_message_question_is_answered_from_local_chat_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={"llm": {"provider": "openai", "response_language": "auto"}},
+                permission_context=PermissionContext(cloud_model_active=True),
+            )
+
+            core.handle_text("първият ми въпрос", session_id="history")
+            response = core.handle_text("кой беше първия въпрос който те питах в този чат", session_id="history")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("първият ми въпрос", response.message)
+            self.assertEqual(response.data, {"planner": "deterministic", "source": "chat_history"})
+
     def test_missing_openai_key_acknowledgement_falls_back_without_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(
@@ -227,21 +263,21 @@ class AgentCoreTest(unittest.TestCase):
 
     def test_obvious_memory_list_request_does_not_need_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            core = _build_core(Path(tmp), ExplodingPlanner())
+            core = _build_core(Path(tmp), None)
             response = core.handle_text("Show my local memory files")
             self.assertEqual(response.status, "ok")
             self.assertIn("files", response.data)
 
     def test_help_request_does_not_need_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            core = _build_core(Path(tmp), ExplodingPlanner())
+            core = _build_core(Path(tmp), None)
             response = core.handle_text("Hello, what can you do?")
             self.assertEqual(response.status, "ok")
             self.assertIn("permission engine", response.message)
 
     def test_bulgarian_greeting_does_not_echo_user(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            core = _build_core(Path(tmp), ExplodingPlanner())
+            core = _build_core(Path(tmp), None)
             response = core.handle_text("как си")
             self.assertEqual(response.status, "ok")
             self.assertNotEqual(response.message, "как си")
@@ -249,14 +285,14 @@ class AgentCoreTest(unittest.TestCase):
 
     def test_browser_request_routes_to_policy_before_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            core = _build_core(Path(tmp), ExplodingPlanner())
+            core = _build_core(Path(tmp), None)
             response = core.handle_text("може ли да отвориш гугъл")
             self.assertEqual(response.status, "denied")
             self.assertIn("Tool is disabled: browser.open", response.message)
 
     def test_browser_scrape_request_routes_to_policy_before_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            core = _build_core(Path(tmp), ExplodingPlanner())
+            core = _build_core(Path(tmp), None)
             response = core.handle_text(
                 "събери информация от https://example.com за цените и запази в markdown"
             )
@@ -267,7 +303,7 @@ class AgentCoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(
                 Path(tmp),
-                ExplodingPlanner(),
+                None,
                 config={
                     "llm": {"response_language": "auto"},
                     "setup": {
@@ -294,7 +330,7 @@ class AgentCoreTest(unittest.TestCase):
                     "preferred_language": "auto",
                 },
             }
-            core = _build_core(root, ExplodingPlanner(), config=config)
+            core = _build_core(root, None, config=config)
 
             agent_response = core.handle_text("call yourself Jarvis")
             user_response = core.handle_text("my name is Test User")
@@ -307,6 +343,57 @@ class AgentCoreTest(unittest.TestCase):
             self.assertIn("Assistant name: Jarvis", profile)
             self.assertIn("User name: Test User", profile)
 
+    def test_llm_first_does_not_parse_correction_as_identity_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "setup": {
+                    "agent_name": "DMD Agent",
+                    "user_name": "Denis",
+                    "preferred_language": "auto",
+                },
+            }
+            planner = RecordingPlanner(answer="Immich, not Proxmox.")
+            core = _build_core(Path(tmp), planner, config=config)
+
+            response = core.handle_text("im asking for immich not for proxmox")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.data, {"planner": "llm"})
+            self.assertEqual(config["setup"]["user_name"], "Denis")
+            self.assertEqual(planner.calls[0]["user_message"], "im asking for immich not for proxmox")
+
+    def test_model_requests_profile_update_tool_instead_of_regex_identity_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "setup": {
+                    "agent_name": "DMD Agent",
+                    "user_name": "",
+                    "preferred_language": "auto",
+                },
+            }
+            planner = FakePlanner(
+                PlanResult(
+                    tool_request=ToolRequest(
+                        tool="profile.update",
+                        args={"user_name": "Denis"},
+                        reason="User explicitly gave their name.",
+                    )
+                )
+            )
+            core = _build_core(root, planner, config=config)
+
+            pending = core.handle_text("my name is Denis")
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approved.status, "ok")
+            self.assertEqual(config["setup"]["user_name"], "Denis")
+            profile = (root / "memory" / "long-term" / "profile.md").read_text(encoding="utf-8")
+            self.assertIn("User name: Denis", profile)
+
     def test_short_im_name_phrase_updates_identity_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -318,7 +405,7 @@ class AgentCoreTest(unittest.TestCase):
                     "preferred_language": "auto",
                 },
             }
-            core = _build_core(root, ExplodingPlanner(), config=config)
+            core = _build_core(root, None, config=config)
 
             response = core.handle_text("im Test User")
 
@@ -327,7 +414,7 @@ class AgentCoreTest(unittest.TestCase):
 
     def test_simple_terminal_phrase_routes_to_terminal_policy_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            core = _build_core(Path(tmp), ExplodingPlanner())
+            core = _build_core(Path(tmp), None)
 
             response = core.handle_text("tell me can you type ls in terminal")
 
@@ -342,7 +429,7 @@ class AgentCoreTest(unittest.TestCase):
             (workspace / "marker.txt").write_text("ok\n", encoding="utf-8")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={
                     "llm": {"provider": "ollama", "response_language": "auto"},
                     "terminal": {
@@ -369,7 +456,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -386,7 +473,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={
                     "llm": {"provider": "ollama", "response_language": "auto"},
@@ -464,7 +551,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -483,7 +570,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -510,7 +597,7 @@ class AgentCoreTest(unittest.TestCase):
                     audit = AuditStore(root / "audit.db")
                     core = _build_core(
                         root,
-                        ExplodingPlanner(),
+                        None,
                         audit,
                         config={"llm": {"provider": "ollama", "response_language": "auto"}},
                     )
@@ -528,7 +615,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -550,7 +637,7 @@ class AgentCoreTest(unittest.TestCase):
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
             )
@@ -580,7 +667,7 @@ Useful scenario: “Напомни ми след 8 минути да извад�
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -614,7 +701,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
             )
@@ -632,7 +719,7 @@ and this is the knowlage
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(
                 Path(tmp),
-                ExplodingPlanner(),
+                None,
                 config={
                     "llm": {"provider": "openai", "response_language": "auto"},
                     "setup": {"agent_name": "jarvis", "user_name": "Test User"},
@@ -664,7 +751,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
 
@@ -692,7 +779,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -730,7 +817,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -770,7 +857,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -805,7 +892,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -845,7 +932,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
 
@@ -869,7 +956,7 @@ and this is the knowlage
             )
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -888,7 +975,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -907,7 +994,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -928,7 +1015,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -954,7 +1041,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -976,7 +1063,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -1032,7 +1119,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -1052,7 +1139,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={"llm": {"provider": "ollama", "response_language": "auto"}},
             )
@@ -1072,7 +1159,7 @@ and this is the knowlage
             audit = AuditStore(root / "audit.db")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 audit,
                 config={
                     "llm": {"provider": "ollama", "response_language": "auto"},
@@ -1102,7 +1189,7 @@ and this is the knowlage
             (project / "README.md").write_text("Project readme\n", encoding="utf-8")
             core = _build_core(
                 root,
-                ExplodingPlanner(),
+                None,
                 config={
                     "llm": {"provider": "ollama", "response_language": "auto"},
                     "terminal": {
@@ -1135,7 +1222,7 @@ and this is the knowlage
                     "preferred_language": "auto",
                 },
             }
-            core = _build_core(root, ExplodingPlanner(), config=config)
+            core = _build_core(root, None, config=config)
 
             saved = core.handle_text(
                 "i want you to call me buddy or if i type in Bulgarian you can also call me маняк"

@@ -71,6 +71,32 @@ class AgentCore:
         approval_action = self._handle_approval_action_from_text(stripped)
         if approval_action is not None:
             return approval_action
+        chat_history_answer = self._answer_chat_history_question(stripped, session_id=session_id)
+        if chat_history_answer is not None:
+            return chat_history_answer
+        if stripped.startswith("{"):
+            try:
+                payload = json.loads(stripped)
+                return self.handle_tool_request(
+                    ToolRequest(
+                        tool=str(payload["tool"]),
+                        args=dict(payload.get("args", {})),
+                        reason=str(payload.get("reason", "")),
+                    )
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                return AgentResponse(
+                    status="error",
+                    message=f"Invalid tool request JSON: {exc}",
+                )
+
+        if self.planner is not None:
+            return self._handle_with_planner(
+                stripped,
+                text,
+                conversation_context=conversation_context,
+            )
+
         identity_update = _handle_identity_update(stripped, self.runtime_context)
         if identity_update is not None:
             return identity_update
@@ -123,37 +149,28 @@ class AgentCore:
                 message=fast_answer,
                 data={"planner": "deterministic"},
             )
-        if stripped.startswith("{"):
-            try:
-                payload = json.loads(stripped)
-                return self.handle_tool_request(
-                    ToolRequest(
-                        tool=str(payload["tool"]),
-                        args=dict(payload.get("args", {})),
-                        reason=str(payload.get("reason", "")),
-                    )
-                )
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                return AgentResponse(
-                    status="error",
-                    message=f"Invalid tool request JSON: {exc}",
-                )
 
-        if self.planner is None:
-            if fast_answer is not None:
-                return AgentResponse(
-                    status="ok",
-                    message=fast_answer,
-                    data={"planner": "deterministic"},
-                )
+        if fast_answer is not None:
             return AgentResponse(
                 status="ok",
-                message=(
-                    "Agent core is initialized without a planner. Use /tools or send a "
-                    "structured tool request JSON."
-                ),
+                message=fast_answer,
+                data={"planner": "deterministic"},
             )
+        return AgentResponse(
+            status="ok",
+            message=(
+                "Agent core is initialized without a planner. Use /tools or send a "
+                "structured tool request JSON."
+            ),
+        )
 
+    def _handle_with_planner(
+        self,
+        stripped: str,
+        text: str,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse:
         try:
             llm_config = self.runtime_context.config.get("llm", {})
             memory_context = _load_memory_context(
@@ -183,7 +200,7 @@ class AgentCore:
             )
         except Exception as exc:
             fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
-            if fast_answer is not None:
+            if fast_answer is not None and _is_fast_control_answer(stripped):
                 return AgentResponse(
                     status="ok",
                     message=fast_answer,
@@ -401,13 +418,53 @@ class AgentCore:
             data={"planner": "deterministic", "source": "recent_conversation"},
         )
 
+    def _answer_chat_history_question(self, text: str, *, session_id: str = "default") -> AgentResponse | None:
+        normalized = _normalize_for_match(text)
+        asks_first = any(
+            marker in normalized
+            for marker in {
+                "първото съобщение",
+                "първия въпрос",
+                "първият въпрос",
+                "първо ме попита",
+                "first message",
+                "first question",
+            }
+        )
+        if not asks_first:
+            return None
+        first = self.chat_history.first_user_message(session_id)
+        if first is None:
+            return AgentResponse(
+                status="ok",
+                message=(
+                    "Нямам записано първо потребителско съобщение за тази chat session."
+                    if _looks_bulgarian(text)
+                    else "I do not have a recorded first user message for this chat session."
+                ),
+                data={"planner": "deterministic", "source": "chat_history"},
+            )
+        if _looks_bulgarian(text):
+            message = f"Първото ти съобщение в тази chat session беше: {first.content}"
+        else:
+            message = f"Your first message in this chat session was: {first.content}"
+        return AgentResponse(
+            status="ok",
+            message=message,
+            data={"planner": "deterministic", "source": "chat_history"},
+        )
+
     def _can_send_private_context_to_llm(self) -> bool:
         return not self.permission_context.cloud_model_active or self._cloud_context_approved
 
     def _conversation_context(self, session_id: str) -> str:
-        if self.permission_context.cloud_model_active and not self._cloud_context_approved:
+        if (
+            self.permission_context.cloud_model_active
+            and not self._cloud_context_approved
+            and not _chat_history_allowed_to_cloud(self.runtime_context.config)
+        ):
             return ""
-        return self.chat_history.format_recent(session_id, limit=12, max_chars=6000)
+        return self.chat_history.format_recent(session_id, limit=24, max_chars=12000)
 
     def _record_chat_turn(self, session_id: str, user_message: str, response: AgentResponse) -> None:
         try:
@@ -2632,6 +2689,11 @@ def _llm_system_prompt(llm_config: dict[str, Any], key: str) -> str | None:
     return stripped or None
 
 
+def _chat_history_allowed_to_cloud(config: dict[str, Any]) -> bool:
+    privacy = config.get("privacy", {})
+    return bool(isinstance(privacy, dict) and privacy.get("send_chat_history_to_cloud") is True)
+
+
 def _enabled_tools_from_config(
     manifests: dict[str, Any],
     config: dict[str, Any],
@@ -2792,6 +2854,8 @@ def _approval_message(request: ToolRequest, default: str) -> str:
         return "I can save that to memory after you approve it."
     if request.tool == "memory.organize_long_term":
         return "I can split that long-term memory into modular Markdown files after you approve it."
+    if request.tool == "profile.update":
+        return "I can update your local profile after you approve it."
     if request.tool == "reminders.create":
         return "I can create that local reminder after you approve it."
     return default
@@ -2811,6 +2875,8 @@ def _tool_success_message(request: ToolRequest) -> str:
         return "Saved to memory."
     if request.tool == "memory.organize_long_term":
         return "Long-term memory organized into modular Markdown files."
+    if request.tool == "profile.update":
+        return "Profile updated."
     if request.tool == "browser.scrape_markdown":
         return "Scraped page saved as Markdown."
     if request.tool == "reminders.create":

@@ -1,0 +1,17 @@
+{
+  "name": "profile.update",
+  "description": "Update the local agent/user profile settings after the user explicitly asks to change identity, nickname, language, or assistant name.",
+  "risk": 2,
+  "permissions": [],
+  "args_schema": {
+    "agent_name": "optional new assistant name",
+    "user_name": "optional user's real/display name",
+    "nickname": "optional preferred nickname in English or neutral context",
+    "nickname_bg": "optional preferred Bulgarian nickname",
+    "preferred_language": "optional preferred user/interface language such as auto, bg, en",
+    "response_language": "optional model response language such as auto, bg, en"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true
+}

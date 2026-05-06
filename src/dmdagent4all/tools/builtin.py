@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
+from dmdagent4all.config import save_config
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.sandbox import TerminalPolicy, run_workspace_command
 from dmdagent4all.security import redact_text
@@ -24,6 +25,7 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("memory.read", _memory_read)
     registry.register_handler("memory.write", _memory_write)
     registry.register_handler("memory.organize_long_term", _memory_organize_long_term)
+    registry.register_handler("profile.update", _profile_update)
     registry.register_handler("reminders.create", create_reminder)
     registry.register_handler("reminders.list", list_reminders)
     registry.register_handler("reminders.complete", complete_reminder)
@@ -160,6 +162,64 @@ def _memory_organize_long_term(args: dict[str, Any], context: ToolRuntimeContext
             "on_demand": [path for path in written if path not in set(always)],
         },
     }
+
+
+def _profile_update(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    setup = context.config.setdefault("setup", {})
+    llm = context.config.setdefault("llm", {})
+    changed: dict[str, str] = {}
+    for key in {"agent_name", "user_name", "nickname", "nickname_bg", "preferred_language"}:
+        value = _clean_profile_value(args.get(key))
+        if value is not None:
+            setup[key] = value
+            changed[key] = value
+    response_language = _clean_profile_value(args.get("response_language"))
+    if response_language is not None:
+        llm["response_language"] = response_language
+        changed["response_language"] = response_language
+    if not changed:
+        raise ValueError("profile.update requires at least one profile field.")
+    setup.setdefault("agent_name", "DMD Agent")
+    setup.setdefault("user_name", "")
+    setup.setdefault("preferred_language", "auto")
+    setup["completed"] = True
+    if context.config_path is not None:
+        save_config(context.config, context.config_path)
+    _write_profile_memory(context)
+    return {"changed": changed}
+
+
+def _clean_profile_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip().strip(" .,!?:;\"'")
+    if not cleaned:
+        return None
+    if "\n" in cleaned or len(cleaned) > 120:
+        raise ValueError("Profile values must be single-line strings up to 120 characters.")
+    return cleaned
+
+
+def _write_profile_memory(context: ToolRuntimeContext) -> None:
+    setup = context.config.get("setup", {})
+    MemoryManager(context.memory_root).write(
+        "long-term/profile.md",
+        "\n".join(
+            [
+                f"User name: {setup.get('user_name') or 'not set'}",
+                f"Preferred nickname: {setup.get('nickname') or 'not set'}",
+                f"Bulgarian nickname: {setup.get('nickname_bg') or setup.get('nickname') or 'not set'}",
+                f"Assistant name: {setup.get('agent_name') or 'DMD Agent'}",
+                f"Preferred response language: {setup.get('preferred_language') or 'auto'}",
+            ]
+        ),
+        metadata={
+            "type": "profile",
+            "memory_scope": "long-term",
+            "source": "profile.update",
+            "confidence": "high",
+        },
+    )
 
 
 def _memory_scope(args: dict[str, Any], metadata: dict[str, Any]) -> str:

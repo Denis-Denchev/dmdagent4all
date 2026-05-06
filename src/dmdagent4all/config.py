@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "never_send_calendar_details_to_cloud": True,
         "redact_secrets": True,
         "require_approval_for_cloud_context": True,
+        "send_chat_history_to_cloud": True,
     },
     "terminal": {
         "enabled": False,

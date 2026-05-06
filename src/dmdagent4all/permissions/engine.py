@@ -49,17 +49,6 @@ class PermissionEngine:
                 missing_permissions=missing,
             )
 
-        if (
-            context.cloud_model_active
-            and not manifest.cloud_allowed
-            and not context.cloud_context_approved
-            and not approval_granted
-        ):
-            return PermissionDecision.require_approval(
-                "This tool may expose private context to a cloud model.",
-                risk=manifest.risk,
-            )
-
         if manifest.approval_required and not approval_granted:
             return PermissionDecision.require_approval(
                 "Tool manifest requires approval.",
