@@ -1264,7 +1264,7 @@ and this is the knowlage
             self.assertEqual(response.status, "ok")
             self.assertEqual(response.message, "You like green tea.")
 
-    def test_approved_cloud_memory_read_is_synthesized_into_human_answer(self) -> None:
+    def test_cloud_low_risk_memory_list_is_synthesized_without_extra_cloud_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
@@ -1290,14 +1290,13 @@ and this is the knowlage
                 permission_context=PermissionContext(cloud_model_active=True),
             )
 
-            pending = core.handle_text("What do I like?")
-            approved = core.approve_and_execute(pending.data["approval_id"])
+            response = core.handle_text("What do I like?")
 
-            self.assertEqual(pending.status, "approval_required")
-            self.assertEqual(approved.status, "ok")
-            self.assertEqual(approved.message, "You like green tea.")
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.message, "You like green tea.")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
 
-    def test_cloud_memory_approval_applies_for_current_session(self) -> None:
+    def test_cloud_low_risk_memory_list_does_not_create_repeated_approvals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
@@ -1323,13 +1322,13 @@ and this is the knowlage
                 permission_context=PermissionContext(cloud_model_active=True),
             )
 
-            pending = core.handle_text("What do I like?")
-            core.approve_and_execute(pending.data["approval_id"])
+            first = core.handle_text("What do I like?")
             second = core.handle_text("What do I like?")
 
+            self.assertEqual(first.status, "ok")
             self.assertEqual(second.status, "ok")
             self.assertEqual(second.message, "You like green tea.")
-            self.assertEqual(len(audit.list_approvals(status="pending")), 0)
+            self.assertEqual(audit.list_approvals(status="pending"), [])
 
 
 def _build_core(

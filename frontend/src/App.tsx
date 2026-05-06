@@ -999,7 +999,7 @@ export function App() {
                 </label>
                 <label className="setting-check">
                   <input type="checkbox" checked={configDraft.sendChatHistoryToCloud} onChange={(event) => setConfigDraft({ ...configDraft, sendChatHistoryToCloud: event.target.checked })} />
-                  <span><strong>Send recent chat context to cloud models</strong><small>Allows OpenAI, DeepSeek, and compatible cloud providers to receive the recent chat window for follow-up questions.</small></span>
+                  <span><strong>Send chat and relevant memory context to cloud models</strong><small>Allows OpenAI, DeepSeek, and compatible cloud providers to receive the recent chat window and relevant local memory snippets for follow-up questions.</small></span>
                 </label>
                 <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Configuration</button>
               </div>

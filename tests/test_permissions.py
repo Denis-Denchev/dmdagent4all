@@ -45,11 +45,11 @@ class PermissionEngineTest(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertFalse(decision.approval_required)
 
-    def test_cloud_context_requires_approval_for_private_tool(self) -> None:
+    def test_cloud_context_does_not_add_approval_for_low_risk_tool(self) -> None:
         context = PermissionContext(cloud_model_active=True)
         decision = self.engine.evaluate(ToolRequest(tool="memory.read"), context)
-        self.assertFalse(decision.allowed)
-        self.assertTrue(decision.approval_required)
+        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.approval_required)
 
 
 if __name__ == "__main__":

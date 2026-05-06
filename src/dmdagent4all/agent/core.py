@@ -2778,6 +2778,7 @@ def _load_memory_context(
     if (
         runtime_context.config.get("llm", {}).get("provider") not in {"ollama", "local"}
         and not allow_cloud_context
+        and not _chat_history_allowed_to_cloud(runtime_context.config)
     ):
         return ""
     if query.strip():
