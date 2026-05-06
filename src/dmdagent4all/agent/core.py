@@ -2312,13 +2312,13 @@ def _answer_llm_unavailable(text: str, config: dict[str, Any], exc: Exception) -
             message = (
                 f"{provider} моделът е избран, но API key не е зареден в текущия процес"
                 f"{f' ({env_name})' if env_name else ''}. "
-                "Локалната memory/tools част още работи; добави ключа от OpenAI таба или превключи към локален модел."
+                "Локалната memory/tools част още работи; добави ключа от provider таба или превключи към локален модел."
             )
         else:
             message = (
                 f"The {provider} model is selected, but its API key is not loaded in this running process"
                 f"{f' ({env_name})' if env_name else ''}. "
-                "Local memory/tools still work; add the key in the OpenAI tab or switch to a local model."
+                "Local memory/tools still work; add the key in the provider tab or switch to a local model."
             )
         return AgentResponse(
             status="ok",

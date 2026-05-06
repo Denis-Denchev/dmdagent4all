@@ -323,7 +323,8 @@ dmdagent models list
 dmdagent models set-mode light
 dmdagent models set qwen3:8b
 dmdagent models provider ollama
-dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --base-url https://api.openai.com/v1
+dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --base-url https://api.openai.com/v1 --model gpt-4o-mini
+dmdagent models provider deepseek --api-key-env DMDAGENT_DEEPSEEK_API_KEY --base-url https://api.deepseek.com --model deepseek-v4-flash
 dmdagent models provider lmstudio --base-url http://localhost:1234/v1
 dmdagent tools list
 dmdagent tools enable memory.write
@@ -448,15 +449,22 @@ in config; never store the key value:
 
 ```bash
 export DMDAGENT_OPENAI_API_KEY="sk-..."
-start models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY
-start models set <model-name>
+start models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --model gpt-4o-mini
 start doctor
 ```
 
-The dashboard also has an OpenAI view. Paste the API key there to load it into
-the current API process, fetch the model dropdown from OpenAI, choose the model,
-and set a local project spending limit. Local spend is estimated from token
-usage returned to this project; OpenAI billing remains the source of truth.
+DeepSeek is also supported through its OpenAI-compatible API:
+
+```bash
+export DMDAGENT_DEEPSEEK_API_KEY="sk-..."
+start models provider deepseek --api-key-env DMDAGENT_DEEPSEEK_API_KEY --model deepseek-v4-flash
+```
+
+The dashboard has OpenAI and DeepSeek views. Paste the API key there to load it
+into the current API process, fetch the model dropdown, and choose the model.
+The OpenAI view also has a local project spending limit. Local spend is
+estimated from token usage returned to this project; provider billing remains
+the source of truth.
 
 For a local OpenAI-compatible server:
 

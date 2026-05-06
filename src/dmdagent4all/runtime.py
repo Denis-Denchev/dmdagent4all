@@ -69,7 +69,7 @@ def _provider_from_config(config: dict[str, Any]):
             model=str(planner_model),
             base_url=str(llm.get("base_url", "http://localhost:11434")),
         )
-    if provider in {"openai", "openai-compatible", "openrouter", "lmstudio", "vllm"}:
+    if provider in {"openai", "deepseek", "openai-compatible", "openrouter", "lmstudio", "vllm"}:
         return OpenAICompatibleProvider(
             model=str(planner_model),
             base_url=_openai_compatible_base_url(provider, llm),
@@ -85,6 +85,8 @@ def _openai_compatible_base_url(provider: str, llm: dict[str, Any]) -> str:
         return str(configured)
     if provider == "openai":
         return "https://api.openai.com/v1"
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
     if provider == "openrouter":
         return "https://openrouter.ai/api/v1"
     if provider == "lmstudio":
@@ -100,6 +102,8 @@ def _openai_compatible_api_key_env(provider: str, llm: dict[str, Any]) -> str | 
         return str(configured)
     if provider == "openai":
         return "DMDAGENT_OPENAI_API_KEY"
+    if provider == "deepseek":
+        return "DMDAGENT_DEEPSEEK_API_KEY"
     if provider == "openrouter":
         return "DMDAGENT_OPENROUTER_API_KEY"
     if provider in {"lmstudio", "vllm"}:

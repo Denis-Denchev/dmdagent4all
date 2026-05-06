@@ -5,6 +5,7 @@ import {
   type AuditEvent,
   api,
   type ConnectorStatus,
+  type DeepSeekStatus,
   type DoctorResponse,
   type MemoryFile,
   type ModelMode,
@@ -26,6 +27,7 @@ type View =
   | 'terminal'
   | 'telegram'
   | 'openai'
+  | 'deepseek'
   | 'memory'
   | 'audit'
   | 'models'
@@ -46,6 +48,7 @@ const views: Array<{ key: View; label: string }> = [
   { key: 'terminal', label: 'Terminal' },
   { key: 'telegram', label: 'Telegram' },
   { key: 'openai', label: 'OpenAI' },
+  { key: 'deepseek', label: 'DeepSeek' },
   { key: 'memory', label: 'Memory' },
   { key: 'audit', label: 'Audit' },
   { key: 'models', label: 'Models' },
@@ -64,6 +67,7 @@ export function App() {
   const [terminal, setTerminal] = useState<TerminalStatus | null>(null)
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
   const [openai, setOpenAI] = useState<OpenAIStatus | null>(null)
+  const [deepseek, setDeepSeek] = useState<DeepSeekStatus | null>(null)
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
   const [doctor, setDoctor] = useState<DoctorResponse | null>(null)
@@ -86,6 +90,9 @@ export function App() {
   const [openaiModels, setOpenAIModels] = useState<string[]>([])
   const [openaiSelectedModel, setOpenAISelectedModel] = useState('')
   const [openaiLimitDraft, setOpenAILimitDraft] = useState('')
+  const [deepseekKey, setDeepSeekKey] = useState('')
+  const [deepseekModels, setDeepSeekModels] = useState<string[]>([])
+  const [deepseekSelectedModel, setDeepSeekSelectedModel] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'agent',
@@ -115,6 +122,7 @@ export function App() {
       terminalResult,
       telegramResult,
       openaiResult,
+      deepseekResult,
       approvalsResult,
       auditResult,
       doctorResult,
@@ -129,6 +137,7 @@ export function App() {
         api.terminal(),
         api.telegram(),
         api.openai(),
+        api.deepseek(),
         api.approvals(),
         api.audit(),
         api.doctor(),
@@ -142,6 +151,7 @@ export function App() {
     setTerminal(terminalResult)
     setTelegram(telegramResult)
     setOpenAI(openaiResult)
+    setDeepSeek(deepseekResult)
     setTerminalWorkspaceRoot(terminalResult.workspace_root)
     setTerminalTimeout(String(terminalResult.timeout_seconds))
     setTerminalMaxOutput(String(terminalResult.max_output_chars))
@@ -149,6 +159,11 @@ export function App() {
     setTelegramTokenEnv(telegramResult.bot_token_env)
     setOpenAISelectedModel(openaiResult.provider === 'openai' ? openaiResult.model : '')
     setOpenAILimitDraft(openaiResult.usage.limit_usd === null ? '' : String(openaiResult.usage.limit_usd))
+    setDeepSeekSelectedModel(
+      deepseekResult.provider === 'deepseek'
+        ? deepseekResult.model
+        : deepseekResult.default_models[0] ?? 'deepseek-v4-flash',
+    )
     setApprovals(approvalsResult)
     setAudit(auditResult)
     setDoctor(doctorResult)
@@ -346,12 +361,51 @@ export function App() {
     await runAction(() => api.resetOpenAIUsage(), 'OpenAI local usage counters reset.')
   }
 
+  async function loadDeepSeekKey() {
+    const key = deepseekKey.trim()
+    if (!key) return
+    await runAction(() => api.loadDeepSeekKey(key), 'DeepSeek API key loaded for this process.')
+    setDeepSeekKey('')
+  }
+
+  async function refreshDeepSeekModels() {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const response = await api.deepSeekModels()
+      setDeepSeekModels(response.models)
+      setDeepSeek(response.data)
+      if (!deepseekSelectedModel && response.models.length > 0) {
+        setDeepSeekSelectedModel(response.models[0])
+      }
+      setNotice(`Loaded ${response.models.length} DeepSeek models.`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Request failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveDeepSeekModel() {
+    const model = deepseekSelectedModel.trim()
+    if (!model) return
+    await runAction(() => api.setDeepSeekModel(model), `DeepSeek model set to ${model}.`)
+  }
+
   const openaiModelOptions = useMemo(() => {
     const options = new Set(openaiModels)
     if (openai?.provider === 'openai' && openai.model) options.add(openai.model)
     if (openaiSelectedModel) options.add(openaiSelectedModel)
     return Array.from(options).sort((left, right) => left.localeCompare(right))
   }, [openai?.model, openaiModels, openaiSelectedModel])
+
+  const deepseekModelOptions = useMemo(() => {
+    const options = new Set(deepseek?.default_models ?? ['deepseek-v4-flash', 'deepseek-v4-pro'])
+    deepseekModels.forEach((model) => options.add(model))
+    if (deepseek?.provider === 'deepseek' && deepseek.model) options.add(deepseek.model)
+    if (deepseekSelectedModel) options.add(deepseekSelectedModel)
+    return Array.from(options).sort((left, right) => left.localeCompare(right))
+  }, [deepseek?.default_models, deepseek?.model, deepseek?.provider, deepseekModels, deepseekSelectedModel])
 
   return (
     <div className="app-shell">
@@ -996,6 +1050,91 @@ export function App() {
                 />
                 <button className="button button-secondary" type="submit" disabled={busy}>
                   Save Limit
+                </button>
+              </form>
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'deepseek' ? (
+          <section className="openai-layout">
+            <div className="panel settings-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>DeepSeek Runtime</strong>
+                  <span>{deepseek?.api_key_available ? 'API key is loaded for this process' : 'Paste an API key after each restart'}</span>
+                </div>
+              </div>
+              <div className="status-grid">
+                <span>Provider</span>
+                <strong>{deepseek?.provider || '-'}</strong>
+                <span>Model</span>
+                <strong>{deepseek?.model || '-'}</strong>
+                <span>Base URL</span>
+                <strong>{deepseek?.base_url || '-'}</strong>
+                <span>Key env</span>
+                <strong>{deepseek?.api_key_env || '-'}</strong>
+                <span>Key loaded</span>
+                <strong>{deepseek?.api_key_available ? 'yes' : 'no'}</strong>
+              </div>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>API Key</strong>
+                  <span>The key is kept in memory for the running API process.</span>
+                </div>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void loadDeepSeekKey()
+                }}
+              >
+                <input
+                  type="password"
+                  value={deepseekKey}
+                  onChange={(event) => setDeepSeekKey(event.target.value)}
+                  placeholder="DeepSeek API key"
+                />
+                <button className="button" type="submit" disabled={busy}>Load Key</button>
+              </form>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="settings-header">
+                <div>
+                  <strong>Model</strong>
+                  <span>Uses DeepSeek's OpenAI-compatible Chat Completions API.</span>
+                </div>
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => void refreshDeepSeekModels()}
+                  disabled={busy || !deepseek?.api_key_available}
+                >
+                  Load Models
+                </button>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void saveDeepSeekModel()
+                }}
+              >
+                <select
+                  value={deepseekSelectedModel}
+                  onChange={(event) => setDeepSeekSelectedModel(event.target.value)}
+                >
+                  {deepseekModelOptions.map((model) => (
+                    <option value={model} key={model}>{model}</option>
+                  ))}
+                </select>
+                <button className="button" type="submit" disabled={busy || !deepseekSelectedModel}>
+                  Use Model
                 </button>
               </form>
             </div>

@@ -57,6 +57,8 @@ export type Status = {
     provider: string
     model: string
     planner_model?: string | null
+    base_url?: string
+    api_key_env?: string | null
     mode: string
     response_language: string
   }
@@ -125,6 +127,22 @@ export type OpenAIModelsResponse = {
   status: string
   models: string[]
   data: OpenAIStatus
+}
+
+export type DeepSeekStatus = {
+  provider: string
+  model: string
+  planner_model?: string | null
+  base_url: string
+  api_key_env: string
+  api_key_available: boolean
+  default_models: string[]
+}
+
+export type DeepSeekModelsResponse = {
+  status: string
+  models: string[]
+  data: DeepSeekStatus
 }
 
 export type ConnectorStatus = {
@@ -319,4 +337,16 @@ export const api = {
       body: JSON.stringify({ limit_usd }),
     }),
   resetOpenAIUsage: () => request<AgentResponse>('/v1/openai/usage/reset', { method: 'POST' }),
+  deepseek: () => request<DeepSeekStatus>('/v1/deepseek'),
+  loadDeepSeekKey: (api_key: string) =>
+    request<AgentResponse>('/v1/deepseek/key', {
+      method: 'POST',
+      body: JSON.stringify({ api_key }),
+    }),
+  deepSeekModels: () => request<DeepSeekModelsResponse>('/v1/deepseek/models'),
+  setDeepSeekModel: (model: string) =>
+    request<AgentResponse>('/v1/deepseek/model', {
+      method: 'POST',
+      body: JSON.stringify({ model }),
+    }),
 }

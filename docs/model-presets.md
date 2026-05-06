@@ -74,8 +74,14 @@ variable name, not the API key value:
 
 ```bash
 export DMDAGENT_OPENAI_API_KEY="sk-..."
-dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY
-dmdagent models set <model-name>
+dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --model gpt-4o-mini
+```
+
+DeepSeek uses its OpenAI-compatible API endpoint:
+
+```bash
+export DMDAGENT_DEEPSEEK_API_KEY="sk-..."
+dmdagent models provider deepseek --api-key-env DMDAGENT_DEEPSEEK_API_KEY --model deepseek-v4-flash
 ```
 
 For local compatible servers:

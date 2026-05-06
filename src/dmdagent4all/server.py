@@ -54,6 +54,12 @@ from dmdagent4all.tools.reminders import (
 )
 
 
+DEFAULT_DEEPSEEK_API_KEY_ENV = "DMDAGENT_DEEPSEEK_API_KEY"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_MODEL_FALLBACKS = ["deepseek-v4-flash", "deepseek-v4-pro"]
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
@@ -419,6 +425,50 @@ def create_app() -> FastAPI:
             "status": "ok",
             "message": "OpenAI local usage counters reset.",
             "data": _openai_status(load_config(paths.config), paths),
+        }
+
+    @app.get("/v1/deepseek")
+    def deepseek_status() -> dict[str, Any]:
+        return _deepseek_status(load_config(paths.config))
+
+    @app.post("/v1/deepseek/key")
+    def deepseek_key(request: OpenAIKeyRequest) -> dict[str, Any]:
+        api_key = request.api_key.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="DeepSeek API key is required.")
+        os.environ[DEFAULT_DEEPSEEK_API_KEY_ENV] = api_key
+        config = update_config(
+            lambda current: _set_deepseek_config(
+                current,
+                model=_default_deepseek_model(current),
+            ),
+            paths.config,
+        )
+        return {
+            "status": "ok",
+            "message": "DeepSeek API key loaded into this API process environment.",
+            "data": _deepseek_status(config),
+        }
+
+    @app.post("/v1/deepseek/model")
+    def deepseek_model(request: ModelRequest) -> dict[str, Any]:
+        model = request.model.strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="DeepSeek model is required.")
+        config = update_config(lambda current: _set_deepseek_config(current, model=model), paths.config)
+        return {
+            "status": "ok",
+            "message": f"DeepSeek model set to {model}.",
+            "data": _deepseek_status(config),
+        }
+
+    @app.get("/v1/deepseek/models")
+    def deepseek_models() -> dict[str, Any]:
+        config = load_config(paths.config)
+        return {
+            "status": "ok",
+            "models": _fetch_deepseek_models(config),
+            "data": _deepseek_status(config),
         }
 
     @app.get("/v1/connectors")
@@ -863,6 +913,16 @@ def _set_openai_limit(config: dict[str, Any], limit_usd: float | None) -> None:
     usage["limit_usd"] = None if limit_usd is None else max(0.0, float(limit_usd))
 
 
+def _set_deepseek_config(config: dict[str, Any], *, model: str) -> None:
+    llm = config.setdefault("llm", {})
+    llm["provider"] = "deepseek"
+    llm["mode"] = "deepseek"
+    llm["model"] = model
+    llm["planner_model"] = model
+    llm["base_url"] = DEEPSEEK_BASE_URL
+    llm["api_key_env"] = DEFAULT_DEEPSEEK_API_KEY_ENV
+
+
 def _openai_status(config: dict[str, Any], paths: AppPaths) -> dict[str, Any]:
     llm = config.get("llm", {})
     api_key_env = _openai_api_key_env(config)
@@ -874,6 +934,20 @@ def _openai_status(config: dict[str, Any], paths: AppPaths) -> dict[str, Any]:
         "api_key_env": api_key_env,
         "api_key_available": bool(os.environ.get(api_key_env, "").strip()),
         "usage": openai_usage_summary(paths.audit_db, config=config),
+    }
+
+
+def _deepseek_status(config: dict[str, Any]) -> dict[str, Any]:
+    llm = config.get("llm", {})
+    api_key_env = _deepseek_api_key_env(config)
+    return {
+        "provider": str(llm.get("provider", "")),
+        "model": str(llm.get("model", "")),
+        "planner_model": llm.get("planner_model"),
+        "base_url": _deepseek_base_url(config),
+        "api_key_env": api_key_env,
+        "api_key_available": bool(os.environ.get(api_key_env, "").strip()),
+        "default_models": list(DEEPSEEK_MODEL_FALLBACKS),
     }
 
 
@@ -921,9 +995,71 @@ def _fetch_openai_models(config: dict[str, Any]) -> list[str]:
     return sorted(models, key=_openai_model_sort_key)
 
 
+def _fetch_deepseek_models(config: dict[str, Any]) -> list[str]:
+    api_key_env = _deepseek_api_key_env(config)
+    api_key = os.environ.get(api_key_env, "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"DeepSeek API key is not loaded in this process: {api_key_env}.",
+        )
+    request = urllib.request.Request(
+        f"{_deepseek_base_url(config).rstrip('/')}/models",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise HTTPException(
+            status_code=502,
+            detail=f"DeepSeek models request failed with HTTP {exc.code}: {detail}",
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to DeepSeek models API: {exc.reason}",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="DeepSeek models response was not JSON.") from exc
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise HTTPException(status_code=502, detail="DeepSeek models response did not include a data list.")
+    models = {
+        str(item.get("id")).strip()
+        for item in data
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    return sorted(models, key=_deepseek_model_sort_key)
+
+
 def _openai_api_key_env(config: dict[str, Any]) -> str:
     value = config.get("llm", {}).get("api_key_env")
     return str(value or DEFAULT_OPENAI_API_KEY_ENV)
+
+
+def _deepseek_api_key_env(config: dict[str, Any]) -> str:
+    llm = config.get("llm", {})
+    if str(llm.get("provider", "")).lower() == "deepseek":
+        value = llm.get("api_key_env")
+        if value:
+            return str(value)
+    return DEFAULT_DEEPSEEK_API_KEY_ENV
+
+
+def _deepseek_base_url(config: dict[str, Any]) -> str:
+    llm = config.get("llm", {})
+    if str(llm.get("provider", "")).lower() == "deepseek":
+        value = llm.get("base_url")
+        if value:
+            return str(value)
+    return DEEPSEEK_BASE_URL
 
 
 def _default_openai_model(config: dict[str, Any]) -> str:
@@ -935,6 +1071,15 @@ def _default_openai_model(config: dict[str, Any]) -> str:
     return "gpt-4o-mini"
 
 
+def _default_deepseek_model(config: dict[str, Any]) -> str:
+    llm = config.get("llm", {})
+    provider = str(llm.get("provider", "")).lower()
+    model = str(llm.get("model") or "").strip()
+    if provider == "deepseek" and _looks_like_deepseek_model(model):
+        return model
+    return DEFAULT_DEEPSEEK_MODEL
+
+
 def _openai_model_sort_key(model: str) -> tuple[int, str]:
     normalized = model.lower()
     if _looks_like_openai_chat_model(normalized):
@@ -942,9 +1087,21 @@ def _openai_model_sort_key(model: str) -> tuple[int, str]:
     return (1, normalized)
 
 
+def _deepseek_model_sort_key(model: str) -> tuple[int, str]:
+    normalized = model.lower()
+    try:
+        return (0, DEEPSEEK_MODEL_FALLBACKS.index(normalized))
+    except ValueError:
+        return (1, normalized)
+
+
 def _looks_like_openai_chat_model(model: str) -> bool:
     normalized = model.lower()
     return normalized.startswith(("gpt-", "chatgpt-")) or re.match(r"o\d", normalized) is not None
+
+
+def _looks_like_deepseek_model(model: str) -> bool:
+    return model.lower().startswith("deepseek-")
 
 
 def _set_permission_config(

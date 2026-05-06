@@ -11,9 +11,14 @@ from dmdagent4all.config import DEFAULT_CONFIG
 from dmdagent4all.llm.openai_usage import DEFAULT_OPENAI_API_KEY_ENV
 from dmdagent4all.audit import AuditStore
 from dmdagent4all.server import (
+    DEFAULT_DEEPSEEK_API_KEY_ENV,
+    DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
     ReminderRuntime,
     _connector_statuses,
+    _deepseek_status,
     _openai_status,
+    _set_deepseek_config,
     _set_model_config,
     _set_openai_config,
     _set_openai_limit,
@@ -85,6 +90,28 @@ class DashboardControlsTest(unittest.TestCase):
                 status = _openai_status(config, paths)
             finally:
                 os.environ.pop(DEFAULT_OPENAI_API_KEY_ENV, None)
+
+        self.assertTrue(status["api_key_available"])
+
+    def test_deepseek_controls_use_process_key_and_official_defaults(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+        os.environ.pop(DEFAULT_DEEPSEEK_API_KEY_ENV, None)
+
+        _set_deepseek_config(config, model=DEFAULT_DEEPSEEK_MODEL)
+        status = _deepseek_status(config)
+
+        self.assertEqual(status["provider"], "deepseek")
+        self.assertEqual(status["model"], DEFAULT_DEEPSEEK_MODEL)
+        self.assertEqual(status["base_url"], DEEPSEEK_BASE_URL)
+        self.assertEqual(status["api_key_env"], DEFAULT_DEEPSEEK_API_KEY_ENV)
+        self.assertFalse(status["api_key_available"])
+        self.assertIn("deepseek-v4-pro", status["default_models"])
+
+        os.environ[DEFAULT_DEEPSEEK_API_KEY_ENV] = "sk-deepseek-test"
+        try:
+            status = _deepseek_status(config)
+        finally:
+            os.environ.pop(DEFAULT_DEEPSEEK_API_KEY_ENV, None)
 
         self.assertTrue(status["api_key_available"])
 

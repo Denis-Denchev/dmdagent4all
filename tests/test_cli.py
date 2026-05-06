@@ -95,6 +95,32 @@ class CliTest(unittest.TestCase):
         self.assertEqual(local_config["llm"]["base_url"], "http://localhost:11434")
         self.assertIsNone(local_config["llm"]["api_key_env"])
 
+    def test_provider_command_configures_deepseek_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_home = os.environ.get("XDG_DATA_HOME")
+            os.environ["XDG_DATA_HOME"] = tmp
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    deepseek_result = main(["models", "provider", "deepseek", "--model", "deepseek-v4-pro"])
+                deepseek_config = load_config()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    local_result = main(["models", "provider", "ollama"])
+                local_config = load_config()
+            finally:
+                if old_home is None:
+                    os.environ.pop("XDG_DATA_HOME", None)
+                else:
+                    os.environ["XDG_DATA_HOME"] = old_home
+
+        self.assertEqual(deepseek_result, 0)
+        self.assertEqual(deepseek_config["llm"]["provider"], "deepseek")
+        self.assertEqual(deepseek_config["llm"]["model"], "deepseek-v4-pro")
+        self.assertEqual(deepseek_config["llm"]["base_url"], "https://api.deepseek.com")
+        self.assertEqual(deepseek_config["llm"]["api_key_env"], "DMDAGENT_DEEPSEEK_API_KEY")
+        self.assertEqual(local_result, 0)
+        self.assertEqual(local_config["llm"]["provider"], "ollama")
+        self.assertEqual(local_config["llm"]["model"], "qwen3:8b")
+
     def test_ask_alias_prints_friendly_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_home = os.environ.get("XDG_DATA_HOME")

@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     model_parser.add_argument("args", nargs="*", help="Examples: fast, light --pull, use qwen3:8b")
     model_parser.add_argument("--pull", action="store_true", help="Pull Ollama model after selecting it.")
 
-    models_parser = subcommands.add_parser("models", help="Manage local model settings.")
+    models_parser = subcommands.add_parser("models", help="Manage model settings.")
     models_subcommands = models_parser.add_subparsers(dest="models_command", required=True)
     models_subcommands.add_parser("list", help="List recommended model modes.")
     models_set_mode = models_subcommands.add_parser("set-mode", help="Set a recommended model mode.")
@@ -122,10 +122,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     models_provider.add_argument(
         "provider",
-        choices=["ollama", "local", "openai", "openai-compatible", "openrouter", "lmstudio", "vllm"],
+        choices=["ollama", "local", "openai", "deepseek", "openai-compatible", "openrouter", "lmstudio", "vllm"],
     )
     models_provider.add_argument("--base-url")
     models_provider.add_argument("--api-key-env")
+    models_provider.add_argument("--model", help="Model name to use with the selected provider.")
 
     serve_parser = subcommands.add_parser("serve", help="Start the local API server.")
     serve_parser.add_argument("--host", default="127.0.0.1")
@@ -619,7 +620,7 @@ def _run_terminal_onboarding(paths: AppPaths) -> dict[str, Any]:
         [
             ("local-fast", "Local Ollama, recommended qwen3:8b"),
             ("local-light", "Local Ollama, smaller qwen3:4b"),
-            ("api-openai", "OpenAI-compatible API key"),
+            ("api-openai", "OpenAI/DeepSeek-compatible API key"),
             ("skip", "Skip model setup for now"),
         ],
         default="local-fast",
@@ -645,12 +646,14 @@ def _run_terminal_onboarding(paths: AppPaths) -> dict[str, Any]:
             "API provider",
             [
                 ("openai", "OpenAI"),
+                ("deepseek", "DeepSeek"),
                 ("openrouter", "OpenRouter"),
                 ("openai-compatible", "Other OpenAI-compatible endpoint"),
             ],
             default="openai",
         )
-        model = _ask_text("Model name", "gpt-4o-mini")
+        default_model = "deepseek-v4-flash" if provider == "deepseek" else "gpt-4o-mini"
+        model = _ask_text("Model name", default_model)
         base_url = _default_provider_base_url(provider)
         if provider == "openai-compatible":
             base_url = _ask_text("Base URL", "http://localhost:1234/v1")
@@ -797,6 +800,7 @@ def command_models(args: argparse.Namespace) -> int:
             provider=provider,
             base_url=args.base_url,
             api_key_env=args.api_key_env,
+            model=args.model,
         )
         save_config(config, config_path)
         print(f"Provider set to {provider}.")
@@ -861,29 +865,44 @@ def _set_provider_config(
     provider: str,
     base_url: str | None = None,
     api_key_env: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     llm = config.setdefault("llm", {})
     previous_model = str(llm.get("model") or "").strip()
+    requested_model = str(model or "").strip()
     llm["provider"] = provider
     llm["base_url"] = base_url or _default_provider_base_url(provider)
     llm["api_key_env"] = api_key_env or _default_provider_api_key_env(provider)
 
     if provider in {"ollama", "local"}:
-        model = previous_model if previous_model and not _looks_like_cloud_model(previous_model) else "qwen3:8b"
-        llm["mode"] = "fast" if model == "qwen3:8b" else "custom"
-        llm["model"] = model
-        llm["planner_model"] = model
+        selected_model = (
+            requested_model
+            or (previous_model if previous_model and not _looks_like_cloud_model(previous_model) else "qwen3:8b")
+        )
+        llm["mode"] = "fast" if selected_model == "qwen3:8b" else "custom"
+        llm["model"] = selected_model
+        llm["planner_model"] = selected_model
         llm["api_key_env"] = None
     elif provider == "openai":
-        model = previous_model if _looks_like_openai_chat_model(previous_model) else "gpt-4o-mini"
+        selected_model = requested_model or (
+            previous_model if _looks_like_openai_chat_model(previous_model) else "gpt-4o-mini"
+        )
         llm["mode"] = "openai"
-        llm["model"] = model
-        llm["planner_model"] = model
+        llm["model"] = selected_model
+        llm["planner_model"] = selected_model
+    elif provider == "deepseek":
+        selected_model = requested_model or (
+            previous_model if _looks_like_deepseek_model(previous_model) else "deepseek-v4-flash"
+        )
+        llm["mode"] = "deepseek"
+        llm["model"] = selected_model
+        llm["planner_model"] = selected_model
     else:
         llm["mode"] = provider
-        if not previous_model:
-            llm["model"] = provider
-            llm["planner_model"] = provider
+        if requested_model or not previous_model:
+            selected_model = requested_model or provider
+            llm["model"] = selected_model
+            llm["planner_model"] = selected_model
     return llm
 
 
@@ -2223,6 +2242,8 @@ def _default_provider_base_url(provider: str) -> str:
         return "http://localhost:11434"
     if provider == "openrouter":
         return "https://openrouter.ai/api/v1"
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
     if provider == "lmstudio":
         return "http://localhost:1234/v1"
     if provider == "vllm":
@@ -2235,6 +2256,8 @@ def _default_provider_api_key_env(provider: str) -> str | None:
         return "DMDAGENT_OPENAI_API_KEY"
     if provider == "openrouter":
         return "DMDAGENT_OPENROUTER_API_KEY"
+    if provider == "deepseek":
+        return "DMDAGENT_DEEPSEEK_API_KEY"
     if provider in {"ollama", "local", "lmstudio", "vllm"}:
         return None
     return "DMDAGENT_OPENAI_COMPATIBLE_API_KEY"
@@ -2245,9 +2268,13 @@ def _looks_like_openai_chat_model(model: str) -> bool:
     return normalized.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4"))
 
 
+def _looks_like_deepseek_model(model: str) -> bool:
+    return model.lower().startswith("deepseek-")
+
+
 def _looks_like_cloud_model(model: str) -> bool:
     normalized = model.lower()
-    return _looks_like_openai_chat_model(normalized) or "/" in normalized
+    return _looks_like_openai_chat_model(normalized) or _looks_like_deepseek_model(normalized) or "/" in normalized
 
 
 def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:

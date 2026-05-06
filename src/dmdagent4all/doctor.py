@@ -375,6 +375,8 @@ def _default_base_url(provider: str) -> str:
         return "http://localhost:11434"
     if provider == "openrouter":
         return "https://openrouter.ai/api/v1"
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
     if provider == "lmstudio":
         return "http://localhost:1234/v1"
     if provider == "vllm":
@@ -387,6 +389,8 @@ def _default_api_key_env(provider: str) -> str | None:
         return "DMDAGENT_OPENAI_API_KEY"
     if provider == "openrouter":
         return "DMDAGENT_OPENROUTER_API_KEY"
+    if provider == "deepseek":
+        return "DMDAGENT_DEEPSEEK_API_KEY"
     if provider in {"lmstudio", "vllm"}:
         return None
     return "DMDAGENT_OPENAI_COMPATIBLE_API_KEY"
