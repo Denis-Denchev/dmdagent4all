@@ -38,6 +38,11 @@ class PlannerTest(unittest.TestCase):
         result = parse_plan_response("Sure, I can help with that.")
         self.assertEqual(result.final_message, "Sure, I can help with that.")
 
+    def test_malformed_json_response_raises_for_repair(self) -> None:
+        raw = '{"type":"final","message":"Still answer naturally"'
+        with self.assertRaises(PlannerError):
+            parse_plan_response(raw)
+
     def test_message_without_type_becomes_final_answer(self) -> None:
         result = parse_plan_response('{"message":"Hello without type"}')
         self.assertEqual(result.final_message, "Hello without type")
@@ -68,6 +73,21 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(answer, "final answer")
         self.assertEqual(provider.messages[0].content, "Custom answer instructions")
 
+    def test_planner_repairs_malformed_json_once(self) -> None:
+        provider = SequenceProvider(
+            [
+                '{"type":"tool_request","tool":"memory.list","args":{}',
+                '{"type":"tool_request","tool":"memory.list","args":{},"reason":"fixed"}',
+            ]
+        )
+        planner = LLMPlanner(provider)
+
+        result = planner.plan(user_message="list memory", manifests={})
+
+        self.assertIsNotNone(result.tool_request)
+        self.assertEqual(result.tool_request.tool, "memory.list")
+        self.assertEqual(provider.call_count, 2)
+
 
 class RecordingProvider:
     provider_name = "test"
@@ -89,6 +109,27 @@ class RecordingProvider:
         del max_tokens, temperature, think
         self.messages = messages
         return LLMResponse(content=self.content, model=self.model, provider=self.provider_name)
+
+
+class SequenceProvider(RecordingProvider):
+    def __init__(self, contents: list[str]) -> None:
+        super().__init__(contents[0])
+        self.contents = contents
+        self.call_count = 0
+
+    def chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        think: bool | None = None,
+    ) -> LLMResponse:
+        del max_tokens, temperature, think
+        self.messages = messages
+        content = self.contents[min(self.call_count, len(self.contents) - 1)]
+        self.call_count += 1
+        return LLMResponse(content=content, model=self.model, provider=self.provider_name)
 
 
 if __name__ == "__main__":

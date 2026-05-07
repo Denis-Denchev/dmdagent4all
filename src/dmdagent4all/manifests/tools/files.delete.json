@@ -1,0 +1,14 @@
+{
+  "name": "files.delete",
+  "description": "Delete a file or directory inside an allowed workspace root after explicit approval.",
+  "risk": 5,
+  "permissions": [],
+  "args_schema": {
+    "path": "absolute path inside allowed roots or path relative to current workspace",
+    "recursive": "true only when deleting a directory tree"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

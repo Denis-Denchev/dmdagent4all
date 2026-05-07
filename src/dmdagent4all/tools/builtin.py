@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ from dmdagent4all.tools.browser_automation import browser_click, browser_fill_fo
 from dmdagent4all.tools.reminders import complete_reminder, create_reminder, list_reminders
 from dmdagent4all.tools.registry import ToolRegistry, load_builtin_manifests
 from dmdagent4all.tools.web import browser_extract_text, browser_open, browser_scrape_markdown
+from dmdagent4all.workspace import WorkspaceManager
 
 
 def build_builtin_registry() -> ToolRegistry:
@@ -26,6 +28,11 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("memory.write", _memory_write)
     registry.register_handler("memory.organize_long_term", _memory_organize_long_term)
     registry.register_handler("profile.update", _profile_update)
+    registry.register_handler("files.read", _files_read)
+    registry.register_handler("files.write", _files_write)
+    registry.register_handler("files.delete", _files_delete)
+    registry.register_handler("workspace.switch", _workspace_switch)
+    registry.register_handler("workspace.status", _workspace_status)
     registry.register_handler("reminders.create", create_reminder)
     registry.register_handler("reminders.list", list_reminders)
     registry.register_handler("reminders.complete", complete_reminder)
@@ -220,6 +227,93 @@ def _write_profile_memory(context: ToolRuntimeContext) -> None:
             "confidence": "high",
         },
     )
+
+
+def _files_read(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise ValueError("files.read requires path.")
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    resolved = manager.validate_user_path(path)
+    if not resolved.is_file():
+        raise ValueError("files.read requires a file path.")
+    body = resolved.read_bytes()
+    max_bytes = int(context.config.get("files", {}).get("max_read_bytes", 200_000))
+    truncated = len(body) > max_bytes
+    if truncated:
+        body = body[:max_bytes]
+    return {
+        "path": str(resolved),
+        "content": redact_text(body.decode("utf-8", errors="replace")),
+        "truncated": truncated,
+    }
+
+
+def _files_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise ValueError("files.write requires path.")
+    content = str(args.get("content") or "")
+    overwrite = bool(args.get("overwrite", False))
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    resolved = manager.validate_user_path(path, allow_missing=True)
+    existed = resolved.exists()
+    if existed and resolved.is_dir():
+        raise ValueError("files.write requires a file path, not a directory.")
+    if existed and not overwrite:
+        raise ValueError("File already exists. Set overwrite=true after explicit approval to replace it.")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content, encoding="utf-8")
+    return {
+        "path": str(resolved),
+        "bytes": len(content.encode("utf-8")),
+        "overwritten": existed and overwrite,
+    }
+
+
+def _files_delete(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise ValueError("files.delete requires path.")
+    recursive = bool(args.get("recursive", False))
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    resolved = manager.validate_user_path(path)
+    if resolved.is_dir():
+        if recursive:
+            shutil.rmtree(resolved)
+        else:
+            resolved.rmdir()
+        return {"path": str(resolved), "deleted": True, "kind": "directory"}
+    if not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
+    resolved.unlink()
+    return {"path": str(resolved), "deleted": True, "kind": "file"}
+
+
+def _workspace_switch(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise ValueError("workspace.switch requires path.")
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    target = manager.validate_workspace(path)
+    target.mkdir(parents=True, exist_ok=True)
+    workspace = context.config.setdefault("workspace", {})
+    workspace["current_path"] = str(target)
+    workspace.setdefault("default_path", str(manager.default_workspace))
+    context.config.setdefault("terminal", {})["workspace_root"] = str(target)
+    if context.config_path is not None:
+        save_config(context.config, context.config_path)
+    return {
+        "current_workspace": str(target),
+        "default_workspace": str(manager.default_workspace),
+        "allowed_roots": [str(root) for root in manager.allowed_roots],
+    }
+
+
+def _workspace_status(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    del args
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    return manager.workspace_info()
 
 
 def _memory_scope(args: dict[str, Any], metadata: dict[str, Any]) -> str:
@@ -862,10 +956,8 @@ def _terminal_run(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
 
 
 def _terminal_workspace_root(context: ToolRuntimeContext) -> Path:
-    raw_root = context.config.get("terminal", {}).get("workspace_root")
-    if isinstance(raw_root, str) and raw_root.strip():
-        return Path(raw_root).expanduser()
-    return context.workspace_root
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    return manager.validate_workspace(manager.current_workspace)
 
 
 def _browser_not_implemented(

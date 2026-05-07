@@ -1,0 +1,15 @@
+{
+  "name": "files.write",
+  "description": "Create or overwrite a text file inside an allowed workspace root after explicit approval.",
+  "risk": 4,
+  "permissions": [],
+  "args_schema": {
+    "path": "absolute path inside allowed roots or path relative to current workspace",
+    "content": "text content to write",
+    "overwrite": "true only when replacing an existing file after explicit approval"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

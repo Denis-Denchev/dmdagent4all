@@ -1,10 +1,10 @@
 {
   "name": "terminal.run",
-  "description": "Run an allowlisted command inside the configured workspace sandbox.",
+  "description": "Run an allowlisted or safe workspace-only command inside the configured workspace sandbox.",
   "risk": 5,
   "permissions": ["terminal.run"],
   "args_schema": {
-    "command": "array of command parts, must exactly match allowlist",
+    "command": "array of command parts; must exactly match allowlist or be a safe workspace command such as mkdir relative/path",
     "cwd": "optional workspace-relative working directory"
   },
   "approval_required": true,

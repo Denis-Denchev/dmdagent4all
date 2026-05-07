@@ -8,57 +8,35 @@ from dmdagent4all.llm.base import LLMMessage, LLMProvider
 from dmdagent4all.permissions import ToolManifest, ToolRequest
 
 
-SYSTEM_PROMPT = """You are DMD Agent's conversational planner. /no_think
+SYSTEM_PROMPT = """You are Jarvis, the user's personal assistant and everyday chat companion. /no_think
 
-Security: you are untrusted. You never access OS, shell, tokens, .env, SSH keys, or browser credentials. You only propose one listed tool call. Backend validates everything.
+Act naturally. If the user is just talking, chatting, asking a general knowledge question, or asking for advice, answer directly from your own knowledge and the provided context. Be friendly, practical, and concise.
 
-Conversational behavior:
-- Behave like a capable personal assistant, not a rule-based command parser.
-- Use recent_conversation to understand follow-up questions, references like "that/it/това", and what the user is frustrated about.
-- If no tool is needed, answer naturally, with empathy and practical judgment, in the user's language.
-- Do not force exact command wording. Infer intent from natural language when the intent is clear.
-- If the request is ambiguous, ask one short clarifying question instead of pretending you cannot help.
-- Keep answers concise but human. Avoid robotic stock phrases.
-- Do not use emoji, decorative icons, or emoji-like symbols in any answer.
-- You are responsible for natural-language intent understanding. Do not rely on brittle exact phrases.
+If the user asks you to do something that needs the computer, local memory, files, browser, reminders, calendar, terminal, or an integration, choose the best available tool and request exactly one tool call. The backend will validate safety, permissions, paths, secrets, and approvals before anything executes.
 
-Use the provided profile and retrieved memory context when it is relevant. Treat memory as RAG context: answer naturally from it instead of asking the user to repeat facts the backend already supplied.
-For service access questions, combine relevant memory facts when they belong together, such as service name, host, LAN/Tailscale IP, protocol, and port. If you infer a URL from host plus port, say it is inferred from memory instead of pretending it was explicitly stored.
-If the user asks to remember/save/store a fact, request memory.write; never claim a fact was saved unless you requested memory.write.
-Use profile.update only when the user clearly asks to change their profile identity, nickname, preferred language, or the assistant name. Do not treat corrections like "I mean X", "I'm asking for X", "not Proxmox, Immich", or "im asking for ..." as a name/profile update.
-Memory policy:
-- Use long-term memory for stable facts, preferences, identities, projects, addresses, decisions, and anything the user expects to remain until manually deleted.
-- Use short-term memory only for temporary context, current-session summaries, draft task state, or reminders to yourself that should expire. Short-term memory must include memory_scope="short-term" and ttl_hours, normally 24 or 48.
-- All memory.write calls are approval-gated by the backend. You may propose short-term memory, but do not say it was saved until the tool succeeds.
-- When creating a new Markdown memory, choose a concise title and a sensible path. Prefer long-term/<topic>/<slug>.md for durable notes and short-term/<slug>.md for temporary notes. You may use path="auto" or omit path if title is present.
-- Sort memory content by topic and keep it useful for future retrieval. Use existing memory context to decide whether to update an existing file or create a new one.
-If memory context already contains enough information, answer directly instead of listing memory files.
-Path and URL policy:
-- Bare Markdown names such as profile.md, preferences.md, README.md, or memory/owner/profile.md are local Markdown/memory paths by default, not web URLs.
-- Use memory.read for local memory paths when the user asks to read, open, show, inspect, or fix a Markdown memory file.
-- Use browser.scrape_markdown when the user gives a web URL/domain and asks to scrape, extract, collect information, convert the page to Markdown, or save scraped content. Pass url, the user's scrape instructions as instructions, and filename only if the user names a Markdown file.
-- Use browser.open only for explicit http:// or https:// URLs, common web domains, or when the user clearly asks to open a website in the browser.
-- If a target could be either a local file and a web URL, prefer the local memory/file interpretation when the surrounding request is about memory, Markdown, project files, or organization.
-If the user asks for a reminder, request reminders.create. Use current time and timezone to compute ISO datetimes.
-For reminders about future events, separate event_at from due_at: event_at is when the event happens, due_at is when the user should be notified.
-Use memory context to enrich reminders when relevant. If memory contains a known address or place for the reminder topic, include location and an action_url such as a Google Maps search URL. Do not invent addresses.
+Use recent_conversation and memory context when they help. Answer in the user's language. Do not use emoji.
 
-Always answer in the user's language. Bulgarian user text must receive Bulgarian, not Russian.
-
-Return strict JSON only:
-- Tool:
-  {"type":"tool_request","tool":"tool.name","args":{},"reason":"short reason"}
-- Answer:
-  {"type":"final","message":"answer to the user"}
+Return JSON:
+- For normal conversation:
+  {"type":"final","message":"your answer"}
+- For an action:
+  {"type":"tool_request","tool":"tool.name","args":{},"reason":"why this tool is useful"}
 """
 
 
-ANSWER_PROMPT = """You are DMD Agent's conversational answer step. /no_think
+ANSWER_PROMPT = """You are Jarvis, the user's personal assistant. /no_think
 
-Answer naturally and concisely using the provided profile, memory context, and tool result.
-Do not output JSON. Do not claim that an action happened unless the tool result shows it happened.
-If the context does not contain the answer, say that you do not have it in memory yet.
-Do not use emoji, decorative icons, or emoji-like symbols.
+Turn the tool result into a natural, useful answer in the user's language. Be concise and friendly. Do not use emoji. If the tool failed or lacks the answer, say that plainly.
+"""
+
+CHAT_PROMPT = """You are Jarvis, the user's local desktop assistant and chat companion. /no_think
+
+Answer naturally in the user's language. Do not return JSON. Do not mention planner internals. Do not use emoji.
+"""
+
+REPAIR_PROMPT = """Return valid JSON only. Repair the planner output into exactly one of these shapes:
+{"type":"final","message":"answer"}
+{"type":"tool_request","tool":"tool.name","args":{},"reason":"short reason"}
 """
 
 
@@ -90,6 +68,7 @@ class LLMPlanner:
         current_time: str = "",
         timezone_name: str = "",
         max_tokens: int = 192,
+        repair_max_tokens: int = 256,
         temperature: float = 0.0,
         think: bool = False,
         system_prompt: str | None = None,
@@ -116,7 +95,58 @@ class LLMPlanner:
             temperature=temperature,
             think=think,
         )
-        return parse_plan_response(response.content)
+        try:
+            return parse_plan_response(response.content)
+        except PlannerError as exc:
+            repaired = self._repair_plan_response(
+                raw=response.content,
+                max_tokens=repair_max_tokens,
+                think=think,
+            )
+            try:
+                return parse_plan_response(repaired)
+            except PlannerError:
+                raise exc from None
+
+    def chat(
+        self,
+        *,
+        user_message: str,
+        profile: dict[str, str] | None = None,
+        memory_context: str = "",
+        conversation_context: str = "",
+        response_language: str = "auto",
+        max_tokens: int = 1024,
+        temperature: float = 0.4,
+        think: bool = False,
+        system_prompt: str | None = None,
+    ) -> str:
+        response = self.provider.chat(
+            [
+                LLMMessage(role="system", content=system_prompt or CHAT_PROMPT),
+                LLMMessage(
+                    role="user",
+                    content=json.dumps(
+                        {
+                            "lang": response_language,
+                            "profile": {
+                                "assistant_name": (profile or {}).get("agent_name", "DMD Agent"),
+                                "user_name": (profile or {}).get("user_name", ""),
+                            },
+                            "memory": memory_context,
+                            "recent_conversation": conversation_context,
+                            "user": user_message,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            think=think,
+        )
+        return response.content.strip()
 
     def answer(
         self,
@@ -156,6 +186,18 @@ class LLMPlanner:
             ],
             max_tokens=max_tokens,
             temperature=temperature,
+            think=think,
+        )
+        return response.content.strip()
+
+    def _repair_plan_response(self, *, raw: str, max_tokens: int, think: bool) -> str:
+        response = self.provider.chat(
+            [
+                LLMMessage(role="system", content=REPAIR_PROMPT),
+                LLMMessage(role="user", content=raw),
+            ],
+            max_tokens=max_tokens,
+            temperature=0.0,
             think=think,
         )
         return response.content.strip()
@@ -205,11 +247,13 @@ def _load_json(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         start = raw.find("{")
         end = raw.rfind("}")
-        if start == -1 or end == -1 or end <= start:
+        if start == -1:
             stripped = raw.strip()
             if stripped:
                 return {"type": "final", "message": stripped}
             raise PlannerError("Planner response was not JSON.") from None
+        if end == -1 or end <= start:
+            raise PlannerError("Planner response JSON could not be parsed.") from None
         try:
             loaded = json.loads(raw[start : end + 1])
         except json.JSONDecodeError as exc:

@@ -1,0 +1,13 @@
+{
+  "name": "workspace.switch",
+  "description": "Switch the current workspace to a validated path inside configured allowed roots.",
+  "risk": 2,
+  "permissions": [],
+  "args_schema": {
+    "path": "target workspace path"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

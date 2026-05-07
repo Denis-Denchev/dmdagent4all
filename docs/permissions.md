@@ -18,6 +18,10 @@ The model may propose:
 
 The backend decides whether the request is allowed.
 
+Before the permission engine runs, `ToolSafetyPolicy` checks the request for
+blocked paths, secret filenames, destructive SQL, and workspace escapes. A
+safety denial cannot be bypassed by approval.
+
 ## Risk Levels
 
 | Level | Meaning | Examples |
@@ -48,9 +52,45 @@ dmdagent approvals deny <id>
 ```
 
 Approving a request executes that stored request once. Approval does not bypass tool enablement or missing connector permissions.
+Approval also does not bypass safety policy. A destructive SQL request or secret
+file read remains blocked even if the stored approval is executed.
 In the dashboard, clicking Approve or typing `approve <id>` executes the stored
 request and posts the tool result back into the chat log. Typing `готово` or
 bare `approve` approves the newest pending request.
+
+## Workspace Policy
+
+Workspace configuration controls where local file and terminal tools can work:
+
+```yaml
+workspace:
+  default_path: "/path/to/default/project"
+  current_path: "/path/to/current/project"
+  allowed_roots:
+    - "/path/to/projects"
+    - "~/Desktop"
+    - "~/Documents"
+  blocked_paths:
+    - "~/.ssh"
+    - "~/.aws"
+    - "~/.config/gcloud"
+    - "~/.kube"
+    - "/etc"
+    - "/var"
+    - "/private"
+    - "/Library"
+    - "/System"
+```
+
+All paths are expanded, normalized, and resolved through symlinks before checks.
+Path traversal and symlink escapes are denied.
+
+The user can ask to switch workspace, but the backend validates the target
+before storing it.
+
+Requests such as `cd test`, `open test`, or "go into test" are interpreted as a
+validated workspace switch. They are not executed as shell `cd`, because the
+dashboard terminal runner is stateless between commands.
 
 ## Terminal
 
@@ -68,6 +108,7 @@ Allowed terminal execution must use:
 - no `.ssh`
 - no `docker.sock`
 - no host home access
+- no destructive SQL
 
 Operational flow:
 
@@ -87,6 +128,36 @@ approval-gated by default. If exact allowlist auto-approve is enabled, only
 commands that exactly match the allowlist can run without creating a new
 approval. Blocked commands, non-allowlisted commands, and unsafe cwd values stay
 blocked.
+
+Commands such as `mkdir relative/path` may pass terminal validation as a safe
+workspace command, but they are not exact allowlist auto-approved. They create an
+approval request unless explicitly added to the exact allowlist.
+
+Interactive terminal apps such as `nano`, `vim`, `vi`, and `emacs` are not
+allowed in the dashboard command runner. Use file tools for create/edit flows.
+
+## File Tools
+
+`files.read` reads only non-secret text files inside allowed workspace roots.
+
+`files.write` creates or overwrites text files only after approval. It is denied
+for secret paths and paths outside allowed workspace roots.
+
+`files.delete` always requires approval. File deletion does not execute
+immediately. Directory deletion is risk 5 and also requires approval. Secret
+paths are denied instead of approved.
+
+## Database Safety
+
+Database tools must be read-only by default. SQL containing destructive or
+mutating operations is blocked by backend policy:
+
+```text
+DELETE DROP TRUNCATE ALTER UPDATE INSERT CREATE REPLACE MERGE GRANT REVOKE VACUUM FULL
+```
+
+The block applies to terminal commands and SQL/query tool arguments before the
+permission engine and before approvals.
 
 The web dashboard exposes the same policy state, exact allowlist editing,
 workspace root, settings, the auto-approve toggle, and run requests through the

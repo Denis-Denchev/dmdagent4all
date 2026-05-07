@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dmdagent4all.security.policy import command_contains_destructive_sql, command_references_secret
+
 
 ALWAYS_BLOCKED = {
     "sudo",
@@ -26,6 +28,10 @@ BLOCKED_ARG_FRAGMENTS = (
     "docker.sock",
     "/etc/passwd",
     "/etc/shadow",
+    "/var",
+    "/private",
+    "/Library",
+    "/System",
 )
 
 
@@ -45,6 +51,7 @@ class TerminalPolicy:
     timeout_seconds: int = 30
     workspace_only: bool = True
     max_output_chars: int = 20000
+    allow_safe_workspace_commands: bool = True
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "TerminalPolicy":
@@ -60,6 +67,9 @@ class TerminalPolicy:
             timeout_seconds=int(terminal.get("timeout_seconds", 30)),
             workspace_only=bool(terminal.get("workspace_only", True)),
             max_output_chars=int(terminal.get("max_output_chars", 20000)),
+            allow_safe_workspace_commands=bool(
+                terminal.get("allow_safe_workspace_commands", True)
+            ),
         )
 
     def validate(self, command: list[str]) -> None:
@@ -75,8 +85,27 @@ class TerminalPolicy:
         lowered = [arg.casefold() for arg in command]
         if any(fragment.casefold() in arg for arg in lowered for fragment in BLOCKED_ARG_FRAGMENTS):
             raise PermissionError("Command references a blocked secret or system path.")
-        if tuple(command) not in self.allowed_commands:
+        if command_references_secret(command):
+            raise PermissionError("Command references a blocked secret or system path.")
+        if command_contains_destructive_sql(command):
+            raise PermissionError("Command contains a blocked destructive SQL operation.")
+        if tuple(command) not in self.allowed_commands and not self._is_safe_workspace_command(command):
             raise PermissionError("Command is not in the allowlist.")
+
+    def _is_safe_workspace_command(self, command: list[str]) -> bool:
+        if not self.allow_safe_workspace_commands or not self.workspace_only:
+            return False
+        binary_name = Path(command[0]).name
+        if binary_name != "mkdir":
+            return False
+        args = command[1:]
+        if not args:
+            return False
+        if args[0] == "-p":
+            args = args[1:]
+        elif any(arg.startswith("-") for arg in args):
+            return False
+        return bool(args) and all(_is_safe_relative_path(arg) for arg in args)
 
 
 def run_workspace_command(
@@ -124,3 +153,14 @@ def _limit_output(value: str, max_chars: int) -> str:
     if max_chars <= 0 or len(value) <= max_chars:
         return value
     return value[:max_chars] + "\n[output truncated]"
+
+
+def _is_safe_relative_path(value: str) -> bool:
+    if not value.strip() or value.startswith("~"):
+        return False
+    path = Path(value)
+    if path.is_absolute():
+        return False
+    if any(part in {"", ".", ".."} for part in path.parts):
+        return False
+    return True

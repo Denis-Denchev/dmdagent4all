@@ -106,7 +106,7 @@ class WorkspaceFilesApiTest(unittest.TestCase):
         self.assertEqual(response["system_prompts"]["planner"]["custom"], "Custom planner prompt")
         self.assertEqual(response["system_prompts"]["planner"]["effective"], "Custom planner prompt")
         self.assertTrue(response["system_prompts"]["planner"]["customized"])
-        self.assertIn("DMD Agent", response["system_prompts"]["answer"]["default"])
+        self.assertIn("personal assistant", response["system_prompts"]["answer"]["default"])
 
 
 if __name__ == "__main__":

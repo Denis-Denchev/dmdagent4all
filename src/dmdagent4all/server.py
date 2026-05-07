@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from dmdagent4all import __version__
-from dmdagent4all.agent.planner import ANSWER_PROMPT, SYSTEM_PROMPT
+from dmdagent4all.agent.planner import ANSWER_PROMPT, CHAT_PROMPT, SYSTEM_PROMPT
 from dmdagent4all.app_paths import AppPaths
 from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.config import load_config, update_config, write_default_config
@@ -56,6 +56,7 @@ from dmdagent4all.tools.reminders import (
     wait_for_reminder_change_since,
     wake_reminder_waiters,
 )
+from dmdagent4all.workspace import WorkspaceError, WorkspaceManager
 
 
 DEFAULT_DEEPSEEK_API_KEY_ENV = "DMDAGENT_DEEPSEEK_API_KEY"
@@ -111,6 +112,7 @@ class TerminalSettingsRequest(BaseModel):
     timeout_seconds: int | None = None
     max_output_chars: int | None = None
     auto_approve_allowlisted: bool | None = None
+    allow_safe_workspace_commands: bool | None = None
 
 
 class AgentConfigurationRequest(BaseModel):
@@ -119,9 +121,17 @@ class AgentConfigurationRequest(BaseModel):
     user_name: str | None = None
     preferred_language: str | None = None
     response_language: str | None = None
+    chat_max_tokens: int | None = None
     planner_max_tokens: int | None = None
+    synthesis_max_tokens: int | None = None
+    repair_max_tokens: int | None = None
+    chat_history_turns: int | None = None
+    chat_history_char_limit: int | None = None
+    planner_history_turns: int | None = None
+    planner_history_char_limit: int | None = None
     planner_temperature: float | None = None
     planner_think: bool | None = None
+    chat_system_prompt: str | None = None
     planner_system_prompt: str | None = None
     answer_system_prompt: str | None = None
     send_chat_history_to_cloud: bool | None = None
@@ -967,6 +977,9 @@ def _configuration_response(paths: AppPaths, config: dict[str, Any]) -> dict[str
             "config": str(paths.config),
             "memory": str(paths.memory),
             "workspace": str(paths.workspace),
+            "current_workspace": str(
+                WorkspaceManager.from_config(config, fallback_workspace=paths.workspace).current_workspace
+            ),
             "downloads_root": str(downloads_root),
             "downloads_root_custom": bool(str(config.get("storage", {}).get("downloads_root") or "").strip()),
             "audit_db": str(paths.audit_db),
@@ -979,6 +992,7 @@ def _configuration_response(paths: AppPaths, config: dict[str, Any]) -> dict[str
         "privacy": config.get("privacy", {}),
         "permissions": config.get("permissions", {}),
         "storage": config.get("storage", {}),
+        "workspace": WorkspaceManager.from_config(config, fallback_workspace=paths.workspace).workspace_info(),
     }
 
 
@@ -1004,13 +1018,29 @@ def _update_agent_configuration(config: dict[str, Any], request: AgentConfigurat
     llm = config.setdefault("llm", {})
     if request.response_language is not None:
         llm["response_language"] = request.response_language.strip() or "auto"
+    if request.chat_max_tokens is not None:
+        llm["chat_max_tokens"] = max(128, min(int(request.chat_max_tokens), 8192))
     if request.planner_max_tokens is not None:
         llm["planner_max_tokens"] = max(128, min(int(request.planner_max_tokens), 8192))
+    if request.synthesis_max_tokens is not None:
+        llm["synthesis_max_tokens"] = max(128, min(int(request.synthesis_max_tokens), 8192))
+    if request.repair_max_tokens is not None:
+        llm["repair_max_tokens"] = max(64, min(int(request.repair_max_tokens), 2048))
+    if request.chat_history_turns is not None:
+        llm["chat_history_turns"] = max(1, min(int(request.chat_history_turns), 200))
+    if request.chat_history_char_limit is not None:
+        llm["chat_history_char_limit"] = max(500, min(int(request.chat_history_char_limit), 100_000))
+    if request.planner_history_turns is not None:
+        llm["planner_history_turns"] = max(0, min(int(request.planner_history_turns), 50))
+    if request.planner_history_char_limit is not None:
+        llm["planner_history_char_limit"] = max(0, min(int(request.planner_history_char_limit), 50_000))
     if request.planner_temperature is not None:
         llm["planner_temperature"] = max(0.0, min(float(request.planner_temperature), 2.0))
     if request.planner_think is not None:
         llm["planner_think"] = bool(request.planner_think)
     prompts = llm.setdefault("system_prompts", {})
+    if request.chat_system_prompt is not None:
+        prompts["chat"] = _stored_system_prompt(request.chat_system_prompt, CHAT_PROMPT)
     if request.planner_system_prompt is not None:
         prompts["planner"] = _stored_system_prompt(request.planner_system_prompt, SYSTEM_PROMPT)
     if request.answer_system_prompt is not None:
@@ -1035,9 +1065,16 @@ def _system_prompts_response(llm: dict[str, Any]) -> dict[str, Any]:
     prompts = llm.get("system_prompts", {})
     if not isinstance(prompts, dict):
         prompts = {}
+    chat_custom = str(prompts.get("chat") or "")
     planner_custom = str(prompts.get("planner") or "")
     answer_custom = str(prompts.get("answer") or "")
     return {
+        "chat": {
+            "default": CHAT_PROMPT,
+            "custom": chat_custom,
+            "effective": chat_custom.strip() or CHAT_PROMPT,
+            "customized": bool(chat_custom.strip()),
+        },
         "planner": {
             "default": SYSTEM_PROMPT,
             "custom": planner_custom,
@@ -1481,6 +1518,7 @@ def _terminal_status(config: dict[str, Any]) -> dict[str, Any]:
         "timeout_seconds": int(terminal.get("timeout_seconds", 30)),
         "max_output_chars": int(terminal.get("max_output_chars", 20000)),
         "auto_approve_allowlisted": bool(terminal.get("auto_approve_allowlisted", False)),
+        "allow_safe_workspace_commands": bool(terminal.get("allow_safe_workspace_commands", True)),
         "allowed_commands": [list(command) for command in _terminal_allowed_commands(terminal)],
     }
 
@@ -1494,6 +1532,7 @@ def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:
     terminal.setdefault("timeout_seconds", 30)
     terminal.setdefault("max_output_chars", 20000)
     terminal.setdefault("auto_approve_allowlisted", False)
+    terminal.setdefault("allow_safe_workspace_commands", True)
     terminal.setdefault(
         "allowed_commands",
         [
@@ -1511,10 +1550,8 @@ def _terminal_config_section(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _terminal_workspace_root(config: dict[str, Any]) -> str:
-    raw_root = _terminal_config_section(config).get("workspace_root")
-    if isinstance(raw_root, str) and raw_root.strip():
-        return str(Path(raw_root).expanduser())
-    return str(AppPaths.default().workspace)
+    manager = WorkspaceManager.from_config(config, fallback_workspace=AppPaths.default().workspace)
+    return str(manager.current_workspace)
 
 
 def _terminal_allowed_commands(terminal: dict[str, Any]) -> list[tuple[str, ...]]:
@@ -1547,14 +1584,23 @@ def _update_terminal_settings(
     if request.workspace_root is not None:
         value = request.workspace_root.strip()
         if value:
-            root = Path(value).expanduser()
-            if not root.is_absolute():
-                raise HTTPException(status_code=400, detail="workspace_root must be an absolute path.")
+            try:
+                root = WorkspaceManager.from_config(
+                    config,
+                    fallback_workspace=AppPaths.default().workspace,
+                ).validate_workspace(value)
+            except WorkspaceError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             terminal["workspace_root"] = str(root)
+            workspace = config.setdefault("workspace", {})
+            workspace["current_path"] = str(root)
+            workspace.setdefault("default_path", str(root))
         else:
             terminal["workspace_root"] = ""
     if request.auto_approve_allowlisted is not None:
         terminal["auto_approve_allowlisted"] = bool(request.auto_approve_allowlisted)
+    if request.allow_safe_workspace_commands is not None:
+        terminal["allow_safe_workspace_commands"] = bool(request.allow_safe_workspace_commands)
     if request.timeout_seconds is not None:
         if not 1 <= request.timeout_seconds <= 600:
             raise HTTPException(status_code=400, detail="timeout_seconds must be between 1 and 600.")

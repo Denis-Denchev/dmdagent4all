@@ -1,0 +1,11 @@
+{
+  "name": "workspace.status",
+  "description": "Show current workspace, default workspace, allowed roots, and blocked paths.",
+  "risk": 0,
+  "permissions": [],
+  "args_schema": {},
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

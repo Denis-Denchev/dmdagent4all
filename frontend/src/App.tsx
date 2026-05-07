@@ -748,7 +748,6 @@ export function App() {
                           </div>
                         </div>
                       ) : null}
-                      {message.data ? <pre>{JSON.stringify(message.data, null, 2)}</pre> : null}
                     </div>
                   </article>
                 ))}

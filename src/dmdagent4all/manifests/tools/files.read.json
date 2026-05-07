@@ -1,0 +1,13 @@
+{
+  "name": "files.read",
+  "description": "Read a non-secret text file inside an allowed workspace root.",
+  "risk": 0,
+  "permissions": [],
+  "args_schema": {
+    "path": "absolute path inside allowed roots or path relative to current workspace"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

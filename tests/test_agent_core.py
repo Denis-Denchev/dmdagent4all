@@ -56,6 +56,20 @@ class RecordingPlanner:
         return PlanResult(final_message=self.answer)
 
 
+class ChatOnlyPlanner:
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.chat_calls: list[dict] = []
+
+    def plan(self, **kwargs) -> PlanResult:
+        del kwargs
+        raise AssertionError("planner JSON mode should not be called")
+
+    def chat(self, **kwargs) -> str:
+        self.chat_calls.append(kwargs)
+        return self.answer
+
+
 class AgentCoreTest(unittest.TestCase):
     def test_planner_final_response_is_returned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,9 +373,9 @@ class AgentCoreTest(unittest.TestCase):
             response = core.handle_text("im asking for immich not for proxmox")
 
             self.assertEqual(response.status, "ok")
-            self.assertEqual(response.data, {"planner": "llm"})
+            self.assertEqual(response.data, {"planner": "deterministic", "source": "session_correction"})
             self.assertEqual(config["setup"]["user_name"], "Denis")
-            self.assertEqual(planner.calls[0]["user_message"], "im asking for immich not for proxmox")
+            self.assertEqual(planner.calls, [])
 
     def test_model_requests_profile_update_tool_instead_of_regex_identity_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1181,6 +1195,37 @@ and this is the knowlage
             self.assertEqual(audit.list_approvals(status="pending"), [])
             self.assertIn(str(root / "workspace"), response.data["stdout"])
 
+    def test_safe_workspace_mkdir_requires_approval_before_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                None,
+                audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["pwd"]],
+                        "auto_approve_allowlisted": True,
+                        "workspace_root": str(root / "workspace"),
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_tool_request(
+                ToolRequest(tool="terminal.run", args={"command": ["mkdir", "test"]})
+            )
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(len(audit.list_approvals(status="pending")), 1)
+            self.assertFalse((root / "workspace" / "test").exists())
+
     def test_terminal_workspace_root_can_point_at_project_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1264,6 +1309,36 @@ and this is the knowlage
             self.assertEqual(response.status, "ok")
             self.assertEqual(response.message, "You like green tea.")
 
+    def test_memory_read_synthesis_failure_does_not_dump_file_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/immich.md",
+                "# Immich\nSecret-ish long local notes that should not be dumped raw.",
+                metadata={"type": "service"},
+            )
+            core = _build_core(
+                root,
+                AnsweringPlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="memory.read",
+                            args={"path": "services/immich.md"},
+                            reason="Look up Immich.",
+                        )
+                    ),
+                    "",
+                ),
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Where do I open Immich?")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("services/immich.md", response.message)
+            self.assertNotIn("Secret-ish long local notes", response.message)
+            self.assertNotIn("content", response.data or {})
+
     def test_cloud_low_risk_memory_list_is_synthesized_without_extra_cloud_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1330,6 +1405,473 @@ and this is the knowlage
             self.assertEqual(second.message, "You like green tea.")
             self.assertEqual(audit.list_approvals(status="pending"), [])
 
+    def test_normal_bulgarian_translation_uses_chat_mode_without_planner_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            planner = ChatOnlyPlanner("Здравей, как си?")
+            core = _build_core(root, planner)
+
+            response = core.handle_text("може ли да ми преведеш това на български: Hello how are you")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Здравей", response.message)
+            self.assertEqual(len(planner.chat_calls), 1)
+            self.assertNotIn("planner", response.message.lower())
+            self.assertNotIn("{", response.message)
+
+    def test_bulgarian_thanks_uses_normal_chat_without_debug_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = ChatOnlyPlanner("Няма проблем.")
+            core = _build_core(Path(tmp), planner)
+
+            response = core.handle_text("благодаря ти")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.message, "Няма проблем.")
+            self.assertEqual(response.data, {"mode": "normal_chat"})
+
+    def test_bulgarian_casual_status_uses_normal_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = ChatOnlyPlanner("Добре съм, готов съм да помагам.")
+            core = _build_core(Path(tmp), planner)
+
+            response = core.handle_text("джарвис как си")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Добре", response.message)
+            self.assertEqual(len(planner.chat_calls), 1)
+
+    def test_terminal_ls_request_routes_deterministically_and_returns_clean_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workspace" / "note.txt").parent.mkdir(parents=True, exist_ok=True)
+            (root / "workspace" / "note.txt").write_text("hello", encoding="utf-8")
+            core = _build_core(
+                root,
+                ChatOnlyPlanner("should not be used"),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["ls"]],
+                        "auto_approve_allowlisted": True,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_text("изпълни в терминала ls")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Изпълних `ls`", response.message)
+            self.assertIn("note.txt", response.message)
+            self.assertNotIn("returncode", response.message)
+
+    def test_mkdir_request_requires_approval_and_does_not_execute_silently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                ChatOnlyPlanner("should not be used"),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["ls"]],
+                        "auto_approve_allowlisted": True,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_text("изпълни mkdir test")
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertFalse((root / "workspace" / "test").exists())
+            self.assertEqual(len(audit.list_approvals(status="pending")), 1)
+
+    def test_secret_file_reads_are_denied_by_backend_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / ".env").write_text("API_KEY=secret-value", encoding="utf-8")
+            core = _build_core(root, ChatOnlyPlanner("should not be used"))
+
+            bg = core.handle_text("прочети .env")
+            cat = core.handle_text("cat .env")
+
+            self.assertEqual(bg.status, "denied")
+            self.assertEqual(cat.status, "denied")
+            self.assertIn("secret", bg.message.lower())
+            self.assertNotIn("secret-value", bg.message)
+
+    def test_destructive_sql_is_blocked_before_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            core = _build_core(
+                root,
+                None,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["psql", "-c", "DELETE FROM users"]],
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_tool_request(
+                ToolRequest(
+                    tool="terminal.run",
+                    args={"command": ["psql", "-c", "DELETE FROM users"]},
+                )
+            )
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("SQL", response.message)
+
+    def test_file_and_directory_deletion_requests_create_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "old.txt").write_text("remove me", encoding="utf-8")
+            (workspace / "old-dir").mkdir()
+            core = _build_core(root, None, audit=audit)
+
+            file_response = core.handle_text("delete old.txt")
+            dir_response = core.handle_text("delete folder old-dir")
+
+            self.assertEqual(file_response.status, "approval_required")
+            self.assertEqual(dir_response.status, "approval_required")
+            self.assertTrue((workspace / "old.txt").exists())
+            self.assertTrue((workspace / "old-dir").exists())
+            self.assertEqual(dir_response.data["risk"], 5)
+            self.assertEqual(len(audit.list_approvals(status="pending")), 2)
+
+    def test_file_read_outside_allowed_roots_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            core = _build_core(
+                root,
+                None,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "workspace": {
+                        "default_path": str(root / "workspace"),
+                        "current_path": str(root / "workspace"),
+                        "allowed_roots": [str(root / "workspace")],
+                        "blocked_paths": [],
+                    },
+                },
+            )
+
+            response = core.handle_tool_request(
+                ToolRequest(tool="files.read", args={"path": str(outside)})
+            )
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("outside allowed roots", response.message)
+
+    def test_workspace_switch_allows_allowed_root_and_blocks_system_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            core = _build_core(
+                root,
+                None,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "workspace": {
+                        "default_path": str(root / "workspace"),
+                        "current_path": str(root / "workspace"),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": ["/etc", "/System"],
+                    },
+                },
+            )
+
+            allowed = core.handle_text(f"switch workspace to {project}")
+            blocked = core.handle_text("switch workspace to /etc")
+
+            self.assertEqual(allowed.status, "ok")
+            self.assertIn(str(project), allowed.message)
+            self.assertEqual(blocked.status, "denied")
+
+    def test_workspace_switch_blocks_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed_root = root / "allowed"
+            allowed_root.mkdir()
+            link = allowed_root / "escape"
+            link.symlink_to("/etc")
+            core = _build_core(
+                root,
+                None,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "workspace": {
+                        "default_path": str(allowed_root),
+                        "current_path": str(allowed_root),
+                        "allowed_roots": [str(allowed_root)],
+                        "blocked_paths": ["/etc"],
+                    },
+                },
+            )
+
+            response = core.handle_text(f"switch workspace to {link}")
+
+            self.assertEqual(response.status, "denied")
+
+    def test_plex_address_lookup_does_not_return_proxmox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/plex.md",
+                "Plex port: 32400",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "homelab/homelab-primary.md",
+                "LAN IP: 192.0.2.43\nTailscale IP: 198.51.100.43",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "homelab/homelab2-backup.md",
+                "Backup Proxmox web UI: https://192.0.2.25:8006",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(root, None)
+
+            response = core.handle_text("на кой адрес зареждах от домашния сървър плекс")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Plex", response.message)
+            self.assertIn("http://192.0.2.43:32400/web", response.message)
+            self.assertNotIn("Proxmox", response.message)
+            self.assertNotIn("8006", response.message)
+
+    def test_service_correction_is_kept_for_current_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), None)
+
+            correction = core.handle_text("питам за плекс не за проксмокс", session_id="correction")
+            feedback = core.handle_text("да не се повтаря тая грешка", session_id="correction")
+
+            self.assertEqual(correction.status, "ok")
+            self.assertEqual(feedback.status, "ok")
+            self.assertIn("Plex", correction.message)
+            self.assertIn("Proxmox", feedback.message)
+            self.assertEqual(correction.data["source"], "session_correction")
+
+    def test_mkdir_then_delete_uses_same_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["ls"]],
+                        "auto_approve_allowlisted": True,
+                        "workspace_root": str(workspace),
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            pending_mkdir = core.handle_text("execute mkdir test")
+            approved_mkdir = core.approve_and_execute(pending_mkdir.data["approval_id"])
+            self.assertTrue((workspace / "test").exists())
+            pending_delete = core.handle_text("delete this test folder")
+            approved_delete = core.approve_and_execute(pending_delete.data["approval_id"])
+
+            self.assertEqual(pending_mkdir.status, "approval_required")
+            self.assertEqual(approved_mkdir.status, "ok")
+            self.assertEqual(pending_delete.status, "approval_required")
+            self.assertEqual(approved_delete.status, "ok")
+            self.assertFalse((workspace / "test").exists())
+
+    def test_cd_requests_switch_workspace_instead_of_terminal_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            target = workspace / "test"
+            target.mkdir(parents=True)
+            audit = AuditStore(root / "audit.db")
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "terminal": {"enabled": True, "allowed_commands": [["ls"]]},
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config=config,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_text("in my terminal execute cd test")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn(str(target.resolve()), response.message)
+            self.assertEqual(config["workspace"]["current_path"], str(target.resolve()))
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_open_folder_request_switches_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            target = workspace / "test"
+            target.mkdir(parents=True)
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(root, None, config=config)
+
+            response = core.handle_text("open test")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn(str(target.resolve()), response.message)
+            self.assertEqual(config["workspace"]["current_path"], str(target.resolve()))
+
+    def test_multi_step_mkdir_then_open_folder_continues_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "terminal": {
+                    "enabled": True,
+                    "allowed_commands": [["ls"]],
+                    "auto_approve_allowlisted": True,
+                    "workspace_root": str(workspace),
+                },
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config=config,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            pending = core.handle_text("i want you to execute mkdir test1 after that open the folder")
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approved.status, "ok")
+            self.assertTrue((workspace / "test1").exists())
+            self.assertEqual(config["workspace"]["current_path"], str((workspace / "test1").resolve()))
+            self.assertIn("Switched workspace", approved.message)
+
+    def test_multi_step_mkdir_then_nano_does_not_treat_file_as_host(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "terminal": {
+                    "enabled": True,
+                    "allowed_commands": [["ls"]],
+                    "auto_approve_allowlisted": True,
+                    "workspace_root": str(workspace),
+                },
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config=config,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            pending = core.handle_text(
+                "i want you to execute the following in my terminal mkdir test1 after that open the folder and execute nano realtest.py"
+            )
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approved.status, "ok")
+            self.assertIn("realtest.py", approved.message)
+            self.assertIn("interactive", approved.message)
+            self.assertNotIn("host", approved.message.lower())
+            self.assertEqual(config["workspace"]["current_path"], str((workspace / "test1").resolve()))
+
+    def test_interactive_editor_response_includes_helpful_alternative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), None)
+
+            response = core.handle_text("execute nano realtest.py")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("interactive", response.message)
+            self.assertIn("files.write", response.message)
+            self.assertIn("realtest.py", response.message)
+
 
 def _build_core(
     root: Path,
@@ -1340,6 +1882,16 @@ def _build_core(
 ) -> AgentCore:
     registry = build_builtin_registry()
     runtime_config = config or {"llm": {"response_language": "auto"}}
+    configured_workspace = runtime_config.get("terminal", {}).get("workspace_root") or str(root / "workspace")
+    runtime_config.setdefault(
+        "workspace",
+        {
+            "default_path": str(configured_workspace),
+            "current_path": str(configured_workspace),
+            "allowed_roots": [str(root)],
+            "blocked_paths": [],
+        },
+    )
     return AgentCore(
         permission_engine=PermissionEngine(registry.manifests),
         tool_registry=registry,

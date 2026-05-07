@@ -31,6 +31,12 @@ class TerminalToolTest(unittest.TestCase):
                             "workspace_only": True,
                             "allowed_commands": [["pwd"]],
                         },
+                        "workspace": {
+                            "default_path": str(root / "workspace"),
+                            "current_path": str(root / "workspace"),
+                            "allowed_roots": [str(root)],
+                            "blocked_paths": [],
+                        },
                         "llm": {"response_language": "auto"},
                     },
                 ),

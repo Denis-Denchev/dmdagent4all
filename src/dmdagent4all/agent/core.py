@@ -10,10 +10,12 @@ from typing import Any
 from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.agent.history import ChatHistory
 from dmdagent4all.agent.planner import LLMPlanner, PlannerError
+from dmdagent4all.agent.router import ConversationRouter
 from dmdagent4all.config import save_config
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
 from dmdagent4all.sandbox import TerminalPolicy
+from dmdagent4all.security.policy import ToolSafetyPolicy
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.registry import ToolExecutionError, ToolRegistry
 
@@ -29,6 +31,18 @@ class AgentResponse:
 class MemoryEntry:
     path: str
     text: str
+
+
+@dataclass(frozen=True)
+class UnsupportedAction:
+    kind: str
+    target: str = ""
+
+
+@dataclass(frozen=True)
+class PendingContinuation:
+    original_message: str
+    steps: tuple[ToolRequest | UnsupportedAction, ...]
 
 
 class AgentCore:
@@ -51,6 +65,10 @@ class AgentCore:
         self.planner = planner
         self._cloud_context_approved = permission_context.cloud_context_approved
         self.chat_history = chat_history or ChatHistory(runtime_context.workspace_root / "chat_history.json")
+        self.router = ConversationRouter()
+        self.safety_policy = ToolSafetyPolicy()
+        self._session_corrections: dict[str, list[str]] = {}
+        self._pending_continuations: dict[int, PendingContinuation] = {}
 
     def handle_text(self, text: str, *, session_id: str = "default") -> AgentResponse:
         stripped = text.strip()
@@ -74,53 +92,75 @@ class AgentCore:
         chat_history_answer = self._answer_chat_history_question(stripped, session_id=session_id)
         if chat_history_answer is not None:
             return chat_history_answer
+        feedback_answer = self._handle_session_feedback(stripped, session_id=session_id)
+        if feedback_answer is not None:
+            return feedback_answer
+        multi_step_answer = self._handle_multi_step_request(
+            stripped,
+            conversation_context=conversation_context,
+        )
+        if multi_step_answer is not None:
+            return multi_step_answer
+        interactive_answer = _interactive_terminal_response(stripped)
+        if interactive_answer is not None:
+            return interactive_answer
         if stripped.startswith("{"):
             try:
                 payload = json.loads(stripped)
-                return self.handle_tool_request(
-                    ToolRequest(
-                        tool=str(payload["tool"]),
-                        args=dict(payload.get("args", {})),
-                        reason=str(payload.get("reason", "")),
-                    )
+                request = ToolRequest(
+                    tool=str(payload["tool"]),
+                    args=dict(payload.get("args", {})),
+                    reason=str(payload.get("reason", "")),
                 )
+                response = self.handle_tool_request(request)
+                return self._shape_tool_response(stripped, request, response)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 return AgentResponse(
                     status="error",
                     message=f"Invalid tool request JSON: {exc}",
                 )
 
-        if self.planner is not None:
-            return self._handle_with_planner(
-                stripped,
-                text,
-                conversation_context=conversation_context,
-            )
+        routed = self.router.route(stripped)
+        if routed is not None:
+            if routed.kind == "normal_chat":
+                return self._handle_normal_chat(
+                    stripped,
+                    conversation_context=conversation_context,
+                )
+            if routed.request is not None:
+                return self._run_user_tool_request(
+                    stripped,
+                    routed.request,
+                    conversation_context=conversation_context,
+                )
 
-        identity_update = _handle_identity_update(stripped, self.runtime_context)
-        if identity_update is not None:
-            return identity_update
+        if self.planner is None:
+            identity_update = _handle_identity_update(stripped, self.runtime_context)
+            if identity_update is not None:
+                return identity_update
         memory_organize = _memory_organize_request_from_text(stripped)
         if memory_organize is not None:
-            return self.handle_tool_request(memory_organize)
+            return self._run_user_tool_request(stripped, memory_organize, conversation_context=conversation_context)
         memory_organize_missing_source = _memory_organize_missing_source_response(stripped)
         if memory_organize_missing_source is not None:
             return memory_organize_missing_source
         llm_reminder_request = self._plan_reminder_request(stripped, session_id=session_id)
         if llm_reminder_request is not None:
-            return self.handle_tool_request(llm_reminder_request)
+            return self._run_user_tool_request(stripped, llm_reminder_request, conversation_context=conversation_context)
         reminder_request = _reminder_request_from_text(stripped)
         if reminder_request is not None:
-            return self.handle_tool_request(reminder_request)
+            return self._run_user_tool_request(stripped, reminder_request, conversation_context=conversation_context)
         memory_update = _memory_write_request_from_text(stripped, self.runtime_context)
         if memory_update is not None:
-            return self.handle_tool_request(memory_update)
+            return self._run_user_tool_request(stripped, memory_update, conversation_context=conversation_context)
         memory_answer = _answer_memory_recall_question(
             stripped,
             self.runtime_context,
             conversation_context=self.chat_history.format_recent(session_id, limit=6, max_chars=2500),
         )
         if memory_answer is not None:
+            if _service_from_text(stripped) is not None:
+                return memory_answer
             if self._can_send_private_context_to_llm():
                 synthesized = self._synthesize_memory_recall_response(
                     stripped,
@@ -135,19 +175,26 @@ class AgentCore:
             return clarification
         browser_request = _browser_request_from_text(stripped)
         if browser_request is not None:
-            return self.handle_tool_request(browser_request)
+            return self._run_user_tool_request(stripped, browser_request, conversation_context=conversation_context)
         terminal_request = _terminal_request_from_text(stripped)
         if terminal_request is not None:
-            return self.handle_tool_request(terminal_request)
-        routed = _route_without_llm(stripped)
-        if routed is not None:
-            return self.handle_tool_request(routed)
+            return self._run_user_tool_request(stripped, terminal_request, conversation_context=conversation_context)
+        route_without_llm = _route_without_llm(stripped)
+        if route_without_llm is not None:
+            return self._run_user_tool_request(stripped, route_without_llm, conversation_context=conversation_context)
         fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
         if fast_answer is not None and _is_fast_control_answer(stripped):
             return AgentResponse(
                 status="ok",
                 message=fast_answer,
                 data={"planner": "deterministic"},
+            )
+
+        if self.planner is not None:
+            return self._handle_with_planner(
+                stripped,
+                text,
+                conversation_context=self._planner_conversation_context(session_id),
             )
 
         if fast_answer is not None:
@@ -194,6 +241,7 @@ class AgentCore:
                 current_time=now.isoformat(timespec="seconds"),
                 timezone_name=now.tzname() or "",
                 max_tokens=max(512, int(llm_config.get("planner_max_tokens", 192))),
+                repair_max_tokens=int(llm_config.get("repair_max_tokens", 256)),
                 temperature=float(llm_config.get("planner_temperature", 0.0)),
                 think=bool(llm_config.get("planner_think", False)),
                 system_prompt=_llm_system_prompt(llm_config, "planner"),
@@ -210,26 +258,223 @@ class AgentCore:
             if unavailable_answer is not None:
                 return unavailable_answer
             return AgentResponse(
-                status="error",
-                message=f"LLM planner failed: {exc}",
+                status="ok",
+                message=_tool_selection_failure_message(stripped),
+                data={"debug": {"planner_error": str(exc)}},
         )
 
         if plan.tool_request is not None:
             request = _request_with_original_message(plan.tool_request, stripped)
-            tool_response = self.handle_tool_request(request)
-            if self._should_synthesize_tool_response(stripped, request, tool_response):
-                return self._synthesize_tool_response(
-                    stripped,
-                    tool_response,
-                    conversation_context=conversation_context,
-                )
-            return tool_response
+            return self._run_user_tool_request(
+                stripped,
+                request,
+                conversation_context=conversation_context,
+            )
 
         return AgentResponse(
             status="ok",
             message=plan.final_message or "",
             data={"planner": "llm"},
         )
+
+    def _handle_normal_chat(
+        self,
+        user_message: str,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse:
+        fast_answer = _answer_without_llm(user_message, self.runtime_context.config)
+        if fast_answer is not None and _is_fast_control_answer(user_message):
+            return AgentResponse(status="ok", message=fast_answer, data={"mode": "normal_chat"})
+        if self.planner is None or not hasattr(self.planner, "chat"):
+            return AgentResponse(
+                status="ok",
+                message=fast_answer or ("Кажи ми какво ти трябва." if _looks_bulgarian(user_message) else "Tell me what you need."),
+                data={"mode": "normal_chat"},
+            )
+        try:
+            llm_config = self.runtime_context.config.get("llm", {})
+            answer = self.planner.chat(
+                user_message=user_message,
+                profile=_profile_from_config(self.runtime_context.config),
+                memory_context=_load_memory_context(
+                    self.runtime_context,
+                    query=user_message,
+                    conversation_context=conversation_context,
+                    allow_cloud_context=self._cloud_context_approved,
+                    max_chars=4000,
+                ),
+                conversation_context=conversation_context,
+                response_language=llm_config.get("response_language", "auto"),
+                max_tokens=int(llm_config.get("chat_max_tokens", 1024)),
+                temperature=0.4,
+                think=bool(llm_config.get("planner_think", False)),
+                system_prompt=_llm_system_prompt(llm_config, "chat"),
+            )
+        except (PlannerError, OSError, RuntimeError) as exc:
+            unavailable_answer = _answer_llm_unavailable(user_message, self.runtime_context.config, exc)
+            if unavailable_answer is not None:
+                return unavailable_answer
+            return AgentResponse(
+                status="ok",
+                message=(
+                    "Не успях да отговоря през модела в момента."
+                    if _looks_bulgarian(user_message)
+                    else "I could not answer through the model right now."
+                ),
+                data={"debug": {"chat_error": str(exc)}},
+            )
+        return AgentResponse(status="ok", message=answer, data={"mode": "normal_chat"})
+
+    def _run_user_tool_request(
+        self,
+        user_message: str,
+        request: ToolRequest,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse:
+        request = _request_with_original_message(request, user_message)
+        tool_response = self.handle_tool_request(request)
+        if self._should_synthesize_tool_response(user_message, request, tool_response):
+            return self._synthesize_tool_response(
+                user_message,
+                tool_response,
+                conversation_context=conversation_context,
+            )
+        return self._shape_tool_response(user_message, request, tool_response)
+
+    def _handle_multi_step_request(
+        self,
+        user_message: str,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse | None:
+        del conversation_context
+        plan = _multi_step_plan_from_text(user_message)
+        if plan is None:
+            return None
+        first, *continuations = plan
+        if isinstance(first, UnsupportedAction):
+            return _unsupported_action_response(user_message, first)
+        first_request = _request_with_original_message(first, user_message)
+        response = self.handle_tool_request(first_request)
+        if response.status == "approval_required":
+            approval_id = (response.data or {}).get("approval_id")
+            if isinstance(approval_id, int) and continuations:
+                self._pending_continuations[approval_id] = PendingContinuation(
+                    original_message=user_message,
+                    steps=tuple(continuations),
+                )
+                return AgentResponse(
+                    status=response.status,
+                    message=_multi_step_approval_message(user_message, first_request, continuations),
+                    data={
+                        **(response.data or {}),
+                        "plan": _continuation_plan_for_user(continuations),
+                    },
+                )
+        if response.status != "ok" or not continuations:
+            return self._shape_tool_response(user_message, first_request, response)
+        return self._execute_continuation_steps(
+            user_message,
+            first_request=first_request,
+            first_response=response,
+            steps=tuple(continuations),
+        )
+
+    def _execute_continuation_steps(
+        self,
+        user_message: str,
+        *,
+        first_request: ToolRequest,
+        first_response: AgentResponse,
+        steps: tuple[ToolRequest | UnsupportedAction, ...],
+    ) -> AgentResponse:
+        messages: list[str] = []
+        data: dict[str, Any] = {
+            "tool": "multi_step",
+            "first_tool": first_request.tool,
+            "steps": [],
+        }
+        shaped_first = self._shape_tool_response(user_message, first_request, first_response)
+        if shaped_first.message:
+            messages.append(shaped_first.message)
+        for step in steps:
+            if isinstance(step, UnsupportedAction):
+                unsupported = _unsupported_action_response(user_message, step)
+                messages.append(unsupported.message)
+                data["steps"].append({"kind": step.kind, "target": step.target, "status": "unsupported"})
+                continue
+            response = self.handle_tool_request(_request_with_original_message(step, user_message))
+            shaped = self._shape_tool_response(user_message, step, response)
+            messages.append(shaped.message)
+            data["steps"].append(
+                {
+                    "tool": step.tool,
+                    "args": step.args,
+                    "status": shaped.status,
+                    "data": shaped.data or {},
+                }
+            )
+            if shaped.status != "ok":
+                return AgentResponse(
+                    status=shaped.status,
+                    message="\n\n".join(message for message in messages if message),
+                    data=data,
+                )
+        return AgentResponse(
+            status="ok",
+            message="\n\n".join(message for message in messages if message),
+            data=data,
+        )
+
+    def _shape_tool_response(
+        self,
+        user_message: str,
+        request: ToolRequest,
+        response: AgentResponse,
+    ) -> AgentResponse:
+        if response.status != "ok":
+            return response
+        data = response.data or {}
+        if request.tool == "terminal.run":
+            return _terminal_user_response(user_message, request, data)
+        if request.tool == "files.read":
+            return _file_read_user_response(user_message, data)
+        if request.tool == "files.write":
+            path = str(data.get("path") or request.args.get("path") or "")
+            message = (
+                f"Записах файла: {path}"
+                if _looks_bulgarian(user_message)
+                else f"Wrote file: {path}"
+            )
+            return AgentResponse(status="ok", message=message, data={"tool": request.tool, "path": path})
+        if request.tool == "files.delete":
+            path = str(data.get("path") or request.args.get("path") or "")
+            kind = str(data.get("kind") or "path")
+            message = (
+                f"Изтрих {kind}: {path}"
+                if _looks_bulgarian(user_message)
+                else f"Deleted {kind}: {path}"
+            )
+            return AgentResponse(status="ok", message=message, data={"tool": request.tool, "path": path})
+        if request.tool == "workspace.switch":
+            current = str(data.get("current_workspace") or "")
+            message = (
+                f"Смених workspace на: {current}"
+                if _looks_bulgarian(user_message)
+                else f"Switched workspace to: {current}"
+            )
+            return AgentResponse(status="ok", message=message, data={"tool": request.tool, "current_workspace": current})
+        if request.tool == "workspace.status":
+            current = str(data.get("current_workspace") or "")
+            message = (
+                f"Текущият workspace е: {current}"
+                if _looks_bulgarian(user_message)
+                else f"Current workspace: {current}"
+            )
+            return AgentResponse(status="ok", message=message, data={"tool": request.tool, "current_workspace": current})
+        return response
 
     def _handle_approval_action_from_text(self, text: str) -> AgentResponse | None:
         action = _approval_action_from_text(text)
@@ -260,6 +505,46 @@ class AgentCore:
             data={"approval_id": approval_id},
         )
 
+    def _handle_session_feedback(self, text: str, *, session_id: str = "default") -> AgentResponse | None:
+        correction = _entity_correction_from_text(text)
+        if correction is not None:
+            wanted, wrong = correction
+            note = f"{wanted} != {wrong}. If the user asks for {wanted}, do not return {wrong} details."
+            corrections = self._session_corrections.setdefault(session_id, [])
+            if note not in corrections:
+                corrections.append(note)
+            message = (
+                f"Записах го за тази сесия: {wanted} не е {wrong}. При въпрос за {wanted} няма да връщам {wrong} адрес."
+                if _looks_bulgarian(text)
+                else f"Noted for this session: {wanted} is not {wrong}. If you ask for {wanted}, I will not return {wrong} details."
+            )
+            return AgentResponse(
+                status="ok",
+                message=message,
+                data={"planner": "deterministic", "source": "session_correction"},
+            )
+        if _is_do_not_repeat_error_feedback(text):
+            corrections = self._session_corrections.get(session_id, [])
+            if corrections:
+                latest = corrections[-1]
+                message = (
+                    f"Разбрано. Активната correction за тази сесия е: {latest}"
+                    if _looks_bulgarian(text)
+                    else f"Understood. Active session correction: {latest}"
+                )
+            else:
+                message = (
+                    "Разбрано. Ако става дума за конкретен service или адрес, кажи ми кое беше грешното и кое е правилното."
+                    if _looks_bulgarian(text)
+                    else "Understood. If this is about a specific service or address, tell me what was wrong and what is correct."
+                )
+            return AgentResponse(
+                status="ok",
+                message=message,
+                data={"planner": "deterministic", "source": "session_feedback"},
+            )
+        return None
+
     def _should_synthesize_tool_response(
         self,
         user_message: str,
@@ -279,8 +564,14 @@ class AgentCore:
                 "show memory files",
                 "memory files",
                 "local memory files",
+                "show raw memory",
+                "print the memory file",
+                "raw memory file",
                 "покажи файловете",
                 "списък с памет",
+                "покажи суровия memory файл",
+                "суровия memory файл",
+                "принтирай memory файла",
             }
         )
         return not explicit_file_request
@@ -307,7 +598,7 @@ class AgentCore:
                 conversation_context=conversation_context,
                 tool_result=tool_response.data or {},
                 response_language=llm_config.get("response_language", "auto"),
-                max_tokens=max(256, int(llm_config.get("planner_max_tokens", 192))),
+                max_tokens=max(256, int(llm_config.get("synthesis_max_tokens", 1024))),
                 temperature=0.2,
                 think=bool(llm_config.get("planner_think", False)),
                 system_prompt=_llm_system_prompt(llm_config, "answer"),
@@ -315,8 +606,8 @@ class AgentCore:
             if answer:
                 return AgentResponse(status="ok", message=answer, data={"planner": "llm"})
         except (PlannerError, OSError, RuntimeError):
-            return tool_response
-        return tool_response
+            return _safe_tool_synthesis_fallback(tool_response, user_message)
+        return _safe_tool_synthesis_fallback(tool_response, user_message)
 
     def _synthesize_memory_recall_response(
         self,
@@ -343,7 +634,7 @@ class AgentCore:
                     "data": memory_answer.data or {},
                 },
                 response_language=llm_config.get("response_language", "auto"),
-                max_tokens=max(384, int(llm_config.get("planner_max_tokens", 192))),
+                max_tokens=max(384, int(llm_config.get("synthesis_max_tokens", 1024))),
                 temperature=0.25,
                 think=bool(llm_config.get("planner_think", False)),
                 system_prompt=_llm_system_prompt(llm_config, "answer"),
@@ -381,6 +672,7 @@ class AgentCore:
                 current_time=now.isoformat(timespec="seconds"),
                 timezone_name=now.tzname() or "",
                 max_tokens=max(512, int(llm_config.get("planner_max_tokens", 192))),
+                repair_max_tokens=int(llm_config.get("repair_max_tokens", 256)),
                 temperature=float(llm_config.get("planner_temperature", 0.0)),
                 think=bool(llm_config.get("planner_think", False)),
                 system_prompt=_llm_system_prompt(llm_config, "planner"),
@@ -464,7 +756,26 @@ class AgentCore:
             and not _chat_history_allowed_to_cloud(self.runtime_context.config)
         ):
             return ""
-        return self.chat_history.format_recent(session_id, limit=24, max_chars=12000)
+        llm_config = self.runtime_context.config.get("llm", {})
+        return self.chat_history.format_recent(
+            session_id,
+            limit=int(llm_config.get("chat_history_turns", 24)),
+            max_chars=int(llm_config.get("chat_history_char_limit", 12000)),
+        )
+
+    def _planner_conversation_context(self, session_id: str) -> str:
+        if (
+            self.permission_context.cloud_model_active
+            and not self._cloud_context_approved
+            and not _chat_history_allowed_to_cloud(self.runtime_context.config)
+        ):
+            return ""
+        llm_config = self.runtime_context.config.get("llm", {})
+        return self.chat_history.format_recent(
+            session_id,
+            limit=int(llm_config.get("planner_history_turns", 4)),
+            max_chars=int(llm_config.get("planner_history_char_limit", 3000)),
+        )
 
     def _record_chat_turn(self, session_id: str, user_message: str, response: AgentResponse) -> None:
         try:
@@ -474,6 +785,21 @@ class AgentCore:
             return
 
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
+        safety = self.safety_policy.evaluate(request, self.runtime_context)
+        if not safety.allowed:
+            self.audit_store.record_tool_call(
+                tool=request.tool,
+                risk=None if safety.risk is None else int(safety.risk),
+                args=request.args,
+                decision=safety.reason,
+                result_status="blocked",
+            )
+            return AgentResponse(
+                status="denied",
+                message=safety.reason,
+                data={"missing_permissions": []},
+            )
+
         auto_approved = _is_auto_approved_terminal_request(request, self.runtime_context.config)
         decision = self.permission_engine.evaluate(
             request,
@@ -560,6 +886,20 @@ class AgentCore:
             args=dict(approval["args"]),
             reason=str(approval.get("request_reason") or "Approved by user."),
         )
+        safety = self.safety_policy.evaluate(request, self.runtime_context)
+        if not safety.allowed:
+            self.audit_store.record_tool_call(
+                tool=request.tool,
+                risk=None if safety.risk is None else int(safety.risk),
+                args=request.args,
+                decision=f"approved_blocked:{safety.reason}",
+                result_status="blocked",
+            )
+            return AgentResponse(
+                status="denied",
+                message=safety.reason,
+                data={"approval_id": approval_id, "missing_permissions": []},
+            )
         decision = self.permission_engine.evaluate(
             request,
             self._permission_context(),
@@ -595,6 +935,14 @@ class AgentCore:
             "executed" if response.status == "ok" else "failed",
         )
         original_message = _original_message_from_reason(str(approval.get("request_reason") or ""))
+        continuation = self._pending_continuations.pop(approval_id, None)
+        if response.status == "ok" and continuation is not None:
+            return self._execute_continuation_steps(
+                continuation.original_message,
+                first_request=request,
+                first_response=response,
+                steps=continuation.steps,
+            )
         if (
             response.status == "ok"
             and original_message
@@ -605,6 +953,8 @@ class AgentCore:
                 response,
                 allow_cloud_memory=True,
             )
+        if response.status == "ok" and original_message:
+            return self._shape_tool_response(original_message, request, response)
         return response
 
     def _permission_context(self) -> PermissionContext:
@@ -699,6 +1049,196 @@ def _route_without_llm(text: str) -> ToolRequest | None:
                 reason="User requested local memory files.",
             )
     return None
+
+
+def _multi_step_plan_from_text(text: str) -> tuple[ToolRequest | UnsupportedAction, ...] | None:
+    if not _looks_multi_step_request(text):
+        return None
+    steps = _split_multi_step_text(text)
+    if len(steps) < 2:
+        return None
+    planned: list[ToolRequest | UnsupportedAction] = []
+    last_created_path = ""
+    for step in steps:
+        planned_step, created_path = _plan_single_step(step, last_created_path=last_created_path)
+        if planned_step is None:
+            continue
+        planned.append(planned_step)
+        if created_path:
+            last_created_path = created_path
+    if len(planned) < 2:
+        return None
+    return tuple(planned)
+
+
+def _looks_multi_step_request(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(marker in normalized for marker in {"after that", "then", "след това", "после"})
+
+
+def _split_multi_step_text(text: str) -> list[str]:
+    rough = [
+        part.strip(" ,.;")
+        for part in re.split(r"\b(?:after\s+that|then|след\s+това|после)\b", text, flags=re.IGNORECASE)
+        if part.strip(" ,.;")
+    ]
+    steps: list[str] = []
+    for part in rough:
+        subparts = re.split(
+            r"\s+(?:and|и)\s+(?=(?:execute|run|open|cd|nano|vim|vi|emacs|изпълни|пусни|отвори|влез)\b)",
+            part,
+            flags=re.IGNORECASE,
+        )
+        steps.extend(subpart.strip(" ,.;") for subpart in subparts if subpart.strip(" ,.;"))
+    return steps
+
+
+def _plan_single_step(
+    step: str,
+    *,
+    last_created_path: str,
+) -> tuple[ToolRequest | UnsupportedAction | None, str]:
+    interactive = _interactive_action_from_text(step)
+    if interactive is not None:
+        return interactive, ""
+    mkdir = re.search(r"\bmkdir(?:\s+-p)?\s+(?P<path>[A-Za-z0-9_.\-/]+)", step, flags=re.IGNORECASE)
+    if mkdir:
+        path = mkdir.group("path").strip(" ,.;\"'")
+        command = ["mkdir", path]
+        if "-p" in mkdir.group(0).split():
+            command = ["mkdir", "-p", path]
+        return (
+            ToolRequest(
+                tool="terminal.run",
+                args={"command": command},
+                reason="User asked to create a workspace folder as part of a multi-step request.",
+            ),
+            path,
+        )
+    workspace_path = _workspace_path_from_step(step, last_created_path=last_created_path)
+    if workspace_path:
+        return (
+            ToolRequest(
+                tool="workspace.switch",
+                args={"path": workspace_path},
+                reason="User asked to move into a folder as part of a multi-step request.",
+            ),
+            "",
+        )
+    return None, ""
+
+
+def _workspace_path_from_step(step: str, *, last_created_path: str) -> str:
+    normalized = _normalize_for_match(step)
+    if any(phrase in normalized for phrase in {"open the folder", "open this folder", "отвори папката", "отвори тази папка"}):
+        return last_created_path
+    match = re.search(
+        r"^(?:open|cd|go\s+into|enter|switch\s+to|отвори|влез\s+в|иди\s+в)\s+(?P<path>.+)$",
+        step.strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        terminal_cd = re.search(
+            r"(?:execute|run|exeute|изпълни|пусни)\s+cd\s+(?P<path>.+)$",
+            step.strip(),
+            flags=re.IGNORECASE,
+        )
+        if terminal_cd:
+            match = terminal_cd
+    if not match:
+        return ""
+    path = str(match.group("path")).strip(" ,.;\"'")
+    if path.casefold() in {"the folder", "this folder", "folder", "папката", "тази папка"}:
+        return last_created_path
+    path = re.sub(r"^(?:folder|directory|папка|директория)\s+", "", path, flags=re.IGNORECASE).strip()
+    if re.search(r"https?://|(?:[a-z0-9-]+\.)+[a-z]{2,}", path, flags=re.IGNORECASE):
+        return ""
+    return path
+
+
+def _multi_step_approval_message(
+    user_message: str,
+    first_request: ToolRequest,
+    continuations: list[ToolRequest | UnsupportedAction],
+) -> str:
+    plan = "; ".join(_continuation_plan_for_user(continuations))
+    command = first_request.args.get("command")
+    command_text = " ".join(str(part) for part in command) if isinstance(command, list) else first_request.tool
+    if _looks_bulgarian(user_message):
+        return f"Това започва с `{command_text}` и иска approval. След одобрение ще продължа с: {plan}."
+    return f"This starts with `{command_text}` and needs approval. After approval I will continue with: {plan}."
+
+
+def _continuation_plan_for_user(
+    steps: list[ToolRequest | UnsupportedAction] | tuple[ToolRequest | UnsupportedAction, ...],
+) -> list[str]:
+    plan: list[str] = []
+    for step in steps:
+        if isinstance(step, UnsupportedAction):
+            if step.kind == "interactive_editor":
+                plan.append(f"skip interactive editor for {step.target}")
+            else:
+                plan.append(f"unsupported action: {step.kind}")
+        elif step.tool == "workspace.switch":
+            plan.append(f"switch workspace to {step.args.get('path')}")
+        else:
+            plan.append(step.tool)
+    return plan
+
+
+def _interactive_terminal_response(text: str) -> AgentResponse | None:
+    action = _interactive_action_from_text(text)
+    if action is None:
+        return None
+    return _unsupported_action_response(text, action)
+
+
+def _interactive_action_from_text(text: str) -> UnsupportedAction | None:
+    match = re.search(
+        r"\b(?:execute|run|exeute|start|open|изпълни|пусни|стартирай)?\s*(?P<editor>nano|vim|vi|emacs)\s+(?P<target>[^\s;&|]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return UnsupportedAction(kind="interactive_editor", target=match.group("target").strip(" ,.;\"'"))
+
+
+def _unsupported_action_response(user_message: str, action: UnsupportedAction) -> AgentResponse:
+    if action.kind == "interactive_editor":
+        if _looks_bulgarian(user_message):
+            message = (
+                f"Не мога да стартирам interactive editor като nano/vim в dashboard terminal. "
+                f"Мога да създам или редактирам `{action.target}` през `files.write`, след approval."
+            )
+        else:
+            message = (
+                f"I cannot run interactive editors like nano/vim in the dashboard terminal. "
+                f"I can create or edit `{action.target}` through `files.write` after approval."
+            )
+        return AgentResponse(
+            status="ok",
+            message=message,
+            data={"planner": "deterministic", "unsupported": action.kind, "target": action.target},
+        )
+    message = (
+        "Не мога да изпълня това действие от dashboard-а, но мога да сменя workspace, да пускам allowlisted команди и да работя с файлове през tools."
+        if _looks_bulgarian(user_message)
+        else "I cannot execute that action from the dashboard, but I can switch workspace, run allowlisted commands, and work with files through tools."
+    )
+    return AgentResponse(status="ok", message=message, data={"planner": "deterministic", "unsupported": action.kind})
+
+
+def _tool_selection_failure_message(text: str) -> str:
+    if _looks_bulgarian(text):
+        return (
+            "Не успях да избера надежден инструмент за това. Мога да сменя текущия workspace към папка, "
+            "да пускам allowlisted terminal команди там и да създавам/редактирам файлове през file tools с approval."
+        )
+    return (
+        "I could not choose a reliable tool for that. I can switch the current workspace to a folder, "
+        "run allowlisted terminal commands there, and create/edit files through file tools with approval."
+    )
 
 
 def _approval_action_from_text(text: str) -> tuple[str, int | None] | None:
@@ -1320,6 +1860,10 @@ def _is_auto_approved_terminal_request(request: ToolRequest, config: dict[str, A
     if not isinstance(raw_command, list) or not raw_command:
         return False
     command = tuple(str(part) for part in raw_command if str(part))
+    try:
+        TerminalPolicy.from_config(config).validate(list(command))
+    except PermissionError:
+        return False
     allowed = {
         tuple(str(part) for part in item)
         for item in terminal.get("allowed_commands", [])
@@ -1519,6 +2063,39 @@ def _answer_memory_recall_question(
     ranked = _rank_memory_entries(recall_text, entries)
     if not explicit_recall and not _is_likely_memory_lookup_question(recall_text, ranked):
         return None
+
+    requested_service = _service_from_text(recall_text)
+    service_ranked: list[MemoryEntry] = []
+    if requested_service is not None:
+        service_ranked = [
+            entry for entry in ranked if _memory_entry_matches_service(entry, requested_service)
+        ]
+        if not service_ranked and explicit_recall:
+            return AgentResponse(
+                status="ok",
+                message=(
+                    f"Не намирам достатъчно сигурен запис за {requested_service} в локалната memory. Няма да връщам адрес за друг service."
+                    if bulgarian
+                    else f"I do not find a confident local memory entry for {requested_service}. I will not return another service's address."
+                ),
+                data={"planner": "deterministic"},
+            )
+        if service_ranked and (_asks_for_address_or_url(recall_text) or _asks_for_port(recall_text)):
+            service_answer = _format_service_access_answer(
+                requested_service,
+                service_ranked,
+                entries,
+                recall_text,
+                bulgarian=bulgarian,
+            )
+            if service_answer is not None:
+                return AgentResponse(
+                    status="ok",
+                    message=service_answer,
+                    data={"planner": "deterministic"},
+                )
+        if service_ranked:
+            ranked = service_ranked
 
     if _is_broad_memory_recall_question(recall_text):
         matches = _broad_memory_matches(entries)
@@ -1908,6 +2485,153 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-zа-я0-9]+", text, flags=re.IGNORECASE)
 
 
+SERVICE_ALIASES: dict[str, tuple[str, ...]] = {
+    "Immich": ("immich", "имич", "иммич"),
+    "Plex": ("plex", "плекс"),
+    "Proxmox": ("proxmox", "проксмокс", "proxm"),
+    "Grafana": ("grafana", "графана"),
+    "AdGuard": ("adguard", "адгард", "адгуард"),
+    "Paperless": ("paperless", "пейпърлес"),
+    "Homepage": ("homepage", "хоумпейдж"),
+}
+
+
+def _entity_correction_from_text(text: str) -> tuple[str, str] | None:
+    normalized = _normalize_for_match(text)
+    match = re.search(
+        r"\b(?P<wanted>immich|имич|иммич|plex|плекс|proxmox|проксмокс|grafana|графана|adguard|адгард|адгуард)"
+        r"\b.{0,40}(?:\b(?:not|не)\b|!=).{0,40}\b"
+        r"(?P<wrong>immich|имич|иммич|plex|плекс|proxmox|проксмокс|grafana|графана|adguard|адгард|адгуард)\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        wanted_label = _service_from_text(match.group("wanted"))
+        wrong_label = _service_from_text(match.group("wrong"))
+        if wanted_label and wrong_label and wanted_label != wrong_label:
+            return wanted_label, wrong_label
+    reverse = re.search(
+        r"\b(?:not|не)\b.{0,20}\b"
+        r"(?P<wrong>immich|имич|иммич|plex|плекс|proxmox|проксмокс|grafana|графана|adguard|адгард|адгуард)"
+        r"\b.{0,40}\b"
+        r"(?P<wanted>immich|имич|иммич|plex|плекс|proxmox|проксмокс|grafana|графана|adguard|адгард|адгуард)\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if reverse:
+        wanted_label = _service_from_text(reverse.group("wanted"))
+        wrong_label = _service_from_text(reverse.group("wrong"))
+        if wanted_label and wrong_label and wanted_label != wrong_label:
+            return wanted_label, wrong_label
+    return None
+
+
+def _is_do_not_repeat_error_feedback(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "да не се повтаря",
+            "не повтаряй",
+            "не прави пак",
+            "dont repeat",
+            "don't repeat",
+            "do not repeat",
+            "dont make this mistake",
+            "don't make this mistake",
+        }
+    )
+
+
+def _service_from_text(text: str) -> str | None:
+    normalized = _normalize_for_match(text)
+    for label, aliases in SERVICE_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            return label
+    return None
+
+
+def _memory_entry_matches_service(entry: MemoryEntry, service: str) -> bool:
+    aliases = SERVICE_ALIASES.get(service, (service.casefold(),))
+    haystack = _normalize_for_match(f"{entry.path} {entry.text}")
+    return any(alias in haystack for alias in aliases)
+
+
+def _format_service_access_answer(
+    service: str,
+    service_matches: list[MemoryEntry],
+    all_entries: list[MemoryEntry],
+    text: str,
+    *,
+    bulgarian: bool,
+) -> str | None:
+    if service == "Proxmox":
+        return _format_proxmox_access_answer(service_matches, bulgarian=bulgarian)
+    urls = _urls_from_entries(service_matches)
+    if urls:
+        if bulgarian:
+            return "\n".join([f"{service} адрес:", *[f"- {url}" for url in urls[:3]]])
+        return "\n".join([f"{service} address:", *[f"- {url}" for url in urls[:3]]])
+    port = _port_from_entries(service_matches)
+    if not port:
+        return None
+    if _asks_for_port(text) and not _asks_for_address_or_url(text):
+        return f"{service} е на порт {port}." if bulgarian else f"{service} is on port {port}."
+    lan_ip, tailscale_ip = _machine_ips_from_entries(all_entries)
+    suffix = "/web" if service == "Plex" else ""
+    if lan_ip or tailscale_ip:
+        if bulgarian:
+            lines = [f"{service} можеш да отвориш така:"]
+            if lan_ip:
+                lines.append(f"- LAN: http://{lan_ip}:{port}{suffix}")
+            if tailscale_ip:
+                lines.append(f"- Tailscale: http://{tailscale_ip}:{port}{suffix}")
+            return "\n".join(lines)
+        lines = [f"You can open {service} here:"]
+        if lan_ip:
+            lines.append(f"- LAN: http://{lan_ip}:{port}{suffix}")
+        if tailscale_ip:
+            lines.append(f"- Tailscale: http://{tailscale_ip}:{port}{suffix}")
+        return "\n".join(lines)
+    if bulgarian:
+        return f"{service} е на порт {port}, но не виждам записан LAN/Tailscale IP в локалната memory."
+    return f"{service} is on port {port}, but I do not see a saved LAN/Tailscale IP in local memory."
+
+
+def _urls_from_entries(entries: list[MemoryEntry]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        for url in re.findall(r"https?://[^\s,)]+", entry.text):
+            cleaned = url.rstrip(" .")
+            if cleaned not in seen:
+                seen.add(cleaned)
+                urls.append(cleaned)
+    return urls
+
+
+def _port_from_entries(entries: list[MemoryEntry]) -> str | None:
+    combined = "\n".join(entry.text for entry in entries)
+    match = re.search(r"\b(?:port|ports|порт)[^0-9]{0,80}([0-9]{2,5})\b", combined, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    for number in re.findall(r"\b([0-9]{2,5})\b", combined):
+        value = int(number)
+        if 1000 <= value <= 65535:
+            return number
+    return None
+
+
+def _machine_ips_from_entries(entries: list[MemoryEntry]) -> tuple[str, str]:
+    combined = "\n".join(entry.text for entry in entries)
+    lan_match = re.search(r"\bLAN IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", combined, flags=re.IGNORECASE)
+    tailscale_match = re.search(r"\bTailscale IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", combined, flags=re.IGNORECASE)
+    return (
+        lan_match.group(1) if lan_match else "",
+        tailscale_match.group(1) if tailscale_match else "",
+    )
+
+
 def _format_memory_recall_answer(matches: list[MemoryEntry], text: str) -> str:
     bulgarian = _looks_bulgarian(text)
     if _is_broad_memory_recall_question(text):
@@ -1916,8 +2640,20 @@ def _format_memory_recall_answer(matches: list[MemoryEntry], text: str) -> str:
     if port_answer and _asks_for_port(text):
         return port_answer
     proxmox_answer = _format_proxmox_access_answer(matches, bulgarian=bulgarian)
-    if proxmox_answer and (_asks_about_proxmox(text) or _asks_for_address_or_url(text) or _asks_about_machine_access(text)):
+    if proxmox_answer and _asks_about_proxmox(text):
         return proxmox_answer
+    machine_answer = _format_machine_access_answer(matches, bulgarian=bulgarian)
+    if machine_answer and (_asks_for_address_or_url(text) or _asks_about_machine_access(text)):
+        return machine_answer
+    if _asks_for_address_or_url(text):
+        paths = sorted({entry.path for entry in matches})
+        if paths:
+            path_text = ", ".join(paths[:3])
+            return (
+                f"Не виждам изрично записан адрес/URL. Намерих свързана memory в: {path_text}."
+                if bulgarian
+                else f"I do not see an explicit address/URL. I found related memory in: {path_text}."
+            )
     facts = [_memory_fact_for_user(entry.text, bulgarian=bulgarian) for entry in matches]
     if len(facts) == 1 and not _is_broad_memory_recall_question(text):
         return facts[0]
@@ -2051,6 +2787,32 @@ def _format_proxmox_access_answer(matches: list[MemoryEntry], *, bulgarian: bool
     return "\n".join(lines)
 
 
+def _format_machine_access_answer(matches: list[MemoryEntry], *, bulgarian: bool) -> str | None:
+    combined = "\n".join(entry.text for entry in matches)
+    url_match = re.search(r"https?://[^\s,)]+", combined)
+    lan_match = re.search(r"\bLAN IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", combined, flags=re.IGNORECASE)
+    tailscale_match = re.search(r"\bTailscale IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", combined, flags=re.IGNORECASE)
+    if not url_match and not lan_match and not tailscale_match:
+        return None
+    if bulgarian:
+        lines = []
+        if url_match:
+            lines.append(f"URL: {url_match.group(0)}")
+        if lan_match:
+            lines.append(f"LAN IP: {lan_match.group(1)}")
+        if tailscale_match:
+            lines.append(f"Tailscale IP: {tailscale_match.group(1)}")
+        return "\n".join(lines)
+    lines = []
+    if url_match:
+        lines.append(f"URL: {url_match.group(0)}")
+    if lan_match:
+        lines.append(f"LAN IP: {lan_match.group(1)}")
+    if tailscale_match:
+        lines.append(f"Tailscale IP: {tailscale_match.group(1)}")
+    return "\n".join(lines)
+
+
 def _memory_fact_for_user(line: str, *, bulgarian: bool) -> str:
     value = line.strip().strip(" .")
     if bulgarian:
@@ -2151,7 +2913,21 @@ def _asks_for_address_or_url(text: str) -> bool:
     normalized = _normalize_for_match(text)
     return any(
         marker in normalized
-        for marker in {"адрес", "address", "url", "линк", "link", "ip", "айпи", "ай пи", "ай пито", "https", "http"}
+        for marker in {
+            "адрес",
+            "address",
+            "url",
+            "линк",
+            "link",
+            "ip",
+            "айпи",
+            "ай пи",
+            "ай пито",
+            "https",
+            "http",
+            "where do i open",
+            "къде",
+        }
     )
 
 
@@ -2662,6 +3438,8 @@ def _extract_name(text: str, patterns: list[str]) -> str | None:
         if not match:
             continue
         name = match.group(1).strip().strip(" .,!?:;\"'")
+        if name.casefold().split(maxsplit=1)[0] in {"asking", "ask", "looking", "trying"}:
+            continue
         if 1 <= len(name) <= 80 and "\n" not in name:
             return name
     return None
@@ -2878,6 +3656,16 @@ def _tool_success_message(request: ToolRequest) -> str:
         return "Long-term memory organized into modular Markdown files."
     if request.tool == "profile.update":
         return "Profile updated."
+    if request.tool == "files.read":
+        return "File read."
+    if request.tool == "files.write":
+        return "File written."
+    if request.tool == "files.delete":
+        return "File deleted."
+    if request.tool == "workspace.switch":
+        return "Workspace switched."
+    if request.tool == "workspace.status":
+        return "Workspace status loaded."
     if request.tool == "browser.scrape_markdown":
         return "Scraped page saved as Markdown."
     if request.tool == "reminders.create":
@@ -2887,6 +3675,86 @@ def _tool_success_message(request: ToolRequest) -> str:
     if request.tool == "calendar.create_event":
         return "Saved to local calendar store. Active reminder notifications are not implemented yet."
     return "Tool executed."
+
+
+def _safe_tool_synthesis_fallback(response: AgentResponse, user_message: str) -> AgentResponse:
+    data = response.data or {}
+    bulgarian = _looks_bulgarian(user_message)
+    path = data.get("path") if isinstance(data, dict) else None
+    if isinstance(path, str) and path:
+        if bulgarian:
+            message = (
+                f"Прочетох {path}, но не успях да го превърна в кратък отговор. "
+                "Няма да изливам целия memory файл в чата."
+            )
+        else:
+            message = (
+                f"I read {path}, but could not turn it into a concise answer. "
+                "I will not dump the whole memory file into chat."
+            )
+        return AgentResponse(
+            status=response.status,
+            message=message,
+            data={"planner": "deterministic", "source": "memory.read", "path": path},
+        )
+    if isinstance(data, dict) and "files" in data:
+        files = data.get("files")
+        count = len(files) if isinstance(files, list) else 0
+        message = (
+            f"Намерих {count} memory файла, но не успях да синтезирам кратък отговор."
+            if bulgarian
+            else f"I found {count} memory files, but could not synthesize a concise answer."
+        )
+        return AgentResponse(
+            status=response.status,
+            message=message,
+            data={"planner": "deterministic", "source": "memory.list", "file_count": count},
+        )
+    return response
+
+
+def _terminal_user_response(user_message: str, request: ToolRequest, data: dict[str, Any]) -> AgentResponse:
+    command = request.args.get("command")
+    command_text = " ".join(str(part) for part in command) if isinstance(command, list) else "command"
+    returncode = int(data.get("returncode") or 0)
+    stdout = str(data.get("stdout") or "").strip()
+    stderr = str(data.get("stderr") or "").strip()
+    output = stdout or stderr
+    if len(output) > 4000:
+        output = output[:4000].rstrip() + "\n[output truncated]"
+    bulgarian = _looks_bulgarian(user_message)
+    if returncode == 0:
+        prefix = f"Изпълних `{command_text}`." if bulgarian else f"Ran `{command_text}`."
+    else:
+        prefix = (
+            f"`{command_text}` приключи с код {returncode}."
+            if bulgarian
+            else f"`{command_text}` exited with code {returncode}."
+        )
+    message = f"{prefix}\n\n{output}" if output else prefix
+    return AgentResponse(
+        status="ok",
+        message=message,
+        data={
+            **data,
+            "tool": "terminal.run",
+            "command": command,
+            "returncode": returncode,
+        },
+    )
+
+
+def _file_read_user_response(user_message: str, data: dict[str, Any]) -> AgentResponse:
+    path = str(data.get("path") or "")
+    content = str(data.get("content") or "")
+    truncated = bool(data.get("truncated", False))
+    suffix = "\n\n[truncated]" if truncated else ""
+    prefix = f"Прочетох `{path}`:" if _looks_bulgarian(user_message) else f"Read `{path}`:"
+    return AgentResponse(
+        status="ok",
+        message=f"{prefix}\n\n{content}{suffix}",
+        data={"tool": "files.read", "path": path, "truncated": truncated},
+    )
 
 
 def _history_text_from_response(response: AgentResponse) -> str:
