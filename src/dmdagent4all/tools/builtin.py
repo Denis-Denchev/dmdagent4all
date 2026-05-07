@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import datetime, time, timedelta, timezone
@@ -22,6 +23,7 @@ from dmdagent4all.workspace import WorkspaceManager
 
 def build_builtin_registry() -> ToolRegistry:
     registry = ToolRegistry(load_builtin_manifests())
+    registry.register_handler("developer.context", _developer_context)
     registry.register_handler("system.list_enabled_tools", _list_enabled_tools)
     registry.register_handler("memory.list", _memory_list)
     registry.register_handler("memory.read", _memory_read)
@@ -288,6 +290,178 @@ def _files_delete(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str
         raise FileNotFoundError(str(resolved))
     resolved.unlink()
     return {"path": str(resolved), "deleted": True, "kind": "file"}
+
+
+def _developer_context(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    raw_workspace = args.get("workspace") or str(manager.current_workspace)
+    workspace = manager.validate_workspace(str(raw_workspace))
+    max_files = _bounded_int(args.get("max_files"), default=160, minimum=20, maximum=500)
+    max_preview_bytes = _bounded_int(
+        args.get("max_preview_bytes"),
+        default=12_000,
+        minimum=1_000,
+        maximum=50_000,
+    )
+
+    files, truncated = _developer_file_tree(workspace, manager, max_files=max_files)
+    focus_files = _developer_focus_files(
+        args.get("focus_paths"),
+        workspace=workspace,
+        manager=manager,
+        max_preview_bytes=max_preview_bytes,
+    )
+    return {
+        "workspace": manager.workspace_info(),
+        "scan_root": str(workspace),
+        "files": files,
+        "file_count": len(files),
+        "truncated": truncated,
+        "focus_files": focus_files,
+        "available_actions": [
+            {
+                "tool": "files.read",
+                "purpose": "Read non-secret files inside allowed workspace roots.",
+            },
+            {
+                "tool": "files.write",
+                "purpose": "Create or overwrite text files after explicit approval.",
+            },
+            {
+                "tool": "terminal.run",
+                "purpose": "Run allowlisted or policy-approved workspace commands after approval when required.",
+            },
+            {
+                "tool": "workspace.switch",
+                "purpose": "Change the active coding workspace after path validation.",
+            },
+        ],
+        "safety": [
+            "Secret files and blocked system paths are excluded.",
+            "File writes and terminal execution remain approval/policy gated.",
+            "Destructive database statements remain blocked by backend policy.",
+        ],
+    }
+
+
+def _developer_file_tree(
+    workspace: Path,
+    manager: WorkspaceManager,
+    *,
+    max_files: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    excluded_dirs = {
+        ".git",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+    }
+    files: list[dict[str, Any]] = []
+    for current_root, dirnames, filenames in os.walk(workspace):
+        root_path = Path(current_root)
+        kept_dirs: list[str] = []
+        for dirname in sorted(dirnames):
+            path = root_path / dirname
+            if dirname in excluded_dirs or manager.is_secret_path(path):
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
+
+        for filename in sorted(filenames):
+            path = root_path / filename
+            if manager.is_secret_path(path):
+                continue
+            if len(files) >= max_files:
+                return files, True
+            try:
+                relative = path.relative_to(workspace).as_posix()
+                size = path.stat().st_size
+            except OSError:
+                continue
+            files.append(
+                {
+                    "path": relative,
+                    "size": size,
+                    "previewable": _looks_previewable_code_file(path),
+                }
+            )
+    return files, False
+
+
+def _developer_focus_files(
+    raw_focus_paths: Any,
+    *,
+    workspace: Path,
+    manager: WorkspaceManager,
+    max_preview_bytes: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_focus_paths, list):
+        return []
+    previews: list[dict[str, Any]] = []
+    for raw_path in raw_focus_paths[:10]:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        resolved = manager.validate_user_path(raw_path, base=workspace)
+        if not resolved.is_file():
+            continue
+        try:
+            relative = resolved.relative_to(workspace).as_posix()
+        except ValueError:
+            relative = str(resolved)
+        if not _looks_previewable_code_file(resolved):
+            previews.append({"path": relative, "previewable": False})
+            continue
+        body = resolved.read_bytes()
+        truncated = len(body) > max_preview_bytes
+        if truncated:
+            body = body[:max_preview_bytes]
+        previews.append(
+            {
+                "path": relative,
+                "previewable": True,
+                "truncated": truncated,
+                "content": redact_text(body.decode("utf-8", errors="replace")),
+            }
+        )
+    return previews
+
+
+def _looks_previewable_code_file(path: Path) -> bool:
+    if path.name in {"Dockerfile", "Makefile", "README", "LICENSE"}:
+        return True
+    return path.suffix.casefold() in {
+        ".css",
+        ".csv",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".jsx",
+        ".md",
+        ".py",
+        ".sh",
+        ".sql",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def _workspace_switch(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:

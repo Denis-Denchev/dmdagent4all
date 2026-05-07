@@ -29,7 +29,8 @@ The agent core:
 
 - receives user messages
 - routes obvious normal chat to normal chat mode
-- routes obvious terminal, file, memory, browser, reminder, and workspace requests before the JSON planner
+- routes obvious terminal, file read/delete, memory, browser, reminder, and workspace requests before the JSON planner
+- lets the planner choose `files.write` for natural code/file edit requests instead of relying on phrase regexes
 - treats `cd <folder>`, `open <folder>`, and "go into folder" as workspace changes, not as stateless shell `cd`
 - handles conservative multi-step requests such as `mkdir test then open the folder` by approving the write step first and continuing only with validated follow-up steps
 - blocks tool execution when emergency stop mode is active
@@ -99,6 +100,18 @@ terminal, file, and workspace tools on the same path base.
 - file reads/deletes outside allowed workspace roots
 - file writes outside allowed workspace roots
 - workspace switches that escape allowed roots, including symlink escapes
+
+## Developer Context Tool
+
+`developer.context` gives the planner safe coding context without granting broad
+filesystem access. It returns the current workspace, a filtered file tree,
+optional previews of explicitly requested non-secret files, and the available
+developer actions (`files.read`, `files.write`, `terminal.run`,
+`workspace.switch`).
+
+It excludes secret files and common generated folders. It does not edit files or
+run commands itself. Code changes still go through `files.write` approval, and
+terminal commands still go through `terminal.run` policy.
 
 ## LLM Provider Layer
 

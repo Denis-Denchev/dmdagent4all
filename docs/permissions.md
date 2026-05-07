@@ -139,6 +139,19 @@ approval request unless explicitly added to the exact allowlist.
 Interactive terminal apps such as `nano`, `vim`, `vi`, and `emacs` are not
 allowed in the dashboard command runner. Use file tools for create/edit flows.
 
+## Developer Tooling
+
+`developer.context` is a read-only coding helper. It can list the validated
+workspace, return a filtered project tree, and preview explicitly requested
+non-secret files so the planner can understand code tasks.
+
+It does not bypass policy:
+
+- `.env` and secret paths stay blocked
+- code edits still use `files.write` and require approval
+- terminal commands still use `terminal.run` and require policy/approval
+- destructive SQL remains blocked before approval
+
 Emergency stop terminates active terminal subprocesses. If a process ignores the
 first terminate signal, the backend force-kills it after a short grace period.
 

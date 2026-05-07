@@ -477,6 +477,15 @@ class AgentCore:
                 else f"Current workspace: {current}"
             )
             return AgentResponse(status="ok", message=message, data={"tool": request.tool, "current_workspace": current})
+        if request.tool == "developer.context":
+            scan_root = str(data.get("scan_root") or "")
+            file_count = int(data.get("file_count") or 0)
+            message = (
+                f"Заредих developer context за {file_count} файла в: {scan_root}"
+                if _looks_bulgarian(user_message)
+                else f"Loaded developer context for {file_count} files in: {scan_root}"
+            )
+            return AgentResponse(status="ok", message=message, data=data)
         return response
 
     def _handle_approval_action_from_text(self, text: str) -> AgentResponse | None:
@@ -556,6 +565,8 @@ class AgentCore:
     ) -> bool:
         if self.planner is None or not hasattr(self.planner, "answer") or response.status != "ok":
             return False
+        if request.tool == "developer.context":
+            return self._can_send_private_context_to_llm()
         if request.tool not in {"memory.list", "memory.read"}:
             return False
         normalized = _normalize_for_match(user_message)
@@ -3709,6 +3720,8 @@ def _approval_message(request: ToolRequest, default: str) -> str:
         return "I can split that long-term memory into modular Markdown files after you approve it."
     if request.tool == "profile.update":
         return "I can update your local profile after you approve it."
+    if request.tool == "files.write":
+        return "I can create or edit that file after you approve it."
     if request.tool == "reminders.create":
         return "I can create that local reminder after you approve it."
     return default
@@ -3740,6 +3753,8 @@ def _tool_success_message(request: ToolRequest) -> str:
         return "Workspace switched."
     if request.tool == "workspace.status":
         return "Workspace status loaded."
+    if request.tool == "developer.context":
+        return "Developer workspace context loaded."
     if request.tool == "browser.scrape_markdown":
         return "Scraped page saved as Markdown."
     if request.tool == "reminders.create":

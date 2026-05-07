@@ -72,6 +72,22 @@ class ToolSafetyPolicy:
             except WorkspaceError as exc:
                 return SafetyDecision.deny(str(exc), risk=RiskLevel.DANGEROUS_SYSTEM)
 
+        if request.tool == "developer.context":
+            try:
+                raw_workspace = request.args.get("workspace")
+                base = (
+                    manager.validate_workspace(raw_workspace)
+                    if isinstance(raw_workspace, str) and raw_workspace.strip()
+                    else manager.current_workspace
+                )
+                focus_paths = request.args.get("focus_paths")
+                if isinstance(focus_paths, list):
+                    for focus_path in focus_paths:
+                        if isinstance(focus_path, str) and focus_path.strip():
+                            manager.validate_user_path(focus_path, base=base)
+            except WorkspaceError as exc:
+                return SafetyDecision.deny(str(exc), risk=RiskLevel.DANGEROUS_SYSTEM)
+
         return SafetyDecision.allow()
 
 

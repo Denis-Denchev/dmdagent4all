@@ -1,11 +1,11 @@
 {
   "name": "files.write",
-  "description": "Create or overwrite a text file inside an allowed workspace root after explicit approval.",
+  "description": "Create or overwrite a text/code file inside an allowed workspace root after explicit approval. Use for natural edit requests such as putting text in README.md, creating test.md with content, or modifying source code.",
   "risk": 4,
   "permissions": [],
   "args_schema": {
     "path": "absolute path inside allowed roots or path relative to current workspace",
-    "content": "text content to write",
+    "content": "full text content to write into the file",
     "overwrite": "true only when replacing an existing file after explicit approval"
   },
   "approval_required": true,

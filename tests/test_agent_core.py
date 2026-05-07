@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dmdagent4all.agent import AgentCore
 from dmdagent4all.agent.planner import PlanResult
+from dmdagent4all.agent.router import ConversationRouter
 from dmdagent4all.audit import AuditStore
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
@@ -1775,6 +1776,152 @@ and this is the knowlage
             self.assertEqual(response.status, "ok")
             self.assertIn(str(target.resolve()), response.message)
             self.assertEqual(config["workspace"]["current_path"], str(target.resolve()))
+
+    def test_llm_file_write_intent_can_place_text_in_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            readme = workspace / "readme.md"
+            readme.write_text("# README\nThis is an empty README file.\n", encoding="utf-8")
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            message = 'in this readme.md place text "Test"'
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="files.write",
+                            args={"path": "readme.md", "content": "Test", "overwrite": True},
+                            reason="The user asked to edit a local README file.",
+                        )
+                    )
+                ),
+                audit=audit,
+                config=config,
+            )
+
+            self.assertIsNone(ConversationRouter().route(message))
+            pending = core.handle_text(message)
+            approval = audit.get_approval(pending.data["approval_id"])
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approval["tool"], "files.write")
+            self.assertEqual(approval["args"]["path"], "readme.md")
+            self.assertEqual(approval["args"]["content"], "Test")
+            self.assertTrue(approval["args"]["overwrite"])
+            self.assertEqual(approved.status, "ok")
+            self.assertEqual(readme.read_text(encoding="utf-8"), "Test")
+
+    def test_llm_file_write_intent_can_create_file_with_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            message = 'run touch test.md and place "12345" inside'
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="files.write",
+                            args={"path": "test.md", "content": "12345", "overwrite": False},
+                            reason="The user asked to create a text file with content.",
+                        )
+                    )
+                ),
+                audit=audit,
+                config=config,
+            )
+
+            self.assertIsNone(ConversationRouter().route(message))
+            pending = core.handle_text(message)
+            approval = audit.get_approval(pending.data["approval_id"])
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approval["tool"], "files.write")
+            self.assertEqual(approval["args"]["path"], "test.md")
+            self.assertEqual(approval["args"]["content"], "12345")
+            self.assertEqual(approved.status, "ok")
+            self.assertEqual((workspace / "test.md").read_text(encoding="utf-8"), "12345")
+
+    def test_developer_context_tool_returns_safe_code_workspace_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "README.md").write_text("# Project\n", encoding="utf-8")
+            (workspace / ".env").write_text("SECRET_TOKEN=abc\n", encoding="utf-8")
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(root, None, config=config)
+
+            response = core.handle_tool_request(
+                ToolRequest(
+                    tool="developer.context",
+                    args={"focus_paths": ["README.md"], "max_files": 50},
+                )
+            )
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(response.data["scan_root"], str(workspace.resolve()))
+            self.assertIn("README.md", {item["path"] for item in response.data["files"]})
+            self.assertNotIn(".env", {item["path"] for item in response.data["files"]})
+            self.assertEqual(response.data["focus_files"][0]["path"], "README.md")
+            self.assertIn("files.write", {item["tool"] for item in response.data["available_actions"]})
+            self.assertIn("terminal.run", {item["tool"] for item in response.data["available_actions"]})
+
+    def test_developer_context_blocks_secret_focus_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / ".env").write_text("SECRET_TOKEN=abc\n", encoding="utf-8")
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(root, None, config=config)
+
+            response = core.handle_tool_request(
+                ToolRequest(tool="developer.context", args={"focus_paths": [".env"]})
+            )
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("secret", response.message.lower())
 
     def test_multi_step_mkdir_then_open_folder_continues_after_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

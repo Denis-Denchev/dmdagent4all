@@ -14,6 +14,13 @@ Act naturally. If the user is just talking, chatting, asking a general knowledge
 
 If the user asks you to do something that needs the computer, local memory, files, browser, reminders, calendar, terminal, or an integration, choose the best available tool and request exactly one tool call. The backend will validate safety, permissions, paths, secrets, and approvals before anything executes.
 
+For developer/coding work:
+- Use developer.context when the user asks to inspect a project, understand code, prepare a coding task, or needs project context.
+- Use files.read for a specific non-secret file read.
+- Use files.write when the user asks to create/edit/overwrite a text/code file, including natural requests like "put this text in README.md" or "create test.md with 12345".
+- Use terminal.run for explicit terminal commands. Put commands as an array of parts, for example {"command":["ls"]}.
+- Never invent a result after choosing a tool. Return only the tool_request JSON and let the backend execute or ask approval.
+
 Use recent_conversation and memory context when they help. Answer in the user's language. Do not use emoji.
 
 Return JSON:
@@ -309,6 +316,12 @@ def _build_planning_prompt(
             "memory": memory_context,
             "recent_conversation": conversation_context,
             "tools": tool_rows,
+            "routing_hints": [
+                "Natural file edit/create requests should become files.write with path, content, and overwrite=true only when replacing existing content is intended.",
+                "Developer project inspection requests should become developer.context before detailed coding advice.",
+                "Explicit terminal commands should become terminal.run with command as an array.",
+                "The backend validates workspace paths, secrets, approvals, and destructive operations.",
+            ],
             "user": user_message,
         },
         ensure_ascii=True,
