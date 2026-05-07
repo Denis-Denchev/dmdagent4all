@@ -84,6 +84,12 @@ const tourSteps: TourStep[] = [
     body: 'This is the main control surface. Ask the agent to plan, scrape, use tools, remember facts, or run approved local actions.',
   },
   {
+    id: 'tour-emergency',
+    view: 'chat',
+    title: 'Emergency Stop',
+    body: 'Use this when a command or tool action must stop immediately. It terminates active terminal processes, cancels pending approvals, and blocks further tool execution until you reset emergency mode.',
+  },
+  {
     id: 'tour-approvals',
     view: 'chat',
     title: 'Approvals in context',
@@ -739,7 +745,7 @@ export function App() {
                 Reset Emergency
               </button>
             ) : null}
-            <button className="button button-danger" type="button" onClick={() => void emergencyStop()}>
+            <button className="button button-danger" type="button" onClick={() => void emergencyStop()} data-tour="tour-emergency">
               Emergency Stop
             </button>
             <button className="button button-secondary" type="button" onClick={() => setTourOpen(true)}>
@@ -1305,6 +1311,10 @@ export function App() {
                 <article className="guide-card">
                   <strong>Safe approvals</strong>
                   <p>Approval cards show the tool, risk, and arguments. Approve only when the action matches your intent.</p>
+                </article>
+                <article className="guide-card">
+                  <strong>Emergency Stop</strong>
+                  <p>Press Emergency Stop when a running command or tool action must be interrupted immediately. The backend stops active terminal processes, cancels pending approvals, blocks new tool execution, and stays locked until Reset Emergency is pressed.</p>
                 </article>
                 <article className="guide-card">
                   <strong>Configuration</strong>

@@ -17,7 +17,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends bash git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
@@ -26,8 +26,9 @@ COPY config ./config
 COPY scripts/docker-entrypoint.sh /usr/local/bin/dmdagent-docker-entrypoint
 COPY --from=dashboard /app/frontend/dist ./frontend/dist
 
-RUN pip install --no-cache-dir . \
-    && chmod +x /usr/local/bin/dmdagent-docker-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/dmdagent-docker-entrypoint \
+    && chmod +x /usr/local/bin/dmdagent-docker-entrypoint \
+    && pip install --no-cache-dir .
 
 EXPOSE 8765
 
