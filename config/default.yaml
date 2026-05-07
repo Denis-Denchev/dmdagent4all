@@ -54,6 +54,12 @@ permissions:
   granted: []
   approval_required_at_risk: 3
 
+runtime:
+  emergency_stop:
+    active: false
+    triggered_at: ""
+    reason: ""
+
 setup:
   completed: false
   agent_name: DMD Agent

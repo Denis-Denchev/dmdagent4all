@@ -101,6 +101,7 @@ Read the security docs before changing these rules:
 - [THREAT_MODEL.md](THREAT_MODEL.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/permissions.md](docs/permissions.md)
+- [docs/product-runtime.md](docs/product-runtime.md)
 - [docs/connectors.md](docs/connectors.md)
 
 ## Current Implementation Status
@@ -204,6 +205,78 @@ Partially implemented or stubbed:
 └── tests/                              # Unit tests
 ```
 
+## Beginner One-Command Install
+
+Recommended for non-technical users: Docker mode. It installs the app stack,
+dashboard, backend, Ollama service, and a small default local model.
+
+macOS / Linux with Docker:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash -s -- --docker
+```
+
+Windows PowerShell with Docker:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+Docker mode uses these containers:
+
+- `dmdagent` for backend + built dashboard
+- `ollama` for the local model runtime
+
+Persistent data is stored in Docker volumes. The host folder `./workspace` is
+mounted into the container as the safe working folder. Do not mount your whole
+home directory.
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash
+cd dmdagent4all
+./start web
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1 | iex"
+cd dmdagent4all
+.\start.ps1 web
+```
+
+The bootstrap command clones the GitHub repo into the current folder, creates a
+local `.venv`, installs Python package dependencies, initializes local app data,
+runs the first-time wizard, and installs frontend packages when `npm` is
+available.
+
+System runtimes are still required:
+
+- Git to download the repo
+- Python 3.11+
+- Node.js/npm for the dashboard
+- Ollama for local models, unless using an API provider
+
+If Node.js is not installed, terminal chat still works:
+
+```bash
+./start session
+```
+
+On Windows:
+
+```powershell
+.\start.ps1 session
+```
+
 ## Install For Local Development
 
 ```bash
@@ -242,6 +315,13 @@ start session
 ```
 
 Without the shortcut, use `./start session`.
+
+On Windows, use PowerShell from the project folder:
+
+```powershell
+.\start.ps1 session
+.\start.ps1 web
+```
 
 ## Running Locally
 

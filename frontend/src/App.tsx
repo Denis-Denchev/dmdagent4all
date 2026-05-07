@@ -8,6 +8,7 @@ import {
   type ConnectorStatus,
   type DeepSeekStatus,
   type DoctorResponse,
+  type EmergencyStatus,
   type MemoryFile,
   type ModelMode,
   type OpenAIStatus,
@@ -184,6 +185,7 @@ export function App() {
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
   const [doctor, setDoctor] = useState<DoctorResponse | null>(null)
+  const [emergency, setEmergency] = useState<EmergencyStatus | null>(null)
   const [memoryFiles, setMemoryFiles] = useState<string[]>([])
   const [selectedMemory, setSelectedMemory] = useState<MemoryFile | null>(null)
   const [memoryDraft, setMemoryDraft] = useState('')
@@ -305,6 +307,7 @@ export function App() {
       approvalsResult,
       auditResult,
       doctorResult,
+      emergencyResult,
       configurationResult,
       memoryResult,
       workspaceFilesResult,
@@ -321,6 +324,7 @@ export function App() {
       api.approvals(),
       api.audit(),
       api.doctor(),
+      api.emergency(),
       api.configuration(),
       api.memory(),
       api.workspaceFiles(),
@@ -337,6 +341,7 @@ export function App() {
     setApprovals(approvalsResult)
     setAudit(auditResult)
     setDoctor(doctorResult)
+    setEmergency(emergencyResult)
     setConfiguration(configurationResult)
     setMemoryFiles(memoryResult.files)
     setWorkspaceFiles(workspaceFilesResult)
@@ -602,6 +607,20 @@ export function App() {
     await runAction(() => api.resetOpenAIUsage(), 'OpenAI local usage counters reset.')
   }
 
+  async function emergencyStop() {
+    const response = await runAgentAction(() => api.emergencyStop(), { focusChat: true })
+    if (response?.status === 'ok') {
+      setNotice('Emergency stop active. Tool execution is blocked until reset.')
+    }
+  }
+
+  async function emergencyReset() {
+    const response = await runAgentAction(() => api.emergencyReset(), { focusChat: true })
+    if (response?.status === 'ok') {
+      setNotice('Emergency stop reset.')
+    }
+  }
+
   async function loadDeepSeekKey() {
     const key = deepseekKey.trim()
     if (!key) return
@@ -715,6 +734,14 @@ export function App() {
             <h1>{activeLabel}</h1>
           </div>
           <div className="topbar-actions">
+            {emergency?.active ? (
+              <button className="button" type="button" onClick={() => void emergencyReset()}>
+                Reset Emergency
+              </button>
+            ) : null}
+            <button className="button button-danger" type="button" onClick={() => void emergencyStop()}>
+              Emergency Stop
+            </button>
             <button className="button button-secondary" type="button" onClick={() => setTourOpen(true)}>
               Start Tour
             </button>
@@ -725,6 +752,11 @@ export function App() {
         </header>
 
         {notice ? <div className="notice">{notice}</div> : null}
+        {emergency?.active ? (
+          <div className="notice notice-danger">
+            Emergency stop is active. Tool execution is blocked. Active terminal processes: {emergency.active_terminal_processes.length}.
+          </div>
+        ) : null}
 
         {activeView === 'chat' ? (
           <section className="chat-workspace" data-tour="tour-chat">

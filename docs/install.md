@@ -4,6 +4,82 @@ All install steps and terminal output are English by default.
 
 ## Local Development Install
 
+For a beginner-friendly Git install, run one command from the folder where the
+project should be downloaded.
+
+Recommended Docker mode for normal users:
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash -s -- --docker
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+This starts Docker Compose with:
+
+- DMD Agent backend and built dashboard in one container
+- Ollama in a second container
+- persistent app data in Docker volumes
+- `./workspace` mounted as the only normal working folder
+- default model `qwen3:4b`, pulled on first start
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash
+cd dmdagent4all
+./start web
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1 | iex"
+cd dmdagent4all
+.\start.ps1 web
+```
+
+The bootstrap script clones the repo, creates `.venv`, installs Python package
+dependencies, initializes local app data, runs the first-time wizard, and runs
+`npm install` for the dashboard when Node.js/npm is available.
+
+Required system runtimes:
+
+- Git
+- Python 3.11+
+- Node.js/npm for the dashboard
+- Ollama for local models, unless an API provider is selected
+
+Docker mode only requires Git and Docker Desktop / Docker Engine. The app
+containers provide Python, Node-built dashboard assets, backend dependencies,
+Ollama, and the default model pull.
+
+If Node.js is not installed, terminal chat still works:
+
+```bash
+./start session
+```
+
+On Windows:
+
+```powershell
+.\start.ps1 session
+```
+
+## Manual Local Development Install
+
 ```bash
 git clone https://github.com/Denis-Denchev/dmdagent4all.git
 cd dmdagent4all
@@ -79,16 +155,34 @@ Terminal chat only:
 start session
 ```
 
+On Windows PowerShell:
+
+```powershell
+.\start.ps1 session
+```
+
 Ask once:
 
 ```bash
 start ask "What can you do?"
 ```
 
+On Windows PowerShell:
+
+```powershell
+.\start.ps1 ask "What can you do?"
+```
+
 Start API and dashboard together:
 
 ```bash
 start web
+```
+
+On Windows PowerShell:
+
+```powershell
+.\start.ps1 web
 ```
 
 Stop both with `Ctrl+C`.

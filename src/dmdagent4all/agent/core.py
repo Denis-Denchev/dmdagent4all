@@ -14,7 +14,7 @@ from dmdagent4all.agent.router import ConversationRouter
 from dmdagent4all.config import save_config
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
-from dmdagent4all.sandbox import TerminalPolicy
+from dmdagent4all.sandbox import TerminalPolicy, emergency_stop_terminal_processes
 from dmdagent4all.security.policy import ToolSafetyPolicy
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.registry import ToolExecutionError, ToolRegistry
@@ -86,6 +86,9 @@ class AgentCore:
                     reason="User requested enabled tools.",
                 )
             )
+        emergency_response = self._handle_emergency_text(stripped)
+        if emergency_response is not None:
+            return emergency_response
         approval_action = self._handle_approval_action_from_text(stripped)
         if approval_action is not None:
             return approval_action
@@ -785,6 +788,17 @@ class AgentCore:
             return
 
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
+        if _emergency_stop_active(self.runtime_context.config) and request.tool not in {
+            "system.list_enabled_tools",
+            "workspace.status",
+        }:
+            return AgentResponse(
+                status="denied",
+                message=(
+                    "Emergency stop is active. Tool execution is blocked until you reset emergency mode."
+                ),
+                data={"missing_permissions": [], "emergency_stop": True},
+            )
         safety = self.safety_policy.evaluate(request, self.runtime_context)
         if not safety.allowed:
             self.audit_store.record_tool_call(
@@ -867,6 +881,45 @@ class AgentCore:
             risk=None if decision.risk is None else int(decision.risk),
         )
 
+    def _handle_emergency_text(self, text: str) -> AgentResponse | None:
+        normalized = _normalize_for_match(text)
+        if any(
+            marker in normalized
+            for marker in {
+                "emergency stop",
+                "panic stop",
+                "stop everything",
+                "abort everything",
+                "спешен стоп",
+                "авариен стоп",
+                "спри всичко",
+                "прекрати всичко",
+            }
+        ):
+            result = emergency_stop_terminal_processes()
+            _set_emergency_stop(self.runtime_context.config, active=True, reason=text)
+            if self.runtime_context.config_path is not None:
+                save_config(self.runtime_context.config, self.runtime_context.config_path)
+            return AgentResponse(
+                status="ok",
+                message=(
+                    "Emergency stop is active. I stopped active terminal processes and blocked further tool execution until reset."
+                    if not _looks_bulgarian(text)
+                    else "Emergency stop е активен. Спрях активните terminal процеси и блокирах tool execution до reset."
+                ),
+                data={"emergency_stop": True, "terminal": result},
+            )
+        if normalized in {"reset emergency", "clear emergency", "emergency reset", "махни emergency stop", "reset emergency stop"}:
+            _set_emergency_stop(self.runtime_context.config, active=False, reason="")
+            if self.runtime_context.config_path is not None:
+                save_config(self.runtime_context.config, self.runtime_context.config_path)
+            return AgentResponse(
+                status="ok",
+                message="Emergency stop reset. Tool execution can continue through normal policy and approvals.",
+                data={"emergency_stop": False},
+            )
+        return None
+
     def approve_and_execute(self, approval_id: int) -> AgentResponse:
         approval = self.audit_store.get_approval(approval_id)
         if approval is None:
@@ -886,6 +939,12 @@ class AgentCore:
             args=dict(approval["args"]),
             reason=str(approval.get("request_reason") or "Approved by user."),
         )
+        if _emergency_stop_active(self.runtime_context.config):
+            return AgentResponse(
+                status="denied",
+                message="Emergency stop is active. Approval execution is blocked until you reset emergency mode.",
+                data={"approval_id": approval_id, "missing_permissions": [], "emergency_stop": True},
+            )
         safety = self.safety_policy.evaluate(request, self.runtime_context)
         if not safety.allowed:
             self.audit_store.record_tool_call(
@@ -1003,6 +1062,21 @@ class AgentCore:
             )
         )
         return AgentResponse(status="ok", message=_tool_success_message(request), data=result)
+
+
+def _emergency_stop_active(config: dict[str, Any]) -> bool:
+    runtime = config.get("runtime", {})
+    if not isinstance(runtime, dict):
+        return False
+    emergency = runtime.get("emergency_stop", {})
+    return bool(isinstance(emergency, dict) and emergency.get("active") is True)
+
+
+def _set_emergency_stop(config: dict[str, Any], *, active: bool, reason: str) -> None:
+    emergency = config.setdefault("runtime", {}).setdefault("emergency_stop", {})
+    emergency["active"] = bool(active)
+    emergency["triggered_at"] = datetime.now().astimezone().isoformat(timespec="seconds") if active else ""
+    emergency["reason"] = reason.strip()[:500] if active else ""
 
 
 def _route_without_llm(text: str) -> ToolRequest | None:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +36,10 @@ BLOCKED_ARG_FRAGMENTS = (
     "/Library",
     "/System",
 )
+
+
+_ACTIVE_PROCESSES: dict[str, subprocess.Popen[str]] = {}
+_ACTIVE_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -119,20 +126,71 @@ def run_workspace_command(
     workspace = workspace.expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     run_cwd = _resolve_cwd(workspace, cwd, policy)
-    completed = subprocess.run(
+    command_id = uuid.uuid4().hex
+    process = subprocess.Popen(
         command,
         cwd=run_cwd,
         text=True,
-        capture_output=True,
-        timeout=policy.timeout_seconds,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROCESSES[command_id] = process
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=policy.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            stderr = f"{stderr}\nCommand timed out after {policy.timeout_seconds} seconds.".strip()
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROCESSES.pop(command_id, None)
     return {
+        "command_id": command_id,
         "command": command,
         "cwd": str(run_cwd),
-        "returncode": completed.returncode,
-        "stdout": _limit_output(completed.stdout, policy.max_output_chars),
-        "stderr": _limit_output(completed.stderr, policy.max_output_chars),
+        "returncode": process.returncode,
+        "stdout": _limit_output(stdout, policy.max_output_chars),
+        "stderr": _limit_output(stderr, policy.max_output_chars),
+    }
+
+
+def active_terminal_processes() -> list[dict[str, object]]:
+    with _ACTIVE_LOCK:
+        return [
+            {
+                "command_id": command_id,
+                "pid": process.pid,
+                "running": process.poll() is None,
+            }
+            for command_id, process in _ACTIVE_PROCESSES.items()
+        ]
+
+
+def emergency_stop_terminal_processes(*, grace_seconds: float = 1.5) -> dict[str, object]:
+    with _ACTIVE_LOCK:
+        processes = list(_ACTIVE_PROCESSES.items())
+    terminated: list[dict[str, object]] = []
+    for command_id, process in processes:
+        if process.poll() is not None:
+            continue
+        process.terminate()
+        terminated.append({"command_id": command_id, "pid": process.pid, "signal": "terminate"})
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if all(process.poll() is not None for _, process in processes):
+            break
+        time.sleep(0.05)
+    killed: list[dict[str, object]] = []
+    for command_id, process in processes:
+        if process.poll() is None:
+            process.kill()
+            killed.append({"command_id": command_id, "pid": process.pid, "signal": "kill"})
+    return {
+        "terminated": terminated,
+        "killed": killed,
+        "active_before": len(processes),
     }
 
 

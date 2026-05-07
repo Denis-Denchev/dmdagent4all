@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dmdagent4all import __version__
@@ -44,7 +45,7 @@ from dmdagent4all.llm.openai_usage import (
 )
 from dmdagent4all.permissions import ToolRequest
 from dmdagent4all.runtime import build_agent_core
-from dmdagent4all.sandbox import TerminalPolicy
+from dmdagent4all.sandbox import TerminalPolicy, active_terminal_processes, emergency_stop_terminal_processes
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.storage import downloads_root_from_config
@@ -272,6 +273,72 @@ def create_app() -> FastAPI:
         return {
             "summary": doctor_summary(checks),
             "checks": [check.to_dict() for check in checks],
+        }
+
+    @app.get("/v1/emergency")
+    def emergency_status() -> dict[str, Any]:
+        config = load_config(paths.config)
+        return _emergency_status(config)
+
+    @app.post("/v1/emergency/stop")
+    def emergency_stop() -> dict[str, Any]:
+        terminal_result = emergency_stop_terminal_processes()
+        telegram_runtime.stop()
+        reminder_runtime.stop()
+        cancelled = _cancel_pending_approvals(paths)
+
+        def mutate(config: dict[str, Any]) -> None:
+            emergency = config.setdefault("runtime", {}).setdefault("emergency_stop", {})
+            emergency["active"] = True
+            emergency["triggered_at"] = datetime.now(timezone.utc).isoformat()
+            emergency["reason"] = "Emergency stop triggered from dashboard/API."
+
+        config = update_config(mutate, paths.config)
+        AuditStore(paths.audit_db).record_event(
+            AuditEvent(
+                event_type="emergency_stop",
+                tool=None,
+                risk=5,
+                approved=True,
+                result_status="stopped",
+                metadata={"terminal": terminal_result, "cancelled_approvals": cancelled},
+            )
+        )
+        return {
+            "status": "ok",
+            "message": "Emergency stop active. Terminal processes stopped, approvals cancelled, and tool execution blocked until reset.",
+            "data": {
+                **_emergency_status(config),
+                "terminal": terminal_result,
+                "cancelled_approvals": cancelled,
+            },
+        }
+
+    @app.post("/v1/emergency/reset")
+    def emergency_reset() -> dict[str, Any]:
+        def mutate(config: dict[str, Any]) -> None:
+            emergency = config.setdefault("runtime", {}).setdefault("emergency_stop", {})
+            emergency["active"] = False
+            emergency["triggered_at"] = ""
+            emergency["reason"] = ""
+
+        config = update_config(mutate, paths.config)
+        telegram_runtime.start(config)
+        reminder_runtime.start()
+        AuditStore(paths.audit_db).record_event(
+            AuditEvent(
+                event_type="emergency_reset",
+                tool=None,
+                risk=0,
+                approved=True,
+                result_status="reset",
+                metadata={},
+            )
+        )
+        return {
+            "status": "ok",
+            "message": "Emergency stop reset. Normal policy and approvals are active again.",
+            "data": _emergency_status(config),
         }
 
     @app.get("/v1/approvals")
@@ -742,7 +809,44 @@ def create_app() -> FastAPI:
             "data": telegram_runtime.status(config),
         }
 
+    _mount_static_dashboard(app)
     return app
+
+
+def _emergency_status(config: dict[str, Any]) -> dict[str, Any]:
+    emergency = config.get("runtime", {}).get("emergency_stop", {})
+    if not isinstance(emergency, dict):
+        emergency = {}
+    return {
+        "active": bool(emergency.get("active") is True),
+        "triggered_at": str(emergency.get("triggered_at") or ""),
+        "reason": str(emergency.get("reason") or ""),
+        "active_terminal_processes": active_terminal_processes(),
+    }
+
+
+def _cancel_pending_approvals(paths: AppPaths) -> list[int]:
+    store = AuditStore(paths.audit_db)
+    cancelled: list[int] = []
+    for approval in store.list_approvals(status="pending", limit=1000):
+        approval_id = approval.get("id")
+        if isinstance(approval_id, int) and store.set_approval_status(approval_id, "cancelled"):
+            cancelled.append(approval_id)
+    return cancelled
+
+
+def _mount_static_dashboard(app: FastAPI) -> None:
+    configured = os.environ.get("DMDAGENT_STATIC_DIR", "").strip()
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path(__file__).resolve().parents[2] / "frontend" / "dist",
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if (candidate / "index.html").exists():
+            app.mount("/", StaticFiles(directory=str(candidate), html=True), name="dashboard")
+            return
 
 
 class TelegramRuntime:

@@ -58,6 +58,9 @@ In the dashboard, clicking Approve or typing `approve <id>` executes the stored
 request and posts the tool result back into the chat log. Typing `готово` or
 bare `approve` approves the newest pending request.
 
+Emergency stop cancels pending approvals and blocks approval execution until the
+user resets emergency mode.
+
 ## Workspace Policy
 
 Workspace configuration controls where local file and terminal tools can work:
@@ -136,6 +139,9 @@ approval request unless explicitly added to the exact allowlist.
 Interactive terminal apps such as `nano`, `vim`, `vi`, and `emacs` are not
 allowed in the dashboard command runner. Use file tools for create/edit flows.
 
+Emergency stop terminates active terminal subprocesses. If a process ignores the
+first terminate signal, the backend force-kills it after a short grace period.
+
 ## File Tools
 
 `files.read` reads only non-secret text files inside allowed workspace roots.
@@ -158,6 +164,20 @@ DELETE DROP TRUNCATE ALTER UPDATE INSERT CREATE REPLACE MERGE GRANT REVOKE VACUU
 
 The block applies to terminal commands and SQL/query tool arguments before the
 permission engine and before approvals.
+
+## Emergency Stop
+
+Emergency stop is a backend safety control. It is available through the
+dashboard and API:
+
+```text
+POST /v1/emergency/stop
+POST /v1/emergency/reset
+GET  /v1/emergency
+```
+
+When active, tool execution and approval execution are denied even if the model
+or user asks to continue. Reset restores normal policy and approval behavior.
 
 The web dashboard exposes the same policy state, exact allowlist editing,
 workspace root, settings, the auto-approve toggle, and run requests through the

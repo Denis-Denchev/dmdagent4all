@@ -102,6 +102,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "granted": [],
         "approval_required_at_risk": 3,
     },
+    "runtime": {
+        "emergency_stop": {
+            "active": False,
+            "triggered_at": "",
+            "reason": "",
+        },
+    },
     "setup": {
         "completed": False,
         "agent_name": "DMD Agent",

@@ -32,6 +32,7 @@ The agent core:
 - routes obvious terminal, file, memory, browser, reminder, and workspace requests before the JSON planner
 - treats `cd <folder>`, `open <folder>`, and "go into folder" as workspace changes, not as stateless shell `cd`
 - handles conservative multi-step requests such as `mkdir test then open the folder` by approving the write step first and continuing only with validated follow-up steps
+- blocks tool execution when emergency stop mode is active
 - uses the JSON planner only when tool selection is genuinely needed
 - sends tool requests through backend safety policy and then the permission engine
 - returns natural-language tool results to the user
@@ -174,6 +175,18 @@ Secret paths are denied, even inside an allowed workspace.
 inside allowed workspace roots. Interactive terminal editors such as `nano` and
 `vim` are not run from the dashboard; the agent should offer `files.write`
 instead.
+
+## Product Runtime
+
+Normal users can run the project through Docker Compose. In Docker mode, the
+backend serves the built React dashboard directly, so the user opens only:
+
+```text
+http://127.0.0.1:8765
+```
+
+The Compose stack starts the app container and an Ollama container. The default
+workspace is the host `./workspace` folder mounted into the app container.
 
 ## Storage
 

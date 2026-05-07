@@ -226,6 +226,17 @@ export type DoctorResponse = {
   checks: DoctorCheck[]
 }
 
+export type EmergencyStatus = {
+  active: boolean
+  triggered_at: string
+  reason: string
+  active_terminal_processes: Array<{
+    command_id: string
+    pid: number
+    running: boolean
+  }>
+}
+
 export type AgentConfiguration = {
   paths: {
     data_dir: string
@@ -446,6 +457,9 @@ export const api = {
       body: JSON.stringify({ limit_usd }),
     }),
   resetOpenAIUsage: () => request<AgentResponse>('/v1/openai/usage/reset', { method: 'POST' }),
+  emergency: () => request<EmergencyStatus>('/v1/emergency'),
+  emergencyStop: () => request<AgentResponse>('/v1/emergency/stop', { method: 'POST' }),
+  emergencyReset: () => request<AgentResponse>('/v1/emergency/reset', { method: 'POST' }),
   deepseek: () => request<DeepSeekStatus>('/v1/deepseek'),
   loadDeepSeekKey: (api_key: string) =>
     request<AgentResponse>('/v1/deepseek/key', {

@@ -335,6 +335,12 @@ h1 {
   padding: 0.8rem 1rem;
 }
 
+.notice-danger {
+  border-color: rgba(227, 94, 79, 0.72);
+  background: rgba(227, 94, 79, 0.16);
+  color: #ffd0c9;
+}
+
 .button {
   display: inline-flex;
   align-items: center;

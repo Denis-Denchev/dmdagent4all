@@ -1872,6 +1872,45 @@ and this is the knowlage
             self.assertIn("files.write", response.message)
             self.assertIn("realtest.py", response.message)
 
+    def test_emergency_stop_blocks_tool_and_approval_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "runtime": {"emergency_stop": {"active": True, "triggered_at": "now", "reason": "test"}},
+                "terminal": {
+                    "enabled": True,
+                    "allowed_commands": [["ls"]],
+                    "auto_approve_allowlisted": True,
+                },
+            }
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config=config,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run", "memory.write"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            tool_response = core.handle_text("execute ls")
+            approval_config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "runtime": {"emergency_stop": {"active": False, "triggered_at": "", "reason": ""}},
+            }
+            approval_core = _build_core(root, None, audit=AuditStore(root / "audit2.db"), config=approval_config)
+            approval = approval_core.handle_text("Remember that I like test data")
+            approval_config["runtime"]["emergency_stop"]["active"] = True
+            approved = approval_core.approve_and_execute(approval.data["approval_id"])
+
+            self.assertEqual(tool_response.status, "denied")
+            self.assertIn("Emergency stop", tool_response.message)
+            self.assertEqual(approved.status, "denied")
+            self.assertIn("Emergency stop", approved.message)
+
 
 def _build_core(
     root: Path,
