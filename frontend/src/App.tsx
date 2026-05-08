@@ -62,6 +62,33 @@ type ConfigDraft = {
   browserMaxResponseBytes: string
   browserMaxTextChars: string
   approvalRisk: string
+  emailMaxBodyChars: string
+  gmailEnabled: boolean
+  gmailImapHost: string
+  gmailImapPort: string
+  gmailSmtpHost: string
+  gmailSmtpPort: string
+  gmailUsernameEnv: string
+  gmailPasswordEnv: string
+  gmailFromEnv: string
+  gmailMailbox: string
+  gmailArchiveMailbox: string
+  outlookEnabled: boolean
+  outlookImapHost: string
+  outlookImapPort: string
+  outlookSmtpHost: string
+  outlookSmtpPort: string
+  outlookUsernameEnv: string
+  outlookPasswordEnv: string
+  outlookFromEnv: string
+  outlookMailbox: string
+  outlookArchiveMailbox: string
+}
+
+type EmailCredentialsDraft = {
+  username: string
+  appPassword: string
+  fromAddress: string
 }
 
 const views: Array<{ key: View; label: string; short: string; description: string }> = [
@@ -171,6 +198,27 @@ function initialConfigDraft(): ConfigDraft {
     browserMaxResponseBytes: '1000000',
     browserMaxTextChars: '12000',
     approvalRisk: '3',
+    emailMaxBodyChars: '20000',
+    gmailEnabled: false,
+    gmailImapHost: 'imap.gmail.com',
+    gmailImapPort: '993',
+    gmailSmtpHost: 'smtp.gmail.com',
+    gmailSmtpPort: '587',
+    gmailUsernameEnv: 'DMDAGENT_GMAIL_USERNAME',
+    gmailPasswordEnv: 'DMDAGENT_GMAIL_APP_PASSWORD',
+    gmailFromEnv: 'DMDAGENT_GMAIL_FROM',
+    gmailMailbox: 'INBOX',
+    gmailArchiveMailbox: '[Gmail]/All Mail',
+    outlookEnabled: false,
+    outlookImapHost: 'outlook.office365.com',
+    outlookImapPort: '993',
+    outlookSmtpHost: 'smtp.office365.com',
+    outlookSmtpPort: '587',
+    outlookUsernameEnv: 'DMDAGENT_OUTLOOK_USERNAME',
+    outlookPasswordEnv: 'DMDAGENT_OUTLOOK_APP_PASSWORD',
+    outlookFromEnv: 'DMDAGENT_OUTLOOK_FROM',
+    outlookMailbox: 'INBOX',
+    outlookArchiveMailbox: 'Archive',
   }
 }
 
@@ -200,6 +248,8 @@ export function App() {
   const [models, setModels] = useState<ModelMode[]>([])
   const [customModel, setCustomModel] = useState('')
   const [configDraft, setConfigDraft] = useState<ConfigDraft>(initialConfigDraft)
+  const [gmailCredentials, setGmailCredentials] = useState<EmailCredentialsDraft>({ username: '', appPassword: '', fromAddress: '' })
+  const [outlookCredentials, setOutlookCredentials] = useState<EmailCredentialsDraft>({ username: '', appPassword: '', fromAddress: '' })
   const [terminalCommand, setTerminalCommand] = useState('')
   const [terminalRunCommand, setTerminalRunCommand] = useState('')
   const [terminalCwd, setTerminalCwd] = useState('')
@@ -381,6 +431,27 @@ export function App() {
       browserMaxResponseBytes: String(configurationResult.browser.max_response_bytes ?? 1000000),
       browserMaxTextChars: String(configurationResult.browser.max_text_chars ?? 12000),
       approvalRisk: String(configurationResult.permissions.approval_required_at_risk ?? 3),
+      emailMaxBodyChars: String(configurationResult.email.max_body_chars ?? 20000),
+      gmailEnabled: Boolean(configurationResult.email.gmail.enabled),
+      gmailImapHost: configurationResult.email.gmail.imap_host,
+      gmailImapPort: String(configurationResult.email.gmail.imap_port),
+      gmailSmtpHost: configurationResult.email.gmail.smtp_host,
+      gmailSmtpPort: String(configurationResult.email.gmail.smtp_port),
+      gmailUsernameEnv: configurationResult.email.gmail.username_env,
+      gmailPasswordEnv: configurationResult.email.gmail.password_env,
+      gmailFromEnv: configurationResult.email.gmail.from_env,
+      gmailMailbox: configurationResult.email.gmail.mailbox,
+      gmailArchiveMailbox: configurationResult.email.gmail.archive_mailbox,
+      outlookEnabled: Boolean(configurationResult.email.outlook.enabled),
+      outlookImapHost: configurationResult.email.outlook.imap_host,
+      outlookImapPort: String(configurationResult.email.outlook.imap_port),
+      outlookSmtpHost: configurationResult.email.outlook.smtp_host,
+      outlookSmtpPort: String(configurationResult.email.outlook.smtp_port),
+      outlookUsernameEnv: configurationResult.email.outlook.username_env,
+      outlookPasswordEnv: configurationResult.email.outlook.password_env,
+      outlookFromEnv: configurationResult.email.outlook.from_env,
+      outlookMailbox: configurationResult.email.outlook.mailbox,
+      outlookArchiveMailbox: configurationResult.email.outlook.archive_mailbox,
     })
   }
 
@@ -538,9 +609,55 @@ export function App() {
           browser_max_response_bytes: toNumber(configDraft.browserMaxResponseBytes),
           browser_max_text_chars: toNumber(configDraft.browserMaxTextChars),
           approval_required_at_risk: toNumber(configDraft.approvalRisk),
+          email: {
+            max_body_chars: toNumber(configDraft.emailMaxBodyChars),
+            gmail: {
+              enabled: configDraft.gmailEnabled,
+              imap_host: configDraft.gmailImapHost,
+              imap_port: toNumber(configDraft.gmailImapPort),
+              smtp_host: configDraft.gmailSmtpHost,
+              smtp_port: toNumber(configDraft.gmailSmtpPort),
+              username_env: configDraft.gmailUsernameEnv,
+              password_env: configDraft.gmailPasswordEnv,
+              from_env: configDraft.gmailFromEnv,
+              mailbox: configDraft.gmailMailbox,
+              archive_mailbox: configDraft.gmailArchiveMailbox,
+            },
+            outlook: {
+              enabled: configDraft.outlookEnabled,
+              imap_host: configDraft.outlookImapHost,
+              imap_port: toNumber(configDraft.outlookImapPort),
+              smtp_host: configDraft.outlookSmtpHost,
+              smtp_port: toNumber(configDraft.outlookSmtpPort),
+              username_env: configDraft.outlookUsernameEnv,
+              password_env: configDraft.outlookPasswordEnv,
+              from_env: configDraft.outlookFromEnv,
+              mailbox: configDraft.outlookMailbox,
+              archive_mailbox: configDraft.outlookArchiveMailbox,
+            },
+          },
         }),
       'Configuration saved.',
     )
+  }
+
+  async function loadEmailCredentials(provider: 'gmail' | 'outlook') {
+    const credentials = provider === 'gmail' ? gmailCredentials : outlookCredentials
+    const username = credentials.username.trim()
+    const appPassword = credentials.appPassword.trim()
+    if (!username || !appPassword) {
+      setNotice('Email username and app password are required.')
+      return
+    }
+    await runAction(
+      () => api.loadEmailCredentials(provider, username, appPassword, credentials.fromAddress.trim()),
+      `${provider === 'gmail' ? 'Gmail' : 'Outlook'} credentials loaded.`,
+    )
+    if (provider === 'gmail') {
+      setGmailCredentials((current) => ({ ...current, appPassword: '' }))
+    } else {
+      setOutlookCredentials((current) => ({ ...current, appPassword: '' }))
+    }
   }
 
   async function allowTelegramUser() {
@@ -1039,6 +1156,118 @@ export function App() {
                   <span><strong>Send chat and relevant memory context to cloud models</strong><small>Allows OpenAI, DeepSeek, and compatible cloud providers to receive the recent chat window and relevant local memory snippets for follow-up questions.</small></span>
                 </label>
                 <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Configuration</button>
+              </div>
+            </div>
+
+            <div className="panel command-panel">
+              <div className="section-heading">
+                <strong>Email Connectors</strong>
+                <span>Gmail and Outlook IMAP/SMTP settings</span>
+              </div>
+              <div className="settings-form">
+                <label>Email body read limit
+                  <input value={configDraft.emailMaxBodyChars} onChange={(event) => setConfigDraft({ ...configDraft, emailMaxBodyChars: event.target.value })} inputMode="numeric" />
+                </label>
+                <label className="setting-check">
+                  <input type="checkbox" checked={configDraft.gmailEnabled} onChange={(event) => setConfigDraft({ ...configDraft, gmailEnabled: event.target.checked })} />
+                  <span><strong>Enable Gmail</strong><small>Status: {connectors.find((connector) => connector.name === 'gmail')?.status ?? 'unknown'}</small></span>
+                </label>
+                <label className="setting-check">
+                  <input type="checkbox" checked={configDraft.outlookEnabled} onChange={(event) => setConfigDraft({ ...configDraft, outlookEnabled: event.target.checked })} />
+                  <span><strong>Enable Outlook</strong><small>Status: {connectors.find((connector) => connector.name === 'outlook')?.status ?? 'unknown'}</small></span>
+                </label>
+              </div>
+
+              <div className="email-provider-grid">
+                <section className="email-provider">
+                  <div className="section-heading">
+                    <strong>Gmail</strong>
+                    <span>{configuration?.email.gmail.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span>
+                  </div>
+                  <div className="settings-form settings-form-compact">
+                    <label>IMAP host
+                      <input value={configDraft.gmailImapHost} onChange={(event) => setConfigDraft({ ...configDraft, gmailImapHost: event.target.value })} />
+                    </label>
+                    <label>IMAP port
+                      <input value={configDraft.gmailImapPort} onChange={(event) => setConfigDraft({ ...configDraft, gmailImapPort: event.target.value })} inputMode="numeric" />
+                    </label>
+                    <label>SMTP host
+                      <input value={configDraft.gmailSmtpHost} onChange={(event) => setConfigDraft({ ...configDraft, gmailSmtpHost: event.target.value })} />
+                    </label>
+                    <label>SMTP port
+                      <input value={configDraft.gmailSmtpPort} onChange={(event) => setConfigDraft({ ...configDraft, gmailSmtpPort: event.target.value })} inputMode="numeric" />
+                    </label>
+                    <label>Username env
+                      <input value={configDraft.gmailUsernameEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailUsernameEnv: event.target.value })} />
+                    </label>
+                    <label>Password env
+                      <input value={configDraft.gmailPasswordEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailPasswordEnv: event.target.value })} />
+                    </label>
+                    <label>From env
+                      <input value={configDraft.gmailFromEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailFromEnv: event.target.value })} />
+                    </label>
+                    <label>Mailbox
+                      <input value={configDraft.gmailMailbox} onChange={(event) => setConfigDraft({ ...configDraft, gmailMailbox: event.target.value })} />
+                    </label>
+                    <label className="setting-wide">Archive mailbox
+                      <input value={configDraft.gmailArchiveMailbox} onChange={(event) => setConfigDraft({ ...configDraft, gmailArchiveMailbox: event.target.value })} />
+                    </label>
+                  </div>
+                  <div className="inline-form email-secret-form">
+                    <input value={gmailCredentials.username} onChange={(event) => setGmailCredentials({ ...gmailCredentials, username: event.target.value })} placeholder="Gmail address" />
+                    <input type="password" value={gmailCredentials.appPassword} onChange={(event) => setGmailCredentials({ ...gmailCredentials, appPassword: event.target.value })} placeholder="Gmail app password" />
+                    <input value={gmailCredentials.fromAddress} onChange={(event) => setGmailCredentials({ ...gmailCredentials, fromAddress: event.target.value })} placeholder="From address optional" />
+                    <button className="button" type="button" onClick={() => void loadEmailCredentials('gmail')} disabled={busy}>Load Gmail Credentials</button>
+                  </div>
+                  <span className="field-note">Credentials are kept only in the current API process environment, not in config.yaml.</span>
+                </section>
+
+                <section className="email-provider">
+                  <div className="section-heading">
+                    <strong>Outlook</strong>
+                    <span>{configuration?.email.outlook.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span>
+                  </div>
+                  <div className="settings-form settings-form-compact">
+                    <label>IMAP host
+                      <input value={configDraft.outlookImapHost} onChange={(event) => setConfigDraft({ ...configDraft, outlookImapHost: event.target.value })} />
+                    </label>
+                    <label>IMAP port
+                      <input value={configDraft.outlookImapPort} onChange={(event) => setConfigDraft({ ...configDraft, outlookImapPort: event.target.value })} inputMode="numeric" />
+                    </label>
+                    <label>SMTP host
+                      <input value={configDraft.outlookSmtpHost} onChange={(event) => setConfigDraft({ ...configDraft, outlookSmtpHost: event.target.value })} />
+                    </label>
+                    <label>SMTP port
+                      <input value={configDraft.outlookSmtpPort} onChange={(event) => setConfigDraft({ ...configDraft, outlookSmtpPort: event.target.value })} inputMode="numeric" />
+                    </label>
+                    <label>Username env
+                      <input value={configDraft.outlookUsernameEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookUsernameEnv: event.target.value })} />
+                    </label>
+                    <label>Password env
+                      <input value={configDraft.outlookPasswordEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookPasswordEnv: event.target.value })} />
+                    </label>
+                    <label>From env
+                      <input value={configDraft.outlookFromEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookFromEnv: event.target.value })} />
+                    </label>
+                    <label>Mailbox
+                      <input value={configDraft.outlookMailbox} onChange={(event) => setConfigDraft({ ...configDraft, outlookMailbox: event.target.value })} />
+                    </label>
+                    <label className="setting-wide">Archive mailbox
+                      <input value={configDraft.outlookArchiveMailbox} onChange={(event) => setConfigDraft({ ...configDraft, outlookArchiveMailbox: event.target.value })} />
+                    </label>
+                  </div>
+                  <div className="inline-form email-secret-form">
+                    <input value={outlookCredentials.username} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, username: event.target.value })} placeholder="Outlook address" />
+                    <input type="password" value={outlookCredentials.appPassword} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, appPassword: event.target.value })} placeholder="Outlook app password" />
+                    <input value={outlookCredentials.fromAddress} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, fromAddress: event.target.value })} placeholder="From address optional" />
+                    <button className="button" type="button" onClick={() => void loadEmailCredentials('outlook')} disabled={busy}>Load Outlook Credentials</button>
+                  </div>
+                  <span className="field-note">Microsoft tenants may disable IMAP/SMTP; Graph OAuth can be added later if needed.</span>
+                </section>
+              </div>
+
+              <div className="row-actions">
+                <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Email Settings</button>
               </div>
             </div>
 

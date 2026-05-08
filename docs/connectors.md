@@ -2,32 +2,78 @@
 
 Connectors are explicit integrations. They are not general computer access.
 
-## Gmail
+## Gmail And Outlook
 
-Default scope target:
+Email connectors use IMAP/SMTP in the current build. Secrets are read only from
+environment variables in the running API process; they are not stored in
+`config.yaml` or sent to the model.
+
+The dashboard exposes these settings under Config -> Email Connectors. Use it
+to enable Gmail/Outlook, adjust mailbox/env-var names, and load username plus
+app password into the current API process. Credentials loaded from the UI are
+process-local; after a backend or container restart, load them again or provide
+the same variables through the shell/Docker environment.
+
+Gmail env vars:
 
 ```text
-gmail.readonly
+DMDAGENT_GMAIL_USERNAME
+DMDAGENT_GMAIL_APP_PASSWORD
+DMDAGENT_GMAIL_FROM optional
 ```
 
-Additional permissions:
+Outlook env vars:
 
-- `gmail.compose`
-- `gmail.send`
-- `gmail.modify`
+```text
+DMDAGENT_OUTLOOK_USERNAME
+DMDAGENT_OUTLOOK_APP_PASSWORD
+DMDAGENT_OUTLOOK_FROM optional
+```
+
+Enable provider config:
+
+```yaml
+email:
+  gmail:
+    enabled: true
+  outlook:
+    enabled: true
+```
+
+Permissions:
+
+- `gmail.readonly` / `outlook.readonly`
+- `gmail.compose` / `outlook.compose`
+- `gmail.send` / `outlook.send`
+- `gmail.modify` / `outlook.modify`
+
+Tools:
+
+- search messages
+- read one message/thread by IMAP uid
+- summarize inbox/search results
+- create local drafts
+- create local reply drafts
+- send local drafts
+- archive messages
+- Gmail label copy
 
 Rules:
 
 - Read-only tools can run without approval after permission is granted.
 - Draft creation is lower risk but still enforced by backend policy.
 - Sending always requires approval.
-- Delete is disabled by default.
+- Archive/label/modify actions require approval.
+- Delete is not implemented.
 
-Important: Some Gmail OAuth scopes can technically allow more than one action. Backend policy must enforce the intended product behavior even when a token has broader capability.
+Important: Gmail and Outlook account settings may require app passwords or
+provider-side IMAP/SMTP enablement. Microsoft 365 tenants may disable basic
+SMTP/IMAP auth; in that case this connector must later be replaced with OAuth /
+Microsoft Graph for that account.
 
-Current build status: Gmail manifests and backend handlers are registered, but
-real OAuth is not implemented. If enabled and permitted, Gmail tools return
-`not_configured` rather than attempting a fake action.
+Current build status: Gmail and Outlook have real IMAP/SMTP handlers. If the
+provider is disabled or required env vars are missing, tools fail closed with
+`connector_not_configured`.
 
 ## Calendar
 

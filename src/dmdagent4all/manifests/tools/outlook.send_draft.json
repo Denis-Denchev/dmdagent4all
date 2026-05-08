@@ -1,0 +1,12 @@
+{
+  "name": "outlook.send_draft",
+  "description": "Send an existing local Outlook draft through SMTP.",
+  "risk": 4,
+  "permissions": ["outlook.send"],
+  "args_schema": {
+    "draft_id": "local Outlook draft id"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

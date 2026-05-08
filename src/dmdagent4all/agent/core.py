@@ -444,6 +444,8 @@ class AgentCore:
             return _terminal_user_response(user_message, request, data)
         if request.tool == "files.read":
             return _file_read_user_response(user_message, data)
+        if request.tool.startswith(("gmail.", "outlook.")):
+            return _email_user_response(user_message, request, data)
         if request.tool == "files.write":
             path = str(data.get("path") or request.args.get("path") or "")
             message = (
@@ -3763,6 +3765,8 @@ def _tool_success_message(request: ToolRequest) -> str:
         return "Reminder completed."
     if request.tool == "calendar.create_event":
         return "Saved to local calendar store. Active reminder notifications are not implemented yet."
+    if request.tool.startswith(("gmail.", "outlook.")):
+        return "Email tool executed."
     return "Tool executed."
 
 
@@ -3830,6 +3834,71 @@ def _terminal_user_response(user_message: str, request: ToolRequest, data: dict[
             "command": command,
             "returncode": returncode,
         },
+    )
+
+
+def _email_user_response(user_message: str, request: ToolRequest, data: dict[str, Any]) -> AgentResponse:
+    del user_message
+    provider = str(data.get("provider") or request.tool.split(".", 1)[0]).title()
+    action = request.tool.split(".", 1)[1] if "." in request.tool else request.tool
+    if data.get("status") == "connector_not_configured":
+        return AgentResponse(
+            status="not_configured",
+            message=str(data.get("message") or "Email connector is not configured."),
+            data=data,
+        )
+    if action == "search":
+        messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+        lines = [f"{provider}: found {len(messages)} message(s)."]
+        lines.extend(_email_message_line(message) for message in messages[:10] if isinstance(message, dict))
+        return AgentResponse(status="ok", message="\n".join(lines), data=data)
+    if action == "summarize_inbox":
+        summaries = data.get("summary") if isinstance(data.get("summary"), list) else []
+        lines = [f"{provider}: summarized {len(summaries)} message(s)."]
+        lines.extend(_email_summary_line(item) for item in summaries[:10] if isinstance(item, dict))
+        return AgentResponse(status="ok", message="\n".join(lines), data=data)
+    if action == "read_thread":
+        messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+        if not messages or not isinstance(messages[0], dict):
+            return AgentResponse(status="ok", message=f"{provider}: message loaded.", data=data)
+        message = messages[0]
+        body = str(message.get("body") or "")
+        if len(body) > 3000:
+            body = f"{body[:3000]}\n...[truncated]"
+        text = (
+            f"{provider}: {message.get('subject', '(no subject)')}\n"
+            f"From: {message.get('from', '-')}\n"
+            f"Date: {message.get('date', '-')}\n\n"
+            f"{body}"
+        )
+        return AgentResponse(status="ok", message=text.strip(), data=data)
+    if action in {"create_draft", "reply_draft"}:
+        to = ", ".join(str(item) for item in data.get("to", []))
+        return AgentResponse(
+            status="ok",
+            message=f"{provider}: created local draft {data.get('draft_id')} for {to}.",
+            data=data,
+        )
+    if action == "send_draft":
+        return AgentResponse(status="ok", message=f"{provider}: sent draft {data.get('draft_id')}.", data=data)
+    if action == "archive":
+        return AgentResponse(status="ok", message=f"{provider}: archived {len(data.get('message_ids', []))} message(s).", data=data)
+    if action == "label":
+        return AgentResponse(status="ok", message=f"{provider}: applied labels to {len(data.get('message_ids', []))} message(s).", data=data)
+    return AgentResponse(status="ok", message=f"{provider}: email action completed.", data=data)
+
+
+def _email_message_line(message: dict[str, Any]) -> str:
+    return (
+        f"- {message.get('id')}: {message.get('subject', '(no subject)')} "
+        f"from {message.get('from', '-')} | {message.get('date', '-')}"
+    )
+
+
+def _email_summary_line(item: dict[str, Any]) -> str:
+    return (
+        f"- {item.get('id')}: {item.get('subject', '(no subject)')} "
+        f"from {item.get('from', '-')} - {item.get('summary', '')}"
     )
 
 

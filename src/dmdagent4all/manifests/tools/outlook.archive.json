@@ -1,0 +1,13 @@
+{
+  "name": "outlook.archive",
+  "description": "Archive Outlook messages by moving/copying IMAP messages to the configured archive mailbox.",
+  "risk": 3,
+  "permissions": ["outlook.modify"],
+  "args_schema": {
+    "message_ids": "array of IMAP message uids",
+    "mailbox": "optional source mailbox, defaults to INBOX"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

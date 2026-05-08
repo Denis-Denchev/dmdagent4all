@@ -243,6 +243,7 @@ export type AgentConfiguration = {
     config: string
     memory: string
     workspace: string
+    current_workspace: string
     downloads_root: string
     downloads_root_custom: boolean
     audit_db: string
@@ -261,6 +262,11 @@ export type AgentConfiguration = {
     timeout_seconds?: number
     max_response_bytes?: number
     max_text_chars?: number
+  }
+  email: {
+    max_body_chars: number
+    gmail: EmailProviderConfiguration
+    outlook: EmailProviderConfiguration
   }
   terminal: Record<string, unknown>
   privacy: Record<string, unknown>
@@ -287,6 +293,21 @@ export type AgentConfiguration = {
   }
 }
 
+export type EmailProviderConfiguration = {
+  enabled: boolean
+  imap_host: string
+  imap_port: number
+  smtp_host: string
+  smtp_port: number
+  username_env: string
+  password_env: string
+  from_env: string
+  mailbox: string
+  archive_mailbox: string
+  credentials_loaded: boolean
+  from_loaded: boolean
+}
+
 export type AgentConfigurationUpdate = {
   downloads_root?: string
   agent_name?: string
@@ -303,6 +324,24 @@ export type AgentConfigurationUpdate = {
   browser_max_response_bytes?: number
   browser_max_text_chars?: number
   approval_required_at_risk?: number
+  email?: {
+    max_body_chars?: number
+    gmail?: EmailProviderConfigurationUpdate
+    outlook?: EmailProviderConfigurationUpdate
+  }
+}
+
+export type EmailProviderConfigurationUpdate = {
+  enabled?: boolean
+  imap_host?: string
+  imap_port?: number
+  smtp_host?: string
+  smtp_port?: number
+  username_env?: string
+  password_env?: string
+  from_env?: string
+  mailbox?: string
+  archive_mailbox?: string
 }
 
 async function request<T>(
@@ -359,6 +398,11 @@ export const api = {
     request<AgentResponse>('/v1/configuration', {
       method: 'POST',
       body: JSON.stringify(settings),
+    }),
+  loadEmailCredentials: (provider: 'gmail' | 'outlook', username: string, app_password: string, from_address?: string) =>
+    request<AgentResponse>('/v1/email/credentials', {
+      method: 'POST',
+      body: JSON.stringify({ provider, username, app_password, from_address: from_address || null }),
     }),
   memory: () => request<MemoryList>('/v1/memory'),
   memoryFile: (path: string) =>

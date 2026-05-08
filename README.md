@@ -153,8 +153,10 @@ Foundation implemented:
 - Approval-gated `browser.click`, `browser.fill_form`, and `browser.submit`
   handlers for an isolated Playwright profile when optional browser runtime
   support is installed.
-- Gmail tool handlers fail closed with `not_configured` until real OAuth
-  connector setup exists, instead of silently running unimplemented actions.
+- Gmail and Outlook IMAP/SMTP email handlers for search, read, summarize,
+  local draft creation, reply drafts, send-draft, archive, and Gmail label copy.
+  They fail closed with `not_configured` until provider config and required env
+  vars are present.
 - Telegram polling interface with allowlist, `/id`, `/help`, `/approvals`,
   `/approve <id>`, `/deny <id>`, audit logging, approve/deny inline buttons,
   and reminder action buttons for Done, Snooze, Repeat +1d, Cancel, and Maps
@@ -162,10 +164,10 @@ Foundation implemented:
 
 Partially implemented or stubbed:
 
-- Gmail and Calendar tool manifests exist. Calendar has a local workspace store;
-  real Google OAuth sync is not implemented yet.
-- Gmail OAuth is not implemented yet. Gmail tools are registered and policy
-  gated, but return `not_configured` until connector setup is added.
+- Calendar has a local workspace store; real Google Calendar OAuth sync is not
+  implemented yet.
+- Email currently uses IMAP/SMTP env-var configuration. Gmail/Outlook OAuth and
+  Microsoft Graph are not implemented yet.
 - Browser interaction tools require the optional Playwright runtime and Chromium
   browser install. Without that runtime, they fail closed with setup guidance.
 - Web dashboard can view chat, connectors, tools, permissions, approvals,
@@ -684,9 +686,9 @@ Recommended order:
 2. Broaden OS-backed secret storage.
    Extend the local secret store beyond Telegram and add OS-backed secure
    backends where needed. Keep secrets out of config and model context.
-3. Implement the first real OAuth connector.
-   Start with read-only Gmail search or Google Calendar free/busy. Avoid
-   send/modify actions until read-only flows are tested.
+3. Add OAuth/Graph email connector modes.
+   IMAP/SMTP works for app-password accounts. Gmail OAuth and Microsoft Graph
+   should be added for accounts where basic IMAP/SMTP auth is disabled.
 4. Package optional browser runtime setup.
    Add an installer path for `.[browser]` and Playwright Chromium so browser
    interaction tools are easy to enable.

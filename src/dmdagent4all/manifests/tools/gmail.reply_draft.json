@@ -1,0 +1,16 @@
+{
+  "name": "gmail.reply_draft",
+  "description": "Create a local Gmail reply draft for an existing IMAP message uid without sending it.",
+  "risk": 2,
+  "permissions": ["gmail.compose"],
+  "args_schema": {
+    "thread_id": "IMAP message uid returned by gmail.search/read_thread",
+    "body": "reply body",
+    "cc": "optional cc recipients",
+    "bcc": "optional bcc recipients",
+    "mailbox": "optional mailbox, defaults to INBOX"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

@@ -1,0 +1,13 @@
+{
+  "name": "outlook.read_thread",
+  "description": "Read one Outlook message/thread by IMAP uid with read-only access.",
+  "risk": 1,
+  "permissions": ["outlook.readonly"],
+  "args_schema": {
+    "thread_id": "IMAP message uid returned by outlook.search",
+    "mailbox": "optional mailbox, defaults to INBOX"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

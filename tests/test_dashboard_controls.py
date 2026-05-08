@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,9 +15,15 @@ from dmdagent4all.server import (
     DEFAULT_DEEPSEEK_API_KEY_ENV,
     DEEPSEEK_BASE_URL,
     DEFAULT_DEEPSEEK_MODEL,
+    AgentConfigurationRequest,
+    EmailConfigurationRequest,
+    EmailCredentialsRequest,
+    EmailProviderConfigurationRequest,
     ReminderRuntime,
+    _configuration_response,
     _connector_statuses,
     _deepseek_status,
+    _load_email_credentials,
     _openai_status,
     _set_deepseek_config,
     _set_model_config,
@@ -28,6 +35,7 @@ from dmdagent4all.server import (
     _telegram_status,
     _terminal_command_from_request,
     _terminal_status,
+    _update_agent_configuration,
     _validate_terminal_allowlist_command,
 )
 from dmdagent4all.tools import build_builtin_registry
@@ -142,8 +150,76 @@ class DashboardControlsTest(unittest.TestCase):
         }
 
         self.assertEqual(statuses["gmail"]["status"], "not_configured")
+        self.assertEqual(statuses["outlook"]["status"], "not_configured")
         self.assertIn("calendar", statuses)
         self.assertIn("telegram", statuses)
+
+    def test_email_configuration_can_be_managed_from_config_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _FakePaths(Path(tmp))
+            config = deepcopy(DEFAULT_CONFIG)
+
+            _update_agent_configuration(
+                config,
+                AgentConfigurationRequest(
+                    email=EmailConfigurationRequest(
+                        max_body_chars=12345,
+                        gmail=EmailProviderConfigurationRequest(
+                            enabled=True,
+                            username_env="DMDAGENT_TEST_GMAIL_USER",
+                            password_env="DMDAGENT_TEST_GMAIL_PASSWORD",
+                            from_env="DMDAGENT_TEST_GMAIL_FROM",
+                            mailbox="Primary",
+                        ),
+                    ),
+                ),
+            )
+            response = _configuration_response(paths, config)
+
+        self.assertEqual(response["email"]["max_body_chars"], 12345)
+        self.assertTrue(response["email"]["gmail"]["enabled"])
+        self.assertEqual(response["email"]["gmail"]["username_env"], "DMDAGENT_TEST_GMAIL_USER")
+        self.assertEqual(response["email"]["gmail"]["password_env"], "DMDAGENT_TEST_GMAIL_PASSWORD")
+        self.assertEqual(response["email"]["gmail"]["from_env"], "DMDAGENT_TEST_GMAIL_FROM")
+        self.assertEqual(response["email"]["gmail"]["mailbox"], "Primary")
+
+    def test_email_credentials_loader_sets_process_env_without_returning_secret(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+        config["email"]["gmail"]["username_env"] = "DMDAGENT_TEST_GMAIL_USER"
+        config["email"]["gmail"]["password_env"] = "DMDAGENT_TEST_GMAIL_PASSWORD"
+        config["email"]["gmail"]["from_env"] = "DMDAGENT_TEST_GMAIL_FROM"
+        for key in (
+            "DMDAGENT_TEST_GMAIL_USER",
+            "DMDAGENT_TEST_GMAIL_PASSWORD",
+            "DMDAGENT_TEST_GMAIL_FROM",
+        ):
+            os.environ.pop(key, None)
+
+        try:
+            result = _load_email_credentials(
+                config,
+                EmailCredentialsRequest(
+                    provider="gmail",
+                    username="sender@example.com",
+                    app_password="app-password",
+                    from_address="from@example.com",
+                ),
+            )
+        finally:
+            env_values = {
+                key: os.environ.pop(key, None)
+                for key in (
+                    "DMDAGENT_TEST_GMAIL_USER",
+                    "DMDAGENT_TEST_GMAIL_PASSWORD",
+                    "DMDAGENT_TEST_GMAIL_FROM",
+                )
+            }
+
+        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_USER"], "sender@example.com")
+        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_PASSWORD"], "app-password")
+        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_FROM"], "from@example.com")
+        self.assertTrue(result["data"]["credentials_loaded"])
+        self.assertNotIn("app-password", str(result))
 
     def test_local_calendar_handlers_cover_update_delete_and_free_slots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -196,6 +272,66 @@ class DashboardControlsTest(unittest.TestCase):
             result = build_builtin_registry().execute("gmail.search", {"query": "from:test"}, context)
 
         self.assertEqual(result["status"], "connector_not_configured")
+
+    def test_email_draft_and_send_use_env_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            registry = build_builtin_registry()
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                draft = registry.execute(
+                    "gmail.create_draft",
+                    {
+                        "to": "recipient@example.com",
+                        "subject": "Test subject",
+                        "body": "Hello from draft",
+                    },
+                    context,
+                )
+                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                    FakeSMTP.sent_messages.clear()
+                    sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
+
+        self.assertEqual(draft["status"], "draft")
+        self.assertTrue(sent["sent"])
+        self.assertEqual(sent["to"], ["recipient@example.com"])
+        self.assertEqual(FakeSMTP.sent_messages[0]["To"], "recipient@example.com")
+
+    def test_outlook_search_uses_imap_connector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["outlook"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            env = {
+                "DMDAGENT_OUTLOOK_USERNAME": "sender@outlook.com",
+                "DMDAGENT_OUTLOOK_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                    result = build_builtin_registry().execute(
+                        "outlook.summarize_inbox",
+                        {"query": "subject:Invoice", "limit": 1},
+                        context,
+                    )
+
+        self.assertEqual(result["provider"], "outlook")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["summary"][0]["subject"], "Invoice 123")
 
     def test_memory_write_can_create_auto_short_term_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -370,6 +506,75 @@ class _FakeTelegramRuntime:
         self.messages.append(text)
         self.reply_markups.append(reply_markup)
         return True
+
+
+class FakeSMTP:
+    sent_messages: list = []
+
+    def __init__(self, host: str, port: int, timeout: int) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.logged_in = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def starttls(self) -> None:
+        return None
+
+    def login(self, username: str, password: str) -> None:
+        self.logged_in = bool(username and password)
+
+    def send_message(self, message) -> None:
+        self.sent_messages.append(message)
+
+
+class FakeIMAP:
+    raw_message = (
+        b"From: Sender <sender@example.com>\r\n"
+        b"To: Receiver <receiver@example.com>\r\n"
+        b"Subject: Invoice 123\r\n"
+        b"Date: Thu, 07 May 2026 10:00:00 +0000\r\n"
+        b"Message-ID: <invoice-123@example.com>\r\n"
+        b"\r\n"
+        b"Invoice body text"
+    )
+
+    def __init__(self, host: str, port: int, timeout: int) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def login(self, username: str, password: str) -> None:
+        if not username or not password:
+            raise RuntimeError("missing login")
+
+    def select(self, mailbox: str, readonly: bool = False):
+        del mailbox, readonly
+        return "OK", [b""]
+
+    def uid(self, command: str, *args):
+        del args
+        if command == "SEARCH":
+            return "OK", [b"99"]
+        if command == "FETCH":
+            return "OK", [(b"99 (RFC822)", self.raw_message)]
+        if command in {"COPY", "STORE"}:
+            return "OK", [b""]
+        return "NO", [b""]
+
+    def expunge(self):
+        return "OK", [b""]
 
 
 if __name__ == "__main__":

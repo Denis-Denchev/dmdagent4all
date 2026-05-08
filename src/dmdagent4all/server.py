@@ -64,6 +64,33 @@ DEFAULT_DEEPSEEK_API_KEY_ENV = "DMDAGENT_DEEPSEEK_API_KEY"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEEPSEEK_MODEL_FALLBACKS = ["deepseek-v4-flash", "deepseek-v4-pro"]
+EMAIL_MAX_BODY_CHARS_DEFAULT = 20_000
+EMAIL_PROVIDER_DEFAULTS = {
+    "gmail": {
+        "enabled": False,
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 587,
+        "username_env": "DMDAGENT_GMAIL_USERNAME",
+        "password_env": "DMDAGENT_GMAIL_APP_PASSWORD",
+        "from_env": "DMDAGENT_GMAIL_FROM",
+        "mailbox": "INBOX",
+        "archive_mailbox": "[Gmail]/All Mail",
+    },
+    "outlook": {
+        "enabled": False,
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "username_env": "DMDAGENT_OUTLOOK_USERNAME",
+        "password_env": "DMDAGENT_OUTLOOK_APP_PASSWORD",
+        "from_env": "DMDAGENT_OUTLOOK_FROM",
+        "mailbox": "INBOX",
+        "archive_mailbox": "Archive",
+    },
+}
 WORKSPACE_FILE_ROOTS = {
     "scrapefiles": "Scraped Markdown",
     "browser-downloads": "Browser Downloads",
@@ -116,6 +143,25 @@ class TerminalSettingsRequest(BaseModel):
     allow_safe_workspace_commands: bool | None = None
 
 
+class EmailProviderConfigurationRequest(BaseModel):
+    enabled: bool | None = None
+    imap_host: str | None = None
+    imap_port: int | None = None
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    username_env: str | None = None
+    password_env: str | None = None
+    from_env: str | None = None
+    mailbox: str | None = None
+    archive_mailbox: str | None = None
+
+
+class EmailConfigurationRequest(BaseModel):
+    max_body_chars: int | None = None
+    gmail: EmailProviderConfigurationRequest | None = None
+    outlook: EmailProviderConfigurationRequest | None = None
+
+
 class AgentConfigurationRequest(BaseModel):
     downloads_root: str | None = None
     agent_name: str | None = None
@@ -140,6 +186,7 @@ class AgentConfigurationRequest(BaseModel):
     browser_max_response_bytes: int | None = None
     browser_max_text_chars: int | None = None
     approval_required_at_risk: int | None = None
+    email: EmailConfigurationRequest | None = None
 
 
 class TerminalCommandRequest(BaseModel):
@@ -157,6 +204,13 @@ class TelegramTokenEnvRequest(BaseModel):
 
 class TelegramTokenRequest(BaseModel):
     token: str
+
+
+class EmailCredentialsRequest(BaseModel):
+    provider: str
+    username: str
+    app_password: str
+    from_address: str | None = None
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -430,6 +484,11 @@ def create_app() -> FastAPI:
             "message": "Agent configuration updated.",
             "data": _configuration_response(paths, config),
         }
+
+    @app.post("/v1/email/credentials")
+    def email_credentials(request: EmailCredentialsRequest) -> dict[str, Any]:
+        config = load_config(paths.config)
+        return _load_email_credentials(config, request)
 
     @app.get("/v1/status")
     def status() -> dict[str, Any]:
@@ -1092,11 +1151,149 @@ def _configuration_response(paths: AppPaths, config: dict[str, Any]) -> dict[str
         "llm": llm,
         "system_prompts": _system_prompts_response(llm),
         "browser": config.get("browser", {}),
+        "email": _email_configuration_response(config),
         "terminal": config.get("terminal", {}),
         "privacy": config.get("privacy", {}),
         "permissions": config.get("permissions", {}),
         "storage": config.get("storage", {}),
         "workspace": WorkspaceManager.from_config(config, fallback_workspace=paths.workspace).workspace_info(),
+    }
+
+
+def _email_configuration_response(config: dict[str, Any]) -> dict[str, Any]:
+    email = config.get("email", {})
+    if not isinstance(email, dict):
+        email = {}
+    max_body_chars = email.get("max_body_chars", EMAIL_MAX_BODY_CHARS_DEFAULT)
+    return {
+        "max_body_chars": max(1_000, min(_coerce_int(max_body_chars, EMAIL_MAX_BODY_CHARS_DEFAULT), 200_000)),
+        "gmail": _email_provider_configuration_response(email, "gmail"),
+        "outlook": _email_provider_configuration_response(email, "outlook"),
+    }
+
+
+def _email_provider_configuration_response(email: dict[str, Any], provider: str) -> dict[str, Any]:
+    provider_config = email.get(provider, {})
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+    defaults = EMAIL_PROVIDER_DEFAULTS[provider]
+    username_env = _email_provider_string(provider_config, defaults, "username_env")
+    password_env = _email_provider_string(provider_config, defaults, "password_env")
+    from_env = _email_provider_string(provider_config, defaults, "from_env")
+    return {
+        "enabled": bool(provider_config.get("enabled", defaults["enabled"])),
+        "imap_host": _email_provider_string(provider_config, defaults, "imap_host"),
+        "imap_port": _coerce_int(provider_config.get("imap_port"), int(defaults["imap_port"])),
+        "smtp_host": _email_provider_string(provider_config, defaults, "smtp_host"),
+        "smtp_port": _coerce_int(provider_config.get("smtp_port"), int(defaults["smtp_port"])),
+        "username_env": username_env,
+        "password_env": password_env,
+        "from_env": from_env,
+        "mailbox": _email_provider_string(provider_config, defaults, "mailbox"),
+        "archive_mailbox": _email_provider_string(provider_config, defaults, "archive_mailbox"),
+        "credentials_loaded": bool(os.environ.get(username_env, "").strip() and os.environ.get(password_env, "").strip()),
+        "from_loaded": bool(os.environ.get(from_env, "").strip()),
+    }
+
+
+def _email_provider_string(
+    provider_config: dict[str, Any],
+    defaults: dict[str, Any],
+    key: str,
+) -> str:
+    value = str(provider_config.get(key) or defaults[key]).strip()
+    return value or str(defaults[key])
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _update_email_configuration(config: dict[str, Any], request: EmailConfigurationRequest) -> None:
+    email = config.get("email")
+    if not isinstance(email, dict):
+        email = {}
+        config["email"] = email
+    if request.max_body_chars is not None:
+        email["max_body_chars"] = max(1_000, min(int(request.max_body_chars), 200_000))
+    for provider in ("gmail", "outlook"):
+        provider_request = getattr(request, provider)
+        if provider_request is not None:
+            _update_email_provider_configuration(email, provider, provider_request)
+
+
+def _update_email_provider_configuration(
+    email: dict[str, Any],
+    provider: str,
+    request: EmailProviderConfigurationRequest,
+) -> None:
+    provider_config = email.get(provider)
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+        email[provider] = provider_config
+    defaults = EMAIL_PROVIDER_DEFAULTS[provider]
+    if request.enabled is not None:
+        provider_config["enabled"] = bool(request.enabled)
+    for key in ("imap_host", "smtp_host", "mailbox", "archive_mailbox"):
+        value = getattr(request, key)
+        if value is not None:
+            provider_config[key] = value.strip() or defaults[key]
+    for key in ("imap_port", "smtp_port"):
+        value = getattr(request, key)
+        if value is not None:
+            provider_config[key] = max(1, min(int(value), 65_535))
+    for key in ("username_env", "password_env", "from_env"):
+        value = getattr(request, key)
+        if value is not None:
+            provider_config[key] = _validated_env_var_name(value, key)
+
+
+def _validated_env_var_name(value: str, label: str) -> str:
+    env_var = value.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_var):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be a valid environment variable name.",
+        )
+    return env_var
+
+
+def _load_email_credentials(config: dict[str, Any], request: EmailCredentialsRequest) -> dict[str, Any]:
+    provider = request.provider.strip().lower()
+    if provider not in EMAIL_PROVIDER_DEFAULTS:
+        raise HTTPException(status_code=400, detail="provider must be gmail or outlook.")
+    username = request.username.strip()
+    app_password = request.app_password.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Email username is required.")
+    if not app_password:
+        raise HTTPException(status_code=400, detail="Email app password is required.")
+    provider_config = _email_configuration_response(config)[provider]
+    username_env = provider_config["username_env"]
+    password_env = provider_config["password_env"]
+    from_env = provider_config["from_env"]
+    os.environ[username_env] = username
+    os.environ[password_env] = app_password
+    from_address = (request.from_address or "").strip()
+    if from_address:
+        os.environ[from_env] = from_address
+    return {
+        "status": "ok",
+        "message": (
+            f"{provider.title()} credentials loaded into this API process environment. "
+            "They are not written to the agent config file."
+        ),
+        "data": {
+            "provider": provider,
+            "username_env": username_env,
+            "password_env": password_env,
+            "from_env": from_env,
+            "credentials_loaded": True,
+            "from_loaded": bool(from_address or os.environ.get(from_env, "").strip()),
+        },
     }
 
 
@@ -1163,6 +1360,8 @@ def _update_agent_configuration(config: dict[str, Any], request: AgentConfigurat
             0,
             min(int(request.approval_required_at_risk), 5),
         )
+    if request.email is not None:
+        _update_email_configuration(config, request.email)
 
 
 def _system_prompts_response(llm: dict[str, Any]) -> dict[str, Any]:
@@ -1563,9 +1762,10 @@ def _connector_statuses(
         )
         status = "enabled" if enabled_tools else "disabled"
         detail = ""
-        if name == "gmail":
-            status = "not_configured"
-            detail = "Gmail OAuth connector is not implemented in this build."
+        if name in {"gmail", "outlook"}:
+            email_status = _email_connector_status(config, name, enabled_tools)
+            status = email_status["status"]
+            detail = email_status["detail"]
         elif name == "calendar":
             status = "local_store" if enabled_tools else "disabled"
             detail = "Calendar tools use the local workspace event store until OAuth sync is added."
@@ -1604,6 +1804,34 @@ def _connector_statuses(
         }
     )
     return statuses
+
+
+def _email_connector_status(
+    config: dict[str, Any],
+    provider: str,
+    enabled_tools: list[str],
+) -> dict[str, str]:
+    defaults = EMAIL_PROVIDER_DEFAULTS[provider]
+    email_config = config.get("email", {})
+    provider_config = email_config.get(provider, {}) if isinstance(email_config, dict) else {}
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+    username_env = str(provider_config.get("username_env") or defaults["username_env"])
+    password_env = str(provider_config.get("password_env") or defaults["password_env"])
+    enabled = bool(provider_config.get("enabled", False))
+    has_env = bool(os.environ.get(username_env) and os.environ.get(password_env))
+    if enabled and has_env:
+        return {
+            "status": "configured" if enabled_tools else "disabled",
+            "detail": f"{provider.title()} IMAP/SMTP connector is configured through environment variables.",
+        }
+    return {
+        "status": "not_configured",
+        "detail": (
+            f"{provider.title()} uses IMAP/SMTP. Enable email.{provider}.enabled and set "
+            f"{username_env} plus {password_env} in the API process environment."
+        ),
+    }
 
 
 def _terminal_status(config: dict[str, Any]) -> dict[str, Any]:

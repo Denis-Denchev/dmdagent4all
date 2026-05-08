@@ -38,9 +38,10 @@ class SafetyDecision:
 
 class ToolSafetyPolicy:
     def evaluate(self, request: ToolRequest, context: ToolRuntimeContext) -> SafetyDecision:
-        sql_reason = _destructive_sql_reason(request.args)
-        if sql_reason is not None:
-            return SafetyDecision.deny(sql_reason, risk=RiskLevel.DANGEROUS_SYSTEM)
+        if not request.tool.startswith(("gmail.", "outlook.")):
+            sql_reason = _destructive_sql_reason(request.args)
+            if sql_reason is not None:
+                return SafetyDecision.deny(sql_reason, risk=RiskLevel.DANGEROUS_SYSTEM)
 
         secret_reason = _secret_reference_reason(request.args)
         if secret_reason is not None:

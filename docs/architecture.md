@@ -171,7 +171,8 @@ Initial tool groups:
 - `memory.*`
 - `workspace.*`
 - `system.*`
-- `gmail.*` manifests
+- `gmail.*` IMAP/SMTP email tools
+- `outlook.*` IMAP/SMTP email tools
 - `calendar.*` manifests
 - `terminal.*` manifest and approval-gated workspace runner
 - `browser.*` manifests

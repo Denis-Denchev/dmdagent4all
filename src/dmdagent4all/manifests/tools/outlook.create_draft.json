@@ -1,0 +1,16 @@
+{
+  "name": "outlook.create_draft",
+  "description": "Create a local Outlook draft without sending it.",
+  "risk": 2,
+  "permissions": ["outlook.compose"],
+  "args_schema": {
+    "to": "recipient email address or array",
+    "cc": "optional cc recipients",
+    "bcc": "optional bcc recipients",
+    "subject": "draft subject",
+    "body": "draft body"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

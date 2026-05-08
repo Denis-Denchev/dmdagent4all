@@ -1,0 +1,14 @@
+{
+  "name": "outlook.summarize_inbox",
+  "description": "Summarize recent Outlook inbox messages locally from IMAP snippets.",
+  "risk": 1,
+  "permissions": ["outlook.readonly"],
+  "args_schema": {
+    "query": "optional search query",
+    "limit": "optional maximum messages to summarize",
+    "mailbox": "optional mailbox, defaults to INBOX"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}

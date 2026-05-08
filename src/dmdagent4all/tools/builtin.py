@@ -15,6 +15,7 @@ from dmdagent4all.sandbox import TerminalPolicy, run_workspace_command
 from dmdagent4all.security import redact_text
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.browser_automation import browser_click, browser_fill_form, browser_submit
+from dmdagent4all.tools.email_connector import make_email_handler
 from dmdagent4all.tools.reminders import complete_reminder, create_reminder, list_reminders
 from dmdagent4all.tools.registry import ToolRegistry, load_builtin_manifests
 from dmdagent4all.tools.web import browser_extract_text, browser_open, browser_scrape_markdown
@@ -51,16 +52,18 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("calendar.today", _calendar_today)
     registry.register_handler("calendar.update_event", _calendar_update_event)
     registry.register_handler("calendar.week", _calendar_week)
-    for name in {
-        "gmail.archive",
-        "gmail.create_draft",
-        "gmail.label",
-        "gmail.read_thread",
-        "gmail.search",
-        "gmail.send_draft",
-        "gmail.summarize_inbox",
-    }:
-        registry.register_handler(name, _gmail_not_configured)
+    for provider in {"gmail", "outlook"}:
+        for action in {
+            "archive",
+            "create_draft",
+            "read_thread",
+            "reply_draft",
+            "search",
+            "send_draft",
+            "summarize_inbox",
+        }:
+            registry.register_handler(f"{provider}.{action}", make_email_handler(provider, action))
+    registry.register_handler("gmail.label", make_email_handler("gmail", "label"))
     return registry
 
 

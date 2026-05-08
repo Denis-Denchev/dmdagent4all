@@ -738,6 +738,10 @@ textarea:focus {
   align-items: end;
 }
 
+.settings-form-compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .inline-form {
   grid-template-columns: minmax(0, 1fr) auto;
 }
@@ -806,6 +810,27 @@ label {
   color: var(--muted);
   font-size: 0.8rem;
   font-weight: 650;
+}
+
+.email-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.email-provider {
+  display: grid;
+  gap: 0.8rem;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.9rem;
+}
+
+.email-secret-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
 }
 
 .table-list {
@@ -904,6 +929,7 @@ label {
 @media (max-width: 1120px) {
   .chat-workspace,
   .two-column,
+  .email-provider-grid,
   .split-view {
     grid-template-columns: 1fr;
   }
@@ -928,6 +954,8 @@ label {
   }
 
   .settings-form,
+  .settings-form-compact,
+  .email-secret-form,
   .run-form,
   .metric-grid,
   .audit-row,

@@ -1,0 +1,14 @@
+{
+  "name": "outlook.search",
+  "description": "Search Outlook messages with read-only IMAP access.",
+  "risk": 1,
+  "permissions": ["outlook.readonly"],
+  "args_schema": {
+    "query": "search text or simple from:/to:/subject: query",
+    "limit": "optional maximum messages to return",
+    "mailbox": "optional mailbox, defaults to INBOX"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": false
+}
