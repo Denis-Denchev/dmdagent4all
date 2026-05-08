@@ -1,4 +1,5 @@
 import os
+import smtplib
 import tempfile
 import unittest
 from unittest import mock
@@ -182,6 +183,10 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertEqual(response["email"]["gmail"]["password_env"], "DMDAGENT_TEST_GMAIL_PASSWORD")
         self.assertEqual(response["email"]["gmail"]["from_env"], "DMDAGENT_TEST_GMAIL_FROM")
         self.assertEqual(response["email"]["gmail"]["mailbox"], "Primary")
+        self.assertTrue(config["tools"]["gmail.search"]["enabled"])
+        self.assertTrue(config["tools"]["gmail.read_thread"]["enabled"])
+        self.assertTrue(config["tools"]["gmail.send_draft"]["enabled"])
+        self.assertIn("gmail.send", config["permissions"]["granted"])
 
     def test_email_credentials_loader_sets_process_env_without_returning_secret(self) -> None:
         config = deepcopy(DEFAULT_CONFIG)
@@ -307,6 +312,39 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertEqual(sent["to"], ["recipient@example.com"])
         self.assertEqual(FakeSMTP.sent_messages[0]["To"], "recipient@example.com")
 
+    def test_outlook_basic_auth_failure_returns_actionable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["outlook"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            registry = build_builtin_registry()
+            env = {
+                "DMDAGENT_OUTLOOK_USERNAME": "sender@outlook.com",
+                "DMDAGENT_OUTLOOK_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                draft = registry.execute(
+                    "outlook.create_draft",
+                    {
+                        "to": "recipient@example.com",
+                        "subject": "Test subject",
+                        "body": "Hello from draft",
+                    },
+                    context,
+                )
+                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
+                    result = registry.execute("outlook.send_draft", {"draft_id": draft["draft_id"]}, context)
+
+        self.assertEqual(result["status"], "authentication_failed")
+        self.assertFalse(result["sent"])
+        self.assertIn("Basic Authentication is disabled", result["message"])
+        self.assertNotIn("app-password", str(result))
+
     def test_outlook_search_uses_imap_connector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -332,6 +370,32 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertEqual(result["provider"], "outlook")
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["summary"][0]["subject"], "Invoice 123")
+
+    def test_email_read_thread_can_read_latest_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@gmail.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                    result = build_builtin_registry().execute(
+                        "gmail.read_thread",
+                        {"latest": True},
+                        context,
+                    )
+
+        self.assertEqual(result["provider"], "gmail")
+        self.assertEqual(result["thread_id"], "99")
+        self.assertEqual(result["messages"][0]["subject"], "Invoice 123")
 
     def test_memory_write_can_create_auto_short_term_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -531,6 +595,15 @@ class FakeSMTP:
 
     def send_message(self, message) -> None:
         self.sent_messages.append(message)
+
+
+class FailingAuthSMTP(FakeSMTP):
+    def login(self, username: str, password: str) -> None:
+        del username, password
+        raise smtplib.SMTPAuthenticationError(
+            535,
+            b"5.7.139 Authentication unsuccessful, basic authentication is disabled.",
+        )
 
 
 class FakeIMAP:

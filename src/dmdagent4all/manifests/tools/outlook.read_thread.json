@@ -5,6 +5,7 @@
   "permissions": ["outlook.readonly"],
   "args_schema": {
     "thread_id": "IMAP message uid returned by outlook.search",
+    "latest": "optional boolean; read the latest message when thread_id is not provided",
     "mailbox": "optional mailbox, defaults to INBOX"
   },
   "approval_required": false,

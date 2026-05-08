@@ -1,7 +1,10 @@
 import tempfile
 import unittest
+import os
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from dmdagent4all.agent import AgentCore
 from dmdagent4all.agent.planner import PlanResult
@@ -1514,6 +1517,68 @@ and this is the knowlage
             self.assertEqual(cat.status, "denied")
             self.assertIn("secret", bg.message.lower())
             self.assertNotIn("secret-value", bg.message)
+
+    def test_latest_email_read_is_not_routed_as_file_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            core = _build_core(root, ExplodingPlanner())
+
+            response = core.handle_text("прочети ми последно получения мейл")
+
+            self.assertIsNone(ConversationRouter().route("прочети ми последно получения мейл"))
+            self.assertEqual(response.status, "not_configured")
+            self.assertIn("Email", response.message)
+            self.assertNotEqual((response.data or {}).get("tool"), "files.read")
+
+    def test_email_send_request_creates_draft_then_requires_send_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            enabled_tools = frozenset(
+                {
+                    "gmail.search",
+                    "gmail.read_thread",
+                    "gmail.summarize_inbox",
+                    "gmail.create_draft",
+                    "gmail.reply_draft",
+                    "gmail.send_draft",
+                    "gmail.archive",
+                    "gmail.label",
+                }
+            )
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=enabled_tools,
+                    granted_permissions=frozenset(
+                        {"gmail.readonly", "gmail.compose", "gmail.send", "gmail.modify"}
+                    ),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "прати мейл на d.d.denchev94@gmail.com сам избери тема а имейла е да му кажа че проекта работи и е онлайн"
+                )
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual((response.data or {}).get("tool"), "gmail.send_draft")
+            self.assertEqual((response.data or {}).get("to"), "d.d.denchev94@gmail.com")
+            self.assertEqual((response.data or {}).get("subject"), "Проектът работи и е онлайн")
+            draft_id = str((response.data or {}).get("draft_id"))
+            draft_path = root / "email-drafts" / "gmail" / f"{draft_id}.json"
+            self.assertTrue(draft_path.exists())
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+            self.assertEqual(draft["body"], "Проекта работи и е онлайн.")
 
     def test_destructive_sql_is_blocked_before_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -160,11 +160,23 @@ def _search(args: dict[str, Any], settings: EmailSettings) -> dict[str, Any]:
 
 def _read_thread(args: dict[str, Any], settings: EmailSettings) -> dict[str, Any]:
     thread_id = str(args.get("thread_id") or args.get("message_id") or args.get("uid") or "").strip()
-    if not thread_id:
-        raise ValueError("read_thread requires thread_id/message uid.")
+    latest = bool(args.get("latest", False))
     mailbox = str(args.get("mailbox") or settings.mailbox)
     with _imap(settings) as client:
         _select(client, mailbox)
+        if not thread_id and latest:
+            ids = _imap_search(client, "")
+            if not ids:
+                return {
+                    "provider": settings.provider,
+                    "thread_id": "",
+                    "mailbox": mailbox,
+                    "messages": [],
+                    "threading": "imap_uid",
+                }
+            thread_id = ids[-1]
+        if not thread_id:
+            raise ValueError("read_thread requires thread_id/message uid.")
         message = _fetch_message(client, thread_id)
     parsed = _message_detail(message, uid=thread_id, max_body_chars=settings.max_body_chars)
     return {
@@ -244,10 +256,22 @@ def _send_draft(args: dict[str, Any], context: ToolRuntimeContext, settings: Ema
     if draft.get("provider") != settings.provider:
         raise ValueError("Draft provider does not match tool provider.")
     message = _email_message_from_draft(draft)
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as client:
-        client.starttls()
-        client.login(settings.username, settings.password)
-        client.send_message(message)
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as client:
+            client.starttls()
+            client.login(settings.username, settings.password)
+            client.send_message(message)
+    except smtplib.SMTPAuthenticationError as exc:
+        return _smtp_authentication_failed(settings, draft_id, exc)
+    except smtplib.SMTPException as exc:
+        return {
+            "provider": settings.provider,
+            "draft_id": draft_id,
+            "status": "smtp_failed",
+            "sent": False,
+            "message": f"{settings.provider.title()} SMTP failed before sending. Draft remains local.",
+            "detail": redact_text(str(exc)),
+        }
     draft["status"] = "sent"
     draft["sent_at"] = _now()
     draft_path.write_text(json.dumps(draft, indent=2, sort_keys=True), encoding="utf-8")
@@ -257,6 +281,32 @@ def _send_draft(args: dict[str, Any], context: ToolRuntimeContext, settings: Ema
         "sent": True,
         "to": draft.get("to", []),
         "subject": draft.get("subject", ""),
+    }
+
+
+def _smtp_authentication_failed(
+    settings: EmailSettings,
+    draft_id: str,
+    exc: smtplib.SMTPAuthenticationError,
+) -> dict[str, Any]:
+    if settings.provider == "outlook":
+        message = (
+            "Outlook SMTP authentication failed because Basic Authentication is disabled for this account or tenant. "
+            "The draft remains local and was not sent. Use Gmail SMTP for now, or configure Outlook through Microsoft Graph/OAuth."
+        )
+    else:
+        message = (
+            f"{settings.provider.title()} SMTP authentication failed. "
+            "Check that the account allows SMTP and that the app password is correct. The draft remains local and was not sent."
+        )
+    return {
+        "provider": settings.provider,
+        "draft_id": draft_id,
+        "status": "authentication_failed",
+        "sent": False,
+        "message": message,
+        "smtp_code": getattr(exc, "smtp_code", None),
+        "smtp_error": redact_text(str(getattr(exc, "smtp_error", b""))),
     }
 
 

@@ -40,6 +40,14 @@ class UnsupportedAction:
 
 
 @dataclass(frozen=True)
+class EmailSendIntent:
+    provider: str
+    to: str
+    subject: str
+    body: str
+
+
+@dataclass(frozen=True)
 class PendingContinuation:
     original_message: str
     steps: tuple[ToolRequest | UnsupportedAction, ...]
@@ -136,6 +144,18 @@ class AgentCore:
                     routed.request,
                     conversation_context=conversation_context,
                 )
+
+        email_action = _email_action_from_text(stripped, self.runtime_context.config)
+        if isinstance(email_action, AgentResponse):
+            return email_action
+        if isinstance(email_action, EmailSendIntent):
+            return self._handle_email_send_intent(stripped, email_action)
+        if isinstance(email_action, ToolRequest):
+            return self._run_user_tool_request(
+                stripped,
+                email_action,
+                conversation_context=conversation_context,
+            )
 
         if self.planner is None:
             identity_update = _handle_identity_update(stripped, self.runtime_context)
@@ -345,6 +365,58 @@ class AgentCore:
                 conversation_context=conversation_context,
             )
         return self._shape_tool_response(user_message, request, tool_response)
+
+    def _handle_email_send_intent(self, user_message: str, intent: EmailSendIntent) -> AgentResponse:
+        create_request = _request_with_original_message(
+            ToolRequest(
+                tool=f"{intent.provider}.create_draft",
+                args={"to": intent.to, "subject": intent.subject, "body": intent.body},
+                reason="User asked to send an email; create a local draft before approval-gated send.",
+            ),
+            user_message,
+        )
+        draft_response = self.handle_tool_request(create_request)
+        if draft_response.status != "ok":
+            return self._shape_tool_response(user_message, create_request, draft_response)
+        draft_id = str((draft_response.data or {}).get("draft_id") or "").strip()
+        if not draft_id:
+            return AgentResponse(
+                status="error",
+                message=(
+                    "Създаването на чернова не върна draft_id."
+                    if _looks_bulgarian(user_message)
+                    else "Draft creation did not return a draft_id."
+                ),
+                data=draft_response.data,
+            )
+        send_request = _request_with_original_message(
+            ToolRequest(
+                tool=f"{intent.provider}.send_draft",
+                args={"draft_id": draft_id},
+                reason="User asked to send this email. Sending requires explicit approval.",
+            ),
+            user_message,
+        )
+        send_response = self.handle_tool_request(send_request)
+        if send_response.status == "approval_required":
+            message = (
+                f"Създадох чернова `{draft_id}` до {intent.to} с тема \"{intent.subject}\". "
+                "Нужно е approval, за да изпратя имейла."
+                if _looks_bulgarian(user_message)
+                else f"Created draft `{draft_id}` to {intent.to} with subject \"{intent.subject}\". "
+                "Approval is required before I send it."
+            )
+            return AgentResponse(
+                status="approval_required",
+                message=message,
+                data={
+                    **(send_response.data or {}),
+                    "draft_id": draft_id,
+                    "to": intent.to,
+                    "subject": intent.subject,
+                },
+            )
+        return self._shape_tool_response(user_message, send_request, send_response)
 
     def _handle_multi_step_request(
         self,
@@ -1063,6 +1135,22 @@ class AgentCore:
                 message=str(result.get("message", "Connector is not configured yet.")),
                 data=result,
             )
+        if result.get("status") in {"authentication_failed", "smtp_failed"}:
+            self.audit_store.record_event(
+                AuditEvent(
+                    event_type="tool_call",
+                    tool=request.tool,
+                    risk=risk,
+                    approved=True,
+                    result_status="failed",
+                    metadata={} if approval_id is None else {"approval_id": approval_id},
+                )
+            )
+            return AgentResponse(
+                status="error",
+                message=str(result.get("message", "Email delivery failed.")),
+                data=result,
+            )
 
         self.audit_store.record_event(
             AuditEvent(
@@ -1090,6 +1178,212 @@ def _set_emergency_stop(config: dict[str, Any], *, active: bool, reason: str) ->
     emergency["active"] = bool(active)
     emergency["triggered_at"] = datetime.now().astimezone().isoformat(timespec="seconds") if active else ""
     emergency["reason"] = reason.strip()[:500] if active else ""
+
+
+def _email_action_from_text(
+    text: str,
+    config: dict[str, Any],
+) -> ToolRequest | EmailSendIntent | AgentResponse | None:
+    if not _looks_email_request(text):
+        return None
+    provider = _email_provider_from_text(text, config)
+    if provider is None:
+        return AgentResponse(
+            status="not_configured",
+            message=(
+                "Email не е включен. Отвори Config -> Email Connectors, включи Gmail или Outlook и зареди credentials."
+                if _looks_bulgarian(text)
+                else "Email is not enabled. Open Config -> Email Connectors, enable Gmail or Outlook, and load credentials."
+            ),
+            data={"connector": "email", "configuration": "Config -> Email Connectors"},
+        )
+    normalized = _normalize_for_match(text)
+    if _looks_email_send_request(normalized):
+        return _email_send_intent_from_text(text, provider)
+    if _looks_email_read_latest_request(normalized):
+        return ToolRequest(
+            tool=f"{provider}.read_thread",
+            args={"latest": True, "limit": 1},
+            reason="User asked to read the latest received email.",
+        )
+    if _looks_email_summary_request(normalized):
+        return ToolRequest(
+            tool=f"{provider}.summarize_inbox",
+            args={"limit": 5},
+            reason="User asked to summarize recent email.",
+        )
+    if _looks_email_search_request(normalized):
+        return ToolRequest(
+            tool=f"{provider}.search",
+            args={"query": "", "limit": 10},
+            reason="User asked to inspect email messages.",
+        )
+    return None
+
+
+def _looks_email_request(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "email",
+            "e-mail",
+            "mail",
+            "gmail",
+            "outlook",
+            "hotmail",
+            "имейл",
+            "имейла",
+            "мейл",
+            "мейла",
+            "поща",
+        }
+    )
+
+
+def _email_provider_from_text(text: str, config: dict[str, Any]) -> str | None:
+    normalized = re.sub(
+        r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
+        "",
+        _normalize_for_match(text),
+        flags=re.IGNORECASE,
+    )
+    if any(marker in normalized for marker in {"outlook", "hotmail", "microsoft"}):
+        return "outlook"
+    if "gmail" in normalized:
+        return "gmail"
+    enabled = [
+        provider
+        for provider in ("gmail", "outlook")
+        if bool(config.get("email", {}).get(provider, {}).get("enabled", False))
+    ]
+    if enabled:
+        return enabled[0]
+    return None
+
+
+def _looks_email_send_request(normalized: str) -> bool:
+    return any(
+        marker in normalized
+        for marker in {
+            "send email",
+            "send mail",
+            "email to",
+            "mail to",
+            "прати имейл",
+            "пратиш имейл",
+            "прати мейл",
+            "пратиш мейл",
+            "изпрати имейл",
+            "изпратиш имейл",
+            "изпрати мейл",
+            "изпратиш мейл",
+            "прати email",
+            "пратиш email",
+            "изпрати email",
+            "изпратиш email",
+        }
+    )
+
+
+def _looks_email_read_latest_request(normalized: str) -> bool:
+    has_read = any(marker in normalized for marker in {"read", "open", "прочети", "отвори", "покажи"})
+    has_latest = any(marker in normalized for marker in {"latest", "last", "newest", "послед", "нов", "получен"})
+    return has_read and has_latest
+
+
+def _looks_email_summary_request(normalized: str) -> bool:
+    return any(marker in normalized for marker in {"summarize", "summary", "съмари", "обобщи", "обобщение"})
+
+
+def _looks_email_search_request(normalized: str) -> bool:
+    return any(marker in normalized for marker in {"search", "find", "list", "show", "търси", "намери", "покажи"})
+
+
+def _email_send_intent_from_text(text: str, provider: str) -> EmailSendIntent | AgentResponse:
+    recipient = _first_email_address(text)
+    if recipient is None:
+        return AgentResponse(
+            status="needs_input",
+            message=(
+                "Кажи ми до кой email адрес да го изпратя, каква тема и какво съдържание да има."
+                if _looks_bulgarian(text)
+                else "Tell me the recipient email address, subject, and body."
+            ),
+        )
+    body = _email_body_from_text(text)
+    if not body:
+        return AgentResponse(
+            status="needs_input",
+            message=(
+                "Имам получател, но ми трябва съдържанието на имейла."
+                if _looks_bulgarian(text)
+                else "I have the recipient, but I need the email body."
+            ),
+        )
+    subject = _email_subject_from_text(text, body)
+    return EmailSendIntent(provider=provider, to=recipient, subject=subject, body=body)
+
+
+def _first_email_address(text: str) -> str | None:
+    match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE)
+    return match.group(0) if match else None
+
+
+def _email_body_from_text(text: str) -> str:
+    patterns = [
+        r"(?:имейлът|имейла|мейлът|мейла|съдържанието)\s+(?:е|да бъде|да е)\s+(?P<body>.+)$",
+        r"(?:body|message|email)\s+(?:is|=|:)\s+(?P<body>.+)$",
+        r"(?:кажи му|кажи|напиши)\s+(?:че\s+)?(?P<body>.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _clean_email_body(match.group("body"))
+    email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE)
+    if email_match:
+        tail = text[email_match.end() :].strip(" ,.;:-")
+        return _clean_email_body(tail)
+    return ""
+
+
+def _clean_email_body(body: str) -> str:
+    cleaned = body.strip().strip(" \"'")
+    cleaned = re.sub(
+        r"^(?:а\s+)?(?:имейлът|имейла|мейлът|мейла)?\s*(?:е\s+)?(?:да\s+)?(?:му\s+)?(?:кажа|кажеш|кажем)\s+че\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^(?:че|that)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    if not cleaned:
+        return ""
+    if _looks_bulgarian(cleaned):
+        cleaned = _capitalize_first(cleaned)
+    else:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
+
+
+def _email_subject_from_text(text: str, body: str) -> str:
+    subject_match = re.search(
+        r"(?:subject|тема(?:та)?)\s*(?:is|е|:|=)\s*(?P<subject>[^.;\n]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if subject_match and not re.search(r"сам\s+избери|choose", subject_match.group("subject"), flags=re.IGNORECASE):
+        return subject_match.group("subject").strip(" \"'")
+    if _looks_bulgarian(text):
+        if "проект" in _normalize_for_match(body) and "онлайн" in _normalize_for_match(body):
+            return "Проектът работи и е онлайн"
+        return body[:60].rstrip(".!?") or "Съобщение"
+    return body[:60].rstrip(".!?") or "Message"
+
+
+def _capitalize_first(text: str) -> str:
+    return text[:1].upper() + text[1:]
 
 
 def _route_without_llm(text: str) -> ToolRequest | None:

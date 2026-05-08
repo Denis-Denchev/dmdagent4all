@@ -14,6 +14,9 @@ app password into the current API process. Credentials loaded from the UI are
 process-local; after a backend or container restart, load them again or provide
 the same variables through the shell/Docker environment.
 
+Loading credentials from the dashboard also enables the selected provider and
+its email tools. Sending still requires approval before SMTP delivery.
+
 Gmail env vars:
 
 ```text
@@ -70,6 +73,9 @@ Important: Gmail and Outlook account settings may require app passwords or
 provider-side IMAP/SMTP enablement. Microsoft 365 tenants may disable basic
 SMTP/IMAP auth; in that case this connector must later be replaced with OAuth /
 Microsoft Graph for that account.
+When Outlook returns `5.7.139 Authentication unsuccessful, basic authentication
+is disabled`, the message was not sent. Use Gmail SMTP for the current build or
+add/configure Microsoft Graph OAuth for Outlook.
 
 Current build status: Gmail and Outlook have real IMAP/SMTP handlers. If the
 provider is disabled or required env vars are missing, tools fail closed with

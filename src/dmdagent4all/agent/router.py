@@ -101,6 +101,8 @@ def _workspace_switch_request(path: str) -> ToolRequest | None:
 
 
 def _file_request(text: str) -> ToolRequest | None:
+    if _looks_email_text(text):
+        return None
     delete_match = re.search(
         r"^(?:delete|remove|rm|изтрий|премахни)\s+(?P<path>.+)$",
         text,
@@ -237,6 +239,24 @@ def _looks_local_folder_target(path: str) -> bool:
     if normalized.endswith((".md", ".txt", ".json", ".py", ".js", ".ts", ".tsx", ".html", ".css")):
         return False
     return True
+
+
+def _looks_email_text(text: str) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "email",
+            "e-mail",
+            "mail",
+            "gmail",
+            "outlook",
+            "имейл",
+            "мейл",
+            "мейла",
+            "поща",
+        }
+    )
 
 
 def _normalize(text: str) -> str:

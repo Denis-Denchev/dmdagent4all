@@ -487,7 +487,10 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/email/credentials")
     def email_credentials(request: EmailCredentialsRequest) -> dict[str, Any]:
-        config = load_config(paths.config)
+        provider = request.provider.strip().lower()
+        if provider not in EMAIL_PROVIDER_DEFAULTS:
+            raise HTTPException(status_code=400, detail="provider must be gmail or outlook.")
+        config = update_config(lambda current: _set_email_provider_enabled(current, provider, True), paths.config)
         return _load_email_credentials(config, request)
 
     @app.get("/v1/status")
@@ -1222,10 +1225,11 @@ def _update_email_configuration(config: dict[str, Any], request: EmailConfigurat
     for provider in ("gmail", "outlook"):
         provider_request = getattr(request, provider)
         if provider_request is not None:
-            _update_email_provider_configuration(email, provider, provider_request)
+            _update_email_provider_configuration(config, email, provider, provider_request)
 
 
 def _update_email_provider_configuration(
+    config: dict[str, Any],
     email: dict[str, Any],
     provider: str,
     request: EmailProviderConfigurationRequest,
@@ -1236,7 +1240,7 @@ def _update_email_provider_configuration(
         email[provider] = provider_config
     defaults = EMAIL_PROVIDER_DEFAULTS[provider]
     if request.enabled is not None:
-        provider_config["enabled"] = bool(request.enabled)
+        _set_email_provider_enabled(config, provider, bool(request.enabled))
     for key in ("imap_host", "smtp_host", "mailbox", "archive_mailbox"):
         value = getattr(request, key)
         if value is not None:
@@ -1249,6 +1253,54 @@ def _update_email_provider_configuration(
         value = getattr(request, key)
         if value is not None:
             provider_config[key] = _validated_env_var_name(value, key)
+
+
+def _set_email_provider_enabled(config: dict[str, Any], provider: str, enabled: bool) -> None:
+    email = config.get("email")
+    if not isinstance(email, dict):
+        email = {}
+        config["email"] = email
+    provider_config = email.get(provider)
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+        email[provider] = provider_config
+    provider_config["enabled"] = bool(enabled)
+    tools = config.setdefault("tools", {})
+    for tool in _email_tool_names(provider):
+        tools.setdefault(tool, {})["enabled"] = bool(enabled)
+    if enabled:
+        permissions = config.setdefault("permissions", {})
+        granted = permissions.setdefault("granted", [])
+        if not isinstance(granted, list):
+            granted = []
+            permissions["granted"] = granted
+        existing = {str(item) for item in granted}
+        for permission in _email_permission_names(provider):
+            if permission not in existing:
+                granted.append(permission)
+                existing.add(permission)
+
+
+def _email_tool_names(provider: str) -> tuple[str, ...]:
+    return (
+        f"{provider}.search",
+        f"{provider}.read_thread",
+        f"{provider}.summarize_inbox",
+        f"{provider}.create_draft",
+        f"{provider}.reply_draft",
+        f"{provider}.send_draft",
+        f"{provider}.archive",
+        *((f"{provider}.label",) if provider == "gmail" else ()),
+    )
+
+
+def _email_permission_names(provider: str) -> tuple[str, ...]:
+    return (
+        f"{provider}.readonly",
+        f"{provider}.compose",
+        f"{provider}.send",
+        f"{provider}.modify",
+    )
 
 
 def _validated_env_var_name(value: str, label: str) -> str:
