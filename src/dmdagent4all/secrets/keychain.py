@@ -63,3 +63,26 @@ def set_macos_keychain_secret(account: str, value: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return completed.returncode == 0
+
+
+def delete_macos_keychain_secret(account: str) -> bool:
+    if not macos_keychain_available():
+        return False
+    try:
+        completed = subprocess.run(
+            [
+                "security",
+                "delete-generic-password",
+                "-a",
+                account,
+                "-s",
+                KEYCHAIN_SERVICE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0

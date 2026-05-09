@@ -34,6 +34,29 @@ def set_local_secret(account: str, value: str) -> bool:
     return True
 
 
+def delete_local_secret(account: str) -> bool:
+    if not account:
+        return False
+    data = _read_store()
+    if account not in data:
+        return False
+    data.pop(account, None)
+    path = _store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return True
+
+
 def _read_store() -> dict[str, str]:
     path = _store_path()
     try:

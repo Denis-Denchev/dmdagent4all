@@ -80,6 +80,7 @@ type ConfigDraft = {
   approvalRisk: string
   emailMaxBodyChars: string
   gmailEnabled: boolean
+  gmailAuthMethod: 'app_password' | 'oauth2'
   gmailImapHost: string
   gmailImapPort: string
   gmailSmtpHost: string
@@ -87,6 +88,10 @@ type ConfigDraft = {
   gmailUsernameEnv: string
   gmailPasswordEnv: string
   gmailFromEnv: string
+  gmailOauthClientId: string
+  gmailOauthRedirectUri: string
+  gmailOauthEmail: string
+  gmailOauthFromAddress: string
   gmailMailbox: string
   gmailArchiveMailbox: string
   outlookEnabled: boolean
@@ -243,6 +248,7 @@ function initialConfigDraft(): ConfigDraft {
     approvalRisk: '3',
     emailMaxBodyChars: '20000',
     gmailEnabled: false,
+    gmailAuthMethod: 'app_password',
     gmailImapHost: 'imap.gmail.com',
     gmailImapPort: '993',
     gmailSmtpHost: 'smtp.gmail.com',
@@ -250,6 +256,10 @@ function initialConfigDraft(): ConfigDraft {
     gmailUsernameEnv: 'DMDAGENT_GMAIL_USERNAME',
     gmailPasswordEnv: 'DMDAGENT_GMAIL_APP_PASSWORD',
     gmailFromEnv: 'DMDAGENT_GMAIL_FROM',
+    gmailOauthClientId: '',
+    gmailOauthRedirectUri: 'http://127.0.0.1:8765/v1/email/oauth/google/callback',
+    gmailOauthEmail: '',
+    gmailOauthFromAddress: '',
     gmailMailbox: 'INBOX',
     gmailArchiveMailbox: '[Gmail]/All Mail',
     outlookEnabled: false,
@@ -317,6 +327,7 @@ export function App() {
   const [configDraft, setConfigDraft] = useState<ConfigDraft>(initialConfigDraft)
   const [gmailCredentials, setGmailCredentials] = useState<EmailCredentialsDraft>({ username: '', appPassword: '', fromAddress: '' })
   const [outlookCredentials, setOutlookCredentials] = useState<EmailCredentialsDraft>({ username: '', appPassword: '', fromAddress: '' })
+  const [gmailOAuthClientSecret, setGmailOAuthClientSecret] = useState('')
   const [terminalCommand, setTerminalCommand] = useState('')
   const [terminalRunCommand, setTerminalRunCommand] = useState('')
   const [terminalCwd, setTerminalCwd] = useState('')
@@ -537,6 +548,7 @@ export function App() {
       approvalRisk: String(configurationResult.permissions.approval_required_at_risk ?? 3),
       emailMaxBodyChars: String(configurationResult.email.max_body_chars ?? 20000),
       gmailEnabled: Boolean(configurationResult.email.gmail.enabled),
+      gmailAuthMethod: configurationResult.email.gmail.auth_method,
       gmailImapHost: configurationResult.email.gmail.imap_host,
       gmailImapPort: String(configurationResult.email.gmail.imap_port),
       gmailSmtpHost: configurationResult.email.gmail.smtp_host,
@@ -544,6 +556,10 @@ export function App() {
       gmailUsernameEnv: configurationResult.email.gmail.username_env,
       gmailPasswordEnv: configurationResult.email.gmail.password_env,
       gmailFromEnv: configurationResult.email.gmail.from_env,
+      gmailOauthClientId: configurationResult.email.gmail.oauth_client_id,
+      gmailOauthRedirectUri: configurationResult.email.gmail.oauth_redirect_uri,
+      gmailOauthEmail: configurationResult.email.gmail.oauth_email,
+      gmailOauthFromAddress: configurationResult.email.gmail.oauth_from_address,
       gmailMailbox: configurationResult.email.gmail.mailbox,
       gmailArchiveMailbox: configurationResult.email.gmail.archive_mailbox,
       outlookEnabled: Boolean(configurationResult.email.outlook.enabled),
@@ -718,6 +734,7 @@ export function App() {
             max_body_chars: toNumber(configDraft.emailMaxBodyChars),
             gmail: {
               enabled: configDraft.gmailEnabled,
+              auth_method: configDraft.gmailAuthMethod,
               imap_host: configDraft.gmailImapHost,
               imap_port: toNumber(configDraft.gmailImapPort),
               smtp_host: configDraft.gmailSmtpHost,
@@ -725,6 +742,10 @@ export function App() {
               username_env: configDraft.gmailUsernameEnv,
               password_env: configDraft.gmailPasswordEnv,
               from_env: configDraft.gmailFromEnv,
+              oauth_client_id: configDraft.gmailOauthClientId,
+              oauth_redirect_uri: configDraft.gmailOauthRedirectUri,
+              oauth_email: configDraft.gmailOauthEmail,
+              oauth_from_address: configDraft.gmailOauthFromAddress,
               mailbox: configDraft.gmailMailbox,
               archive_mailbox: configDraft.gmailArchiveMailbox,
             },
@@ -763,6 +784,61 @@ export function App() {
     } else {
       setOutlookCredentials((current) => ({ ...current, appPassword: '' }))
     }
+  }
+
+  async function loadGmailOAuthClientSecret() {
+    const clientSecret = gmailOAuthClientSecret.trim()
+    if (!clientSecret) {
+      setNotice('Google OAuth client secret is required.')
+      return
+    }
+    await runAction(
+      () => api.loadGmailOAuthClientSecret(clientSecret),
+      'Gmail OAuth client secret loaded.',
+    )
+    setGmailOAuthClientSecret('')
+  }
+
+  async function startGmailOAuth() {
+    const clientId = configDraft.gmailOauthClientId.trim()
+    const email = configDraft.gmailOauthEmail.trim()
+    if (!clientId || !email) {
+      setNotice('Google OAuth client ID and Gmail address are required.')
+      return
+    }
+    const authWindow = window.open('', '_blank', 'noopener,noreferrer')
+    setBusy(true)
+    setNotice(null)
+    try {
+      const response = await api.startGmailOAuth({
+        client_id: clientId,
+        client_secret: gmailOAuthClientSecret.trim() || undefined,
+        email,
+        from_address: configDraft.gmailOauthFromAddress.trim() || undefined,
+        redirect_uri: configDraft.gmailOauthRedirectUri.trim() || undefined,
+      })
+      const data = dataObject(response.data)
+      const authorizationUrl = typeof data.authorization_url === 'string' ? data.authorization_url : ''
+      if (authorizationUrl) {
+        if (authWindow) {
+          authWindow.location.href = authorizationUrl
+        } else {
+          window.open(authorizationUrl, '_blank', 'noopener,noreferrer')
+        }
+      }
+      setNotice(response.message)
+      setGmailOAuthClientSecret('')
+      await refreshAll()
+    } catch (error) {
+      authWindow?.close()
+      setNotice(error instanceof Error ? error.message : 'Could not start Gmail OAuth.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function disconnectGmailOAuth() {
+    await runAction(() => api.disconnectGmailOAuth(), 'Gmail OAuth disconnected.')
   }
 
   async function allowTelegramUser() {
@@ -1077,20 +1153,68 @@ export function App() {
             </div>
             <div className="email-provider-grid">
               <section className="email-provider">
-                <div className="section-heading"><strong>Gmail</strong><span>{configuration?.email.gmail.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span></div>
-                <div className="email-login-form">
-                  <label>Gmail address
-                    <input value={gmailCredentials.username} onChange={(event) => setGmailCredentials({ ...gmailCredentials, username: event.target.value })} placeholder="name@gmail.com" autoComplete="username" />
-                  </label>
-                  <label>App password
-                    <input type="password" value={gmailCredentials.appPassword} onChange={(event) => setGmailCredentials({ ...gmailCredentials, appPassword: event.target.value })} placeholder="Google app password" autoComplete="current-password" />
-                  </label>
-                  <label>From address
-                    <input value={gmailCredentials.fromAddress} onChange={(event) => setGmailCredentials({ ...gmailCredentials, fromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
-                  </label>
-                  <button className="button" type="button" onClick={() => void loadEmailCredentials('gmail')} disabled={busy}>Load Gmail Credentials</button>
+                <div className="section-heading">
+                  <strong>Gmail</strong>
+                  <span>{configuration?.email.gmail.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span>
                 </div>
-                <span className="field-note">Use a Google app password. The secret is loaded into the running API process and is not written to config.yaml.</span>
+                <div className="settings-form settings-form-compact">
+                  <label>Authentication
+                    <select
+                      value={configDraft.gmailAuthMethod}
+                      onChange={(event) => setConfigDraft({ ...configDraft, gmailAuthMethod: event.target.value as 'app_password' | 'oauth2' })}
+                    >
+                      <option value="app_password">App password</option>
+                      <option value="oauth2">Google OAuth2</option>
+                    </select>
+                  </label>
+                </div>
+                {configDraft.gmailAuthMethod === 'oauth2' ? (
+                  <>
+                    <div className="email-oauth-status">
+                      <span>Client secret: <strong>{configuration?.email.gmail.oauth_client_secret_loaded ? 'loaded' : 'missing'}</strong></span>
+                      <span>Google token: <strong>{configuration?.email.gmail.oauth_refresh_token_loaded ? 'connected' : 'not connected'}</strong></span>
+                    </div>
+                    <div className="email-oauth-form">
+                      <label>Gmail address
+                        <input value={configDraft.gmailOauthEmail} onChange={(event) => setConfigDraft({ ...configDraft, gmailOauthEmail: event.target.value })} placeholder="name@gmail.com" autoComplete="username" />
+                      </label>
+                      <label>From address
+                        <input value={configDraft.gmailOauthFromAddress} onChange={(event) => setConfigDraft({ ...configDraft, gmailOauthFromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
+                      </label>
+                      <label className="setting-wide">Google OAuth client ID
+                        <input value={configDraft.gmailOauthClientId} onChange={(event) => setConfigDraft({ ...configDraft, gmailOauthClientId: event.target.value })} placeholder="client-id.apps.googleusercontent.com" />
+                      </label>
+                      <label className="setting-wide">Google OAuth client secret
+                        <input type="password" value={gmailOAuthClientSecret} onChange={(event) => setGmailOAuthClientSecret(event.target.value)} placeholder={configuration?.email.gmail.oauth_client_secret_loaded ? 'Already loaded; leave empty unless replacing' : 'Paste client secret'} autoComplete="off" />
+                      </label>
+                      <label className="setting-wide">Redirect URI
+                        <input value={configDraft.gmailOauthRedirectUri} onChange={(event) => setConfigDraft({ ...configDraft, gmailOauthRedirectUri: event.target.value })} />
+                      </label>
+                    </div>
+                    <span className="field-note">Add this exact Redirect URI in Google Cloud OAuth Client. The app requests only the Gmail IMAP/SMTP scope and stores tokens in the local secret store.</span>
+                    <div className="row-actions">
+                      <button className="button button-secondary" type="button" onClick={() => void loadGmailOAuthClientSecret()} disabled={busy || !gmailOAuthClientSecret.trim()}>Load Client Secret</button>
+                      <button className="button" type="button" onClick={() => void startGmailOAuth()} disabled={busy}>Start Google OAuth</button>
+                      <button className="button button-danger" type="button" onClick={() => void disconnectGmailOAuth()} disabled={busy || !configuration?.email.gmail.oauth_refresh_token_loaded}>Disconnect OAuth</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="email-login-form">
+                      <label>Gmail address
+                        <input value={gmailCredentials.username} onChange={(event) => setGmailCredentials({ ...gmailCredentials, username: event.target.value })} placeholder="name@gmail.com" autoComplete="username" />
+                      </label>
+                      <label>App password
+                        <input type="password" value={gmailCredentials.appPassword} onChange={(event) => setGmailCredentials({ ...gmailCredentials, appPassword: event.target.value })} placeholder="Google app password" autoComplete="current-password" />
+                      </label>
+                      <label>From address
+                        <input value={gmailCredentials.fromAddress} onChange={(event) => setGmailCredentials({ ...gmailCredentials, fromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
+                      </label>
+                      <button className="button" type="button" onClick={() => void loadEmailCredentials('gmail')} disabled={busy}>Load Gmail Credentials</button>
+                    </div>
+                    <span className="field-note">Use a Google app password. The secret is loaded into the running API process and is not written to config.yaml.</span>
+                  </>
+                )}
                 <details className="advanced-mail-settings">
                   <summary>Connection and environment settings</summary>
                   <div className="settings-form settings-form-compact">

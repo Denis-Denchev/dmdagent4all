@@ -5,6 +5,7 @@ import json
 import os
 import smtplib
 import uuid
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy
@@ -14,6 +15,7 @@ from email.utils import getaddresses, parseaddr
 from pathlib import Path
 from typing import Any, Callable
 
+from dmdagent4all.email_oauth import load_email_secret, refresh_google_access_token
 from dmdagent4all.security import redact_text
 from dmdagent4all.tools.base import ToolRuntimeContext
 
@@ -23,6 +25,7 @@ Handler = Callable[[dict[str, Any], ToolRuntimeContext], dict[str, Any]]
 
 PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     "gmail": {
+        "auth_method": "app_password",
         "imap_host": "imap.gmail.com",
         "imap_port": 993,
         "smtp_host": "smtp.gmail.com",
@@ -30,10 +33,15 @@ PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
         "username_env": "DMDAGENT_GMAIL_USERNAME",
         "password_env": "DMDAGENT_GMAIL_APP_PASSWORD",
         "from_env": "DMDAGENT_GMAIL_FROM",
+        "oauth_client_id": "",
+        "oauth_redirect_uri": "http://127.0.0.1:8765/v1/email/oauth/google/callback",
+        "oauth_email": "",
+        "oauth_from_address": "",
         "mailbox": "INBOX",
         "archive_mailbox": "[Gmail]/All Mail",
     },
     "outlook": {
+        "auth_method": "app_password",
         "imap_host": "outlook.office365.com",
         "imap_port": 993,
         "smtp_host": "smtp.office365.com",
@@ -57,6 +65,8 @@ class EmailSettings:
     username: str
     password: str
     from_addr: str
+    auth_method: str
+    oauth_access_token: str
     mailbox: str
     archive_mailbox: str
     max_body_chars: int
@@ -99,6 +109,38 @@ def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | Non
     if not bool(provider_config.get("enabled", False)):
         return None
 
+    auth_method = str(provider_config.get("auth_method") or defaults.get("auth_method") or "app_password").strip()
+    if auth_method == "oauth2":
+        if provider != "gmail":
+            return None
+        username = str(provider_config.get("oauth_email") or "").strip()
+        client_id = str(provider_config.get("oauth_client_id") or "").strip()
+        client_secret = load_email_secret(provider, "oauth_client_secret") or ""
+        refresh_token = load_email_secret(provider, "oauth_refresh_token") or ""
+        if not username or not client_id or not client_secret or not refresh_token:
+            return None
+        access_token = refresh_google_access_token(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+        max_body_chars = int(email_config.get("max_body_chars", 20_000))
+        return EmailSettings(
+            provider=provider,
+            imap_host=str(provider_config.get("imap_host") or defaults["imap_host"]),
+            imap_port=int(provider_config.get("imap_port") or defaults["imap_port"]),
+            smtp_host=str(provider_config.get("smtp_host") or defaults["smtp_host"]),
+            smtp_port=int(provider_config.get("smtp_port") or defaults["smtp_port"]),
+            username=username,
+            password="",
+            from_addr=str(provider_config.get("oauth_from_address") or "").strip() or username,
+            auth_method="oauth2",
+            oauth_access_token=access_token,
+            mailbox=str(provider_config.get("mailbox") or defaults["mailbox"]),
+            archive_mailbox=str(provider_config.get("archive_mailbox") or defaults["archive_mailbox"]),
+            max_body_chars=max_body_chars,
+        )
+
     username_env = str(provider_config.get("username_env") or defaults["username_env"])
     password_env = str(provider_config.get("password_env") or defaults["password_env"])
     from_env = str(provider_config.get("from_env") or defaults["from_env"])
@@ -118,6 +160,8 @@ def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | Non
         username=username,
         password=password,
         from_addr=from_addr,
+        auth_method="app_password",
+        oauth_access_token="",
         mailbox=str(provider_config.get("mailbox") or defaults["mailbox"]),
         archive_mailbox=str(provider_config.get("archive_mailbox") or defaults["archive_mailbox"]),
         max_body_chars=max_body_chars,
@@ -127,6 +171,16 @@ def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | Non
 def _not_configured(provider: str, context: ToolRuntimeContext) -> dict[str, Any]:
     defaults = PROVIDER_DEFAULTS[provider]
     configured = context.config.get("email", {}).get(provider, {})
+    if isinstance(configured, dict) and configured.get("auth_method") == "oauth2":
+        return {
+            "status": "connector_not_configured",
+            "connector": provider,
+            "message": (
+                "Gmail OAuth2 is not fully configured. Add the Google client ID/client secret, "
+                "complete the authorization flow, and make sure a refresh token is stored."
+            ),
+            "required": ["oauth_client_id", "oauth_client_secret", "oauth_refresh_token", "oauth_email"],
+        }
     username_env = str(configured.get("username_env") or defaults["username_env"]) if isinstance(configured, dict) else str(defaults["username_env"])
     password_env = str(configured.get("password_env") or defaults["password_env"]) if isinstance(configured, dict) else str(defaults["password_env"])
     return {
@@ -259,7 +313,7 @@ def _send_draft(args: dict[str, Any], context: ToolRuntimeContext, settings: Ema
     try:
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as client:
             client.starttls()
-            client.login(settings.username, settings.password)
+            _smtp_login(client, settings)
             client.send_message(message)
     except smtplib.SMTPAuthenticationError as exc:
         return _smtp_authentication_failed(settings, draft_id, exc)
@@ -354,8 +408,25 @@ def _label(args: dict[str, Any], settings: EmailSettings) -> dict[str, Any]:
 
 def _imap(settings: EmailSettings) -> imaplib.IMAP4_SSL:
     client = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port, timeout=30)
-    client.login(settings.username, settings.password)
+    if settings.auth_method == "oauth2":
+        client.authenticate("XOAUTH2", lambda _: _xoauth2_string(settings))
+    else:
+        client.login(settings.username, settings.password)
     return client
+
+
+def _smtp_login(client: smtplib.SMTP, settings: EmailSettings) -> None:
+    if settings.auth_method != "oauth2":
+        client.login(settings.username, settings.password)
+        return
+    auth = base64.b64encode(_xoauth2_string(settings)).decode("ascii")
+    code, response = client.docmd("AUTH", f"XOAUTH2 {auth}")
+    if code != 235:
+        raise smtplib.SMTPAuthenticationError(code, response)
+
+
+def _xoauth2_string(settings: EmailSettings) -> bytes:
+    return f"user={settings.username}\x01auth=Bearer {settings.oauth_access_token}\x01\x01".encode("utf-8")
 
 
 def _select(client: imaplib.IMAP4_SSL, mailbox: str) -> None:

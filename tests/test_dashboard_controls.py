@@ -2,6 +2,7 @@ import os
 import smtplib
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -20,8 +21,10 @@ from dmdagent4all.server import (
     EmailConfigurationRequest,
     EmailCredentialsRequest,
     EmailProviderConfigurationRequest,
+    GmailOAuthStartRequest,
     ReminderRuntime,
     _configuration_response,
+    _configure_gmail_oauth,
     _connector_statuses,
     _deepseek_status,
     _load_email_credentials,
@@ -39,7 +42,9 @@ from dmdagent4all.server import (
     _update_agent_configuration,
     _validate_terminal_allowlist_command,
 )
+from dmdagent4all.email_oauth import GMAIL_OAUTH_SCOPE, google_authorization_url
 from dmdagent4all.tools import build_builtin_registry
+from dmdagent4all.tools.email_connector import _settings
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.reminders import (
     create_reminder,
@@ -226,6 +231,78 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertTrue(result["data"]["credentials_loaded"])
         self.assertNotIn("app-password", str(result))
 
+    def test_gmail_oauth_configuration_does_not_expose_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _FakePaths(Path(tmp))
+            config = deepcopy(DEFAULT_CONFIG)
+            _configure_gmail_oauth(
+                config,
+                GmailOAuthStartRequest(
+                    client_id="client-id.apps.googleusercontent.com",
+                    email="sender@gmail.com",
+                    from_address="from@gmail.com",
+                    redirect_uri="http://127.0.0.1:8765/v1/email/oauth/google/callback",
+                ),
+            )
+            with mock.patch("dmdagent4all.server.load_email_secret", return_value="stored-secret"):
+                response = _configuration_response(paths, config)
+
+        gmail = response["email"]["gmail"]
+        self.assertTrue(gmail["enabled"])
+        self.assertEqual(gmail["auth_method"], "oauth2")
+        self.assertEqual(gmail["oauth_client_id"], "client-id.apps.googleusercontent.com")
+        self.assertEqual(gmail["oauth_email"], "sender@gmail.com")
+        self.assertTrue(gmail["oauth_client_secret_loaded"])
+        self.assertTrue(gmail["oauth_refresh_token_loaded"])
+        self.assertTrue(gmail["oauth_connected"])
+        self.assertNotIn("stored-secret", str(response))
+
+    def test_gmail_oauth_authorization_url_uses_gmail_scope_and_offline_access(self) -> None:
+        url = google_authorization_url(
+            client_id="client-id.apps.googleusercontent.com",
+            redirect_uri="http://127.0.0.1:8765/v1/email/oauth/google/callback",
+            state="state-123",
+        )
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+
+        self.assertEqual(parsed.netloc, "accounts.google.com")
+        self.assertEqual(query["scope"], [GMAIL_OAUTH_SCOPE])
+        self.assertEqual(query["access_type"], ["offline"])
+        self.assertEqual(query["prompt"], ["consent"])
+        self.assertEqual(query["state"], ["state-123"])
+
+    def test_gmail_oauth_settings_refresh_token_without_app_password(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"].update(
+                {
+                    "enabled": True,
+                    "auth_method": "oauth2",
+                    "oauth_client_id": "client-id.apps.googleusercontent.com",
+                    "oauth_email": "sender@gmail.com",
+                    "oauth_from_address": "from@gmail.com",
+                }
+            )
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            with mock.patch("dmdagent4all.tools.email_connector.load_email_secret", return_value="secret"):
+                with mock.patch("dmdagent4all.tools.email_connector.refresh_google_access_token", return_value="access-token") as refresh:
+                    settings = _settings("gmail", context)
+
+        self.assertIsNotNone(settings)
+        assert settings is not None
+        self.assertEqual(settings.auth_method, "oauth2")
+        self.assertEqual(settings.username, "sender@gmail.com")
+        self.assertEqual(settings.from_addr, "from@gmail.com")
+        self.assertEqual(settings.password, "")
+        self.assertEqual(settings.oauth_access_token, "access-token")
+        refresh.assert_called_once()
+
     def test_local_calendar_handlers_cover_update_delete_and_free_slots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -311,6 +388,47 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertTrue(sent["sent"])
         self.assertEqual(sent["to"], ["recipient@example.com"])
         self.assertEqual(FakeSMTP.sent_messages[0]["To"], "recipient@example.com")
+
+    def test_gmail_oauth_send_uses_xoauth2_instead_of_password_login(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"].update(
+                {
+                    "enabled": True,
+                    "auth_method": "oauth2",
+                    "oauth_client_id": "client-id.apps.googleusercontent.com",
+                    "oauth_email": "sender@gmail.com",
+                }
+            )
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            registry = build_builtin_registry()
+            with mock.patch("dmdagent4all.tools.email_connector.load_email_secret", return_value="secret"):
+                with mock.patch("dmdagent4all.tools.email_connector.refresh_google_access_token", return_value="access-token"):
+                    draft = registry.execute(
+                        "gmail.create_draft",
+                        {
+                            "to": "recipient@example.com",
+                            "subject": "OAuth subject",
+                            "body": "Hello from OAuth",
+                        },
+                        context,
+                    )
+                    with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeOAuthSMTP):
+                        FakeOAuthSMTP.sent_messages.clear()
+                        FakeOAuthSMTP.auth_commands.clear()
+                        FakeOAuthSMTP.login_called = False
+                        sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
+
+        self.assertTrue(sent["sent"])
+        self.assertEqual(FakeOAuthSMTP.sent_messages[0]["To"], "recipient@example.com")
+        self.assertFalse(FakeOAuthSMTP.login_called)
+        self.assertTrue(FakeOAuthSMTP.auth_commands)
+        self.assertTrue(FakeOAuthSMTP.auth_commands[0].startswith("AUTH XOAUTH2 "))
 
     def test_outlook_basic_auth_failure_returns_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -604,6 +722,19 @@ class FailingAuthSMTP(FakeSMTP):
             535,
             b"5.7.139 Authentication unsuccessful, basic authentication is disabled.",
         )
+
+
+class FakeOAuthSMTP(FakeSMTP):
+    auth_commands: list[str] = []
+    login_called = False
+
+    def login(self, username: str, password: str) -> None:
+        del username, password
+        type(self).login_called = True
+
+    def docmd(self, command: str, args: str):
+        self.auth_commands.append(f"{command} {args}")
+        return 235, b"2.7.0 Accepted"
 
 
 class FakeIMAP:

@@ -1040,6 +1040,33 @@ label {
   min-width: max-content;
 }
 
+.email-oauth-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.email-oauth-status span {
+  border: 1px solid var(--line-bright);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.026);
+  color: var(--muted);
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.email-oauth-status strong {
+  color: var(--accent);
+}
+
+.email-oauth-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 0.7rem;
+  align-items: end;
+}
+
 .advanced-mail-settings {
   border-top: 1px solid rgba(36, 50, 61, 0.72);
   padding-top: 0.7rem;
@@ -1184,6 +1211,7 @@ label {
   .settings-form,
   .settings-form-compact,
   .email-login-form,
+  .email-oauth-form,
   .email-secret-form,
   .setting-row,
   .run-form,

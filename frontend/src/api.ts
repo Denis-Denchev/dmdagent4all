@@ -301,6 +301,7 @@ export type AgentConfiguration = {
 
 export type EmailProviderConfiguration = {
   enabled: boolean
+  auth_method: 'app_password' | 'oauth2'
   imap_host: string
   imap_port: number
   smtp_host: string
@@ -308,6 +309,13 @@ export type EmailProviderConfiguration = {
   username_env: string
   password_env: string
   from_env: string
+  oauth_client_id: string
+  oauth_redirect_uri: string
+  oauth_email: string
+  oauth_from_address: string
+  oauth_client_secret_loaded: boolean
+  oauth_refresh_token_loaded: boolean
+  oauth_connected: boolean
   mailbox: string
   archive_mailbox: string
   credentials_loaded: boolean
@@ -340,6 +348,7 @@ export type AgentConfigurationUpdate = {
 
 export type EmailProviderConfigurationUpdate = {
   enabled?: boolean
+  auth_method?: 'app_password' | 'oauth2'
   imap_host?: string
   imap_port?: number
   smtp_host?: string
@@ -347,6 +356,10 @@ export type EmailProviderConfigurationUpdate = {
   username_env?: string
   password_env?: string
   from_env?: string
+  oauth_client_id?: string
+  oauth_redirect_uri?: string
+  oauth_email?: string
+  oauth_from_address?: string
   mailbox?: string
   archive_mailbox?: string
 }
@@ -411,6 +424,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, username, app_password, from_address: from_address || null }),
     }),
+  startGmailOAuth: (settings: {
+    client_id: string
+    client_secret?: string
+    email: string
+    from_address?: string
+    redirect_uri?: string
+  }) =>
+    request<AgentResponse>('/v1/email/oauth/google/start', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    }),
+  loadGmailOAuthClientSecret: (client_secret: string) =>
+    request<AgentResponse>('/v1/email/oauth/google/client-secret', {
+      method: 'POST',
+      body: JSON.stringify({ client_secret }),
+    }),
+  disconnectGmailOAuth: () => request<AgentResponse>('/v1/email/oauth/google/disconnect', { method: 'POST' }),
   memory: () => request<MemoryList>('/v1/memory'),
   memoryFile: (path: string) =>
     request<MemoryFile>(`/v1/memory/file?path=${encodeURIComponent(path)}`),

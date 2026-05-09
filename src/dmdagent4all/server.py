@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import html
 import json
 import mimetypes
 import re
+import secrets as token_secrets
 import shlex
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -14,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,6 +27,15 @@ from dmdagent4all.app_paths import AppPaths
 from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.config import load_config, update_config, write_default_config
 from dmdagent4all.doctor import doctor_summary, run_doctor
+from dmdagent4all.email_oauth import (
+    DEFAULT_GMAIL_OAUTH_REDIRECT_URI,
+    GMAIL_OAUTH_SCOPE,
+    delete_email_secret,
+    exchange_google_code,
+    google_authorization_url,
+    load_email_secret,
+    store_email_secret,
+)
 from dmdagent4all.interfaces.telegram import (
     DEFAULT_TOKEN_ENV,
     TelegramConfigError,
@@ -68,6 +80,7 @@ EMAIL_MAX_BODY_CHARS_DEFAULT = 20_000
 EMAIL_PROVIDER_DEFAULTS = {
     "gmail": {
         "enabled": False,
+        "auth_method": "app_password",
         "imap_host": "imap.gmail.com",
         "imap_port": 993,
         "smtp_host": "smtp.gmail.com",
@@ -75,11 +88,16 @@ EMAIL_PROVIDER_DEFAULTS = {
         "username_env": "DMDAGENT_GMAIL_USERNAME",
         "password_env": "DMDAGENT_GMAIL_APP_PASSWORD",
         "from_env": "DMDAGENT_GMAIL_FROM",
+        "oauth_client_id": "",
+        "oauth_redirect_uri": DEFAULT_GMAIL_OAUTH_REDIRECT_URI,
+        "oauth_email": "",
+        "oauth_from_address": "",
         "mailbox": "INBOX",
         "archive_mailbox": "[Gmail]/All Mail",
     },
     "outlook": {
         "enabled": False,
+        "auth_method": "app_password",
         "imap_host": "outlook.office365.com",
         "imap_port": 993,
         "smtp_host": "smtp.office365.com",
@@ -145,6 +163,7 @@ class TerminalSettingsRequest(BaseModel):
 
 class EmailProviderConfigurationRequest(BaseModel):
     enabled: bool | None = None
+    auth_method: str | None = None
     imap_host: str | None = None
     imap_port: int | None = None
     smtp_host: str | None = None
@@ -152,6 +171,10 @@ class EmailProviderConfigurationRequest(BaseModel):
     username_env: str | None = None
     password_env: str | None = None
     from_env: str | None = None
+    oauth_client_id: str | None = None
+    oauth_redirect_uri: str | None = None
+    oauth_email: str | None = None
+    oauth_from_address: str | None = None
     mailbox: str | None = None
     archive_mailbox: str | None = None
 
@@ -213,6 +236,18 @@ class EmailCredentialsRequest(BaseModel):
     from_address: str | None = None
 
 
+class GmailOAuthStartRequest(BaseModel):
+    client_id: str
+    client_secret: str | None = None
+    email: str
+    from_address: str | None = None
+    redirect_uri: str | None = None
+
+
+class GmailOAuthSecretRequest(BaseModel):
+    client_secret: str
+
+
 class OpenAIKeyRequest(BaseModel):
     api_key: str
 
@@ -230,6 +265,8 @@ def create_app() -> FastAPI:
     reminder_runtime = ReminderRuntime(paths, telegram_runtime)
 
     app = FastAPI(title="DMD Agent 4 All", version="1.0.0")
+    google_oauth_states: dict[str, datetime] = {}
+    google_oauth_lock = threading.RLock()
 
     @app.on_event("startup")
     def start_background_services() -> None:
@@ -490,8 +527,110 @@ def create_app() -> FastAPI:
         provider = request.provider.strip().lower()
         if provider not in EMAIL_PROVIDER_DEFAULTS:
             raise HTTPException(status_code=400, detail="provider must be gmail or outlook.")
-        config = update_config(lambda current: _set_email_provider_enabled(current, provider, True), paths.config)
+        def update(current: dict[str, Any]) -> None:
+            _set_email_provider_enabled(current, provider, True)
+            current.setdefault("email", {}).setdefault(provider, {})["auth_method"] = "app_password"
+
+        config = update_config(update, paths.config)
         return _load_email_credentials(config, request)
+
+    @app.post("/v1/email/oauth/google/client-secret")
+    def gmail_oauth_client_secret(request: GmailOAuthSecretRequest) -> dict[str, Any]:
+        try:
+            storage = store_email_secret("gmail", "oauth_client_secret", request.client_secret)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "message": "Gmail OAuth client secret loaded into the local secret store.",
+            "data": {
+                "provider": "gmail",
+                "secret_loaded": True,
+                "storage": storage,
+            },
+        }
+
+    @app.post("/v1/email/oauth/google/start")
+    def gmail_oauth_start(request: GmailOAuthStartRequest) -> dict[str, Any]:
+        state = token_secrets.token_urlsafe(32)
+        with google_oauth_lock:
+            google_oauth_states[state] = datetime.now(timezone.utc)
+        config = update_config(lambda current: _configure_gmail_oauth(current, request), paths.config)
+        if request.client_secret and request.client_secret.strip():
+            try:
+                store_email_secret("gmail", "oauth_client_secret", request.client_secret)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        gmail = _email_configuration_response(config)["gmail"]
+        if not gmail["oauth_client_secret_loaded"]:
+            raise HTTPException(status_code=400, detail="Gmail OAuth client secret is required before starting authorization.")
+        authorization_url = google_authorization_url(
+            client_id=gmail["oauth_client_id"],
+            redirect_uri=gmail["oauth_redirect_uri"],
+            state=state,
+        )
+        return {
+            "status": "ok",
+            "message": "Open the Google authorization URL and approve Gmail access.",
+            "data": {
+                "authorization_url": authorization_url,
+                "redirect_uri": gmail["oauth_redirect_uri"],
+                "scope": GMAIL_OAUTH_SCOPE,
+            },
+        }
+
+    @app.get("/v1/email/oauth/google/callback")
+    def gmail_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None) -> HTMLResponse:
+        if error:
+            return _oauth_callback_page("Google authorization was denied.", error, success=False)
+        if not code or not state:
+            return _oauth_callback_page("Google authorization failed.", "Missing code or state.", success=False)
+        with google_oauth_lock:
+            state_created = google_oauth_states.pop(state, None)
+        if state_created is None:
+            return _oauth_callback_page("Google authorization failed.", "OAuth state was not recognized. Start again from Config.", success=False)
+        config = load_config(paths.config)
+        gmail = _email_configuration_response(config)["gmail"]
+        client_secret = load_email_secret("gmail", "oauth_client_secret")
+        if not gmail["oauth_client_id"] or not client_secret:
+            return _oauth_callback_page("Google authorization failed.", "Client ID or client secret is missing.", success=False)
+        try:
+            token = exchange_google_code(
+                client_id=gmail["oauth_client_id"],
+                client_secret=client_secret,
+                redirect_uri=gmail["oauth_redirect_uri"],
+                code=code,
+            )
+        except ValueError as exc:
+            return _oauth_callback_page("Google token exchange failed.", str(exc), success=False)
+        refresh_token = str(token.get("refresh_token") or "").strip()
+        if refresh_token:
+            try:
+                store_email_secret("gmail", "oauth_refresh_token", refresh_token)
+            except ValueError as exc:
+                return _oauth_callback_page("Could not store Gmail OAuth token.", str(exc), success=False)
+        elif not load_email_secret("gmail", "oauth_refresh_token"):
+            return _oauth_callback_page(
+                "Google authorization did not return a refresh token.",
+                "Start again and make sure the consent screen is shown.",
+                success=False,
+            )
+        update_config(lambda current: _set_email_provider_enabled(current, "gmail", True), paths.config)
+        return _oauth_callback_page(
+            "Gmail OAuth2 is connected.",
+            "You can close this tab and return to DMD Agent.",
+            success=True,
+        )
+
+    @app.post("/v1/email/oauth/google/disconnect")
+    def gmail_oauth_disconnect() -> dict[str, Any]:
+        delete_email_secret("gmail", "oauth_refresh_token")
+        config = update_config(lambda current: _disconnect_gmail_oauth(current), paths.config)
+        return {
+            "status": "ok",
+            "message": "Gmail OAuth refresh token disconnected.",
+            "data": _email_configuration_response(config)["gmail"],
+        }
 
     @app.get("/v1/status")
     def status() -> dict[str, Any]:
@@ -1213,8 +1352,23 @@ def _email_provider_configuration_response(email: dict[str, Any], provider: str)
     username_env = _email_provider_string(provider_config, defaults, "username_env")
     password_env = _email_provider_string(provider_config, defaults, "password_env")
     from_env = _email_provider_string(provider_config, defaults, "from_env")
+    auth_method = str(provider_config.get("auth_method") or defaults.get("auth_method") or "app_password").strip()
+    if auth_method not in {"app_password", "oauth2"}:
+        auth_method = "app_password"
+    oauth_client_secret_loaded = bool(load_email_secret(provider, "oauth_client_secret")) if provider == "gmail" else False
+    oauth_refresh_token_loaded = bool(load_email_secret(provider, "oauth_refresh_token")) if provider == "gmail" else False
+    oauth_email = _email_provider_string(provider_config, defaults, "oauth_email") if "oauth_email" in defaults else ""
+    oauth_connected = provider == "gmail" and bool(
+        auth_method == "oauth2"
+        and provider_config.get("oauth_client_id")
+        and oauth_email
+        and oauth_client_secret_loaded
+        and oauth_refresh_token_loaded
+    )
+    app_password_loaded = bool(os.environ.get(username_env, "").strip() and os.environ.get(password_env, "").strip())
     return {
         "enabled": bool(provider_config.get("enabled", defaults["enabled"])),
+        "auth_method": auth_method,
         "imap_host": _email_provider_string(provider_config, defaults, "imap_host"),
         "imap_port": _coerce_int(provider_config.get("imap_port"), int(defaults["imap_port"])),
         "smtp_host": _email_provider_string(provider_config, defaults, "smtp_host"),
@@ -1222,9 +1376,16 @@ def _email_provider_configuration_response(email: dict[str, Any], provider: str)
         "username_env": username_env,
         "password_env": password_env,
         "from_env": from_env,
+        "oauth_client_id": _email_provider_string(provider_config, defaults, "oauth_client_id") if "oauth_client_id" in defaults else "",
+        "oauth_redirect_uri": _email_provider_string(provider_config, defaults, "oauth_redirect_uri") if "oauth_redirect_uri" in defaults else "",
+        "oauth_email": oauth_email,
+        "oauth_from_address": _email_provider_string(provider_config, defaults, "oauth_from_address") if "oauth_from_address" in defaults else "",
+        "oauth_client_secret_loaded": oauth_client_secret_loaded,
+        "oauth_refresh_token_loaded": oauth_refresh_token_loaded,
+        "oauth_connected": oauth_connected,
         "mailbox": _email_provider_string(provider_config, defaults, "mailbox"),
         "archive_mailbox": _email_provider_string(provider_config, defaults, "archive_mailbox"),
-        "credentials_loaded": bool(os.environ.get(username_env, "").strip() and os.environ.get(password_env, "").strip()),
+        "credentials_loaded": oauth_connected if auth_method == "oauth2" else app_password_loaded,
         "from_loaded": bool(os.environ.get(from_env, "").strip()),
     }
 
@@ -1271,6 +1432,8 @@ def _update_email_provider_configuration(
     defaults = EMAIL_PROVIDER_DEFAULTS[provider]
     if request.enabled is not None:
         _set_email_provider_enabled(config, provider, bool(request.enabled))
+    if request.auth_method is not None:
+        provider_config["auth_method"] = _validated_email_auth_method(request.auth_method, provider)
     for key in ("imap_host", "smtp_host", "mailbox", "archive_mailbox"):
         value = getattr(request, key)
         if value is not None:
@@ -1283,6 +1446,15 @@ def _update_email_provider_configuration(
         value = getattr(request, key)
         if value is not None:
             provider_config[key] = _validated_env_var_name(value, key)
+    if provider == "gmail":
+        if request.oauth_client_id is not None:
+            provider_config["oauth_client_id"] = request.oauth_client_id.strip()
+        if request.oauth_redirect_uri is not None:
+            provider_config["oauth_redirect_uri"] = _validated_oauth_redirect_uri(request.oauth_redirect_uri)
+        if request.oauth_email is not None:
+            provider_config["oauth_email"] = request.oauth_email.strip()
+        if request.oauth_from_address is not None:
+            provider_config["oauth_from_address"] = request.oauth_from_address.strip()
 
 
 def _set_email_provider_enabled(config: dict[str, Any], provider: str, enabled: bool) -> None:
@@ -1343,6 +1515,74 @@ def _validated_env_var_name(value: str, label: str) -> str:
     return env_var
 
 
+def _validated_email_auth_method(value: str, provider: str) -> str:
+    auth_method = value.strip().lower()
+    if auth_method not in {"app_password", "oauth2"}:
+        raise HTTPException(status_code=400, detail="auth_method must be app_password or oauth2.")
+    if auth_method == "oauth2" and provider != "gmail":
+        raise HTTPException(status_code=400, detail="OAuth2 is currently available for Gmail only.")
+    return auth_method
+
+
+def _validated_oauth_redirect_uri(value: str) -> str:
+    redirect_uri = value.strip() or DEFAULT_GMAIL_OAUTH_REDIRECT_URI
+    parsed = urllib.parse.urlparse(redirect_uri)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="oauth_redirect_uri must be an absolute http(s) URL.")
+    return redirect_uri
+
+
+def _configure_gmail_oauth(config: dict[str, Any], request: GmailOAuthStartRequest) -> None:
+    client_id = request.client_id.strip()
+    email = request.email.strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="Google OAuth client ID is required.")
+    if not email:
+        raise HTTPException(status_code=400, detail="Gmail address is required.")
+    _set_email_provider_enabled(config, "gmail", True)
+    provider_config = config.setdefault("email", {}).setdefault("gmail", {})
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+        config["email"]["gmail"] = provider_config
+    provider_config["auth_method"] = "oauth2"
+    provider_config["oauth_client_id"] = client_id
+    provider_config["oauth_redirect_uri"] = _validated_oauth_redirect_uri(request.redirect_uri or DEFAULT_GMAIL_OAUTH_REDIRECT_URI)
+    provider_config["oauth_email"] = email
+    provider_config["oauth_from_address"] = (request.from_address or "").strip()
+
+
+def _disconnect_gmail_oauth(config: dict[str, Any]) -> None:
+    email = config.setdefault("email", {})
+    provider_config = email.setdefault("gmail", {})
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+        email["gmail"] = provider_config
+    provider_config["auth_method"] = "app_password"
+
+
+def _oauth_callback_page(title: str, detail: str, *, success: bool) -> HTMLResponse:
+    color = "#41d0a2" if success else "#e35e4f"
+    safe_title = html.escape(title)
+    safe_detail = html.escape(detail)
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{safe_title}</title>
+    <style>
+      body {{ margin: 0; background: #080b0f; color: #d9fff1; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+      main {{ max-width: 720px; margin: 12vh auto; border: 1px solid #24323d; border-radius: 8px; background: #111820; padding: 28px; }}
+      h1 {{ margin: 0 0 12px; color: {color}; }}
+      p {{ color: #9db1aa; line-height: 1.55; }}
+    </style>
+  </head>
+  <body><main><h1>{safe_title}</h1><p>{safe_detail}</p></main></body>
+</html>"""
+    )
+
+
 def _load_email_credentials(config: dict[str, Any], request: EmailCredentialsRequest) -> dict[str, Any]:
     provider = request.provider.strip().lower()
     if provider not in EMAIL_PROVIDER_DEFAULTS:
@@ -1354,6 +1594,7 @@ def _load_email_credentials(config: dict[str, Any], request: EmailCredentialsReq
     if not app_password:
         raise HTTPException(status_code=400, detail="Email app password is required.")
     provider_config = _email_configuration_response(config)[provider]
+    config.setdefault("email", {}).setdefault(provider, {})["auth_method"] = "app_password"
     username_env = provider_config["username_env"]
     password_env = provider_config["password_env"]
     from_env = provider_config["from_env"]
@@ -1901,6 +2142,23 @@ def _email_connector_status(
     username_env = str(provider_config.get("username_env") or defaults["username_env"])
     password_env = str(provider_config.get("password_env") or defaults["password_env"])
     enabled = bool(provider_config.get("enabled", False))
+    auth_method = str(provider_config.get("auth_method") or defaults.get("auth_method") or "app_password")
+    if provider == "gmail" and auth_method == "oauth2":
+        has_oauth = bool(
+            provider_config.get("oauth_client_id")
+            and provider_config.get("oauth_email")
+            and load_email_secret("gmail", "oauth_client_secret")
+            and load_email_secret("gmail", "oauth_refresh_token")
+        )
+        if enabled and has_oauth:
+            return {
+                "status": "configured" if enabled_tools else "disabled",
+                "detail": "Gmail OAuth2 connector is configured through the local secret store.",
+            }
+        return {
+            "status": "not_configured",
+            "detail": "Gmail OAuth2 needs a client ID, client secret, Gmail address, and completed Google authorization.",
+        }
     has_env = bool(os.environ.get(username_env) and os.environ.get(password_env))
     if enabled and has_env:
         return {
