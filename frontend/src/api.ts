@@ -278,6 +278,12 @@ export type AgentConfiguration = {
     downloads_root?: string
   }
   system_prompts: {
+    chat: {
+      default: string
+      custom: string
+      effective: string
+      customized: boolean
+    }
     planner: {
       default: string
       custom: string
@@ -317,6 +323,7 @@ export type AgentConfigurationUpdate = {
   planner_max_tokens?: number
   planner_temperature?: number
   planner_think?: boolean
+  chat_system_prompt?: string
   planner_system_prompt?: string
   answer_system_prompt?: string
   send_chat_history_to_cloud?: boolean

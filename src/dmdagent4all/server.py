@@ -871,6 +871,7 @@ def create_app() -> FastAPI:
             "data": telegram_runtime.status(config),
         }
 
+    _register_spa_routes(app)
     _mount_static_dashboard(app)
     return app
 
@@ -898,6 +899,35 @@ def _cancel_pending_approvals(paths: AppPaths) -> list[int]:
 
 
 def _mount_static_dashboard(app: FastAPI) -> None:
+    static_dir = _dashboard_static_dir()
+    if static_dir is not None:
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="dashboard")
+
+
+def _register_spa_routes(app: FastAPI) -> None:
+    def index_response() -> FileResponse:
+        static_dir = _dashboard_static_dir()
+        if static_dir is None:
+            raise HTTPException(status_code=404, detail="Dashboard build is not available.")
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/chat", include_in_schema=False)
+    @app.get("/downloads", include_in_schema=False)
+    @app.get("/approvals", include_in_schema=False)
+    @app.get("/models", include_in_schema=False)
+    @app.get("/memory", include_in_schema=False)
+    @app.get("/telegram", include_in_schema=False)
+    @app.get("/tools", include_in_schema=False)
+    @app.get("/logs", include_in_schema=False)
+    @app.get("/help", include_in_schema=False)
+    @app.get("/config", include_in_schema=False)
+    @app.get("/config/{section}", include_in_schema=False)
+    def dashboard_route(section: str | None = None) -> FileResponse:
+        del section
+        return index_response()
+
+
+def _dashboard_static_dir() -> Path | None:
     configured = os.environ.get("DMDAGENT_STATIC_DIR", "").strip()
     candidates = [
         Path(configured).expanduser() if configured else None,
@@ -907,8 +937,8 @@ def _mount_static_dashboard(app: FastAPI) -> None:
         if candidate is None:
             continue
         if (candidate / "index.html").exists():
-            app.mount("/", StaticFiles(directory=str(candidate), html=True), name="dashboard")
-            return
+            return candidate
+    return None
 
 
 class TelegramRuntime:

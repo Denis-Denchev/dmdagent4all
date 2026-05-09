@@ -21,8 +21,23 @@ import {
   type WorkspaceFileContent,
   type WorkspaceFilesResponse,
 } from './api'
+import { AppRoutes, SidebarNav, type SidebarNavItem } from './components/layout'
+import {
+  ConfigHub,
+  ConfigSectionPage,
+  DangerZone,
+  SettingGroup,
+  SettingRow,
+  type ConfigHubEntry,
+} from './components/settings'
 
-type View = 'chat' | 'downloads' | 'models' | 'config' | 'telegram' | 'memory' | 'tools' | 'logs' | 'help'
+type View = 'chat' | 'downloads' | 'approvals' | 'models' | 'config' | 'telegram' | 'memory' | 'tools' | 'logs' | 'help'
+type ConfigSection = 'general' | 'models' | 'tools' | 'security' | 'workspace' | 'memory' | 'telegram' | 'emergency' | 'advanced'
+
+type DashboardRoute = {
+  view: View
+  configSection: ConfigSection | null
+}
 
 type ChatMessage = {
   id: string
@@ -55,6 +70,7 @@ type ConfigDraft = {
   plannerMaxTokens: string
   plannerTemperature: string
   plannerThink: boolean
+  chatSystemPrompt: string
   plannerSystemPrompt: string
   answerSystemPrompt: string
   sendChatHistoryToCloud: boolean
@@ -94,6 +110,7 @@ type EmailCredentialsDraft = {
 const views: Array<{ key: View; label: string; short: string; description: string }> = [
   { key: 'chat', label: 'Chat', short: 'CH', description: 'Work with the agent' },
   { key: 'downloads', label: 'Downloads', short: 'DL', description: 'Files from web work' },
+  { key: 'approvals', label: 'Approvals', short: 'AP', description: 'Pending risky actions' },
   { key: 'models', label: 'Models', short: 'MD', description: 'Runtime and token controls' },
   { key: 'config', label: 'Config', short: 'CF', description: 'Agent settings and paths' },
   { key: 'telegram', label: 'Telegram', short: 'TG', description: 'Remote access' },
@@ -102,6 +119,31 @@ const views: Array<{ key: View; label: string; short: string; description: strin
   { key: 'logs', label: 'Logs', short: 'LG', description: 'Audit trail' },
   { key: 'help', label: 'Help', short: 'HP', description: 'Manual and guide' },
 ]
+
+const configSectionLabels: Record<ConfigSection, string> = {
+  general: 'General',
+  models: 'Models',
+  tools: 'Tools',
+  security: 'Security',
+  workspace: 'Workspace',
+  memory: 'Memory',
+  telegram: 'Telegram',
+  emergency: 'Emergency',
+  advanced: 'Advanced',
+}
+
+const viewPaths: Record<View, string> = {
+  chat: '/chat',
+  downloads: '/downloads',
+  approvals: '/approvals',
+  models: '/models',
+  config: '/config',
+  telegram: '/telegram',
+  memory: '/memory',
+  tools: '/tools',
+  logs: '/logs',
+  help: '/help',
+}
 
 const tourSteps: TourStep[] = [
   {
@@ -191,6 +233,7 @@ function initialConfigDraft(): ConfigDraft {
     plannerMaxTokens: '192',
     plannerTemperature: '0',
     plannerThink: false,
+    chatSystemPrompt: '',
     plannerSystemPrompt: '',
     answerSystemPrompt: '',
     sendChatHistoryToCloud: false,
@@ -222,8 +265,32 @@ function initialConfigDraft(): ConfigDraft {
   }
 }
 
+function routeFromPath(pathname: string): DashboardRoute {
+  const clean = pathname.replace(/\/+$/, '') || '/'
+  const parts = clean.split('/').filter(Boolean)
+  if (parts[0] === 'config') {
+    const section = parts[1] as ConfigSection | undefined
+    return {
+      view: 'config',
+      configSection: section && section in configSectionLabels ? section : null,
+    }
+  }
+  const view = (parts[0] || 'chat') as View
+  if (views.some((item) => item.key === view)) {
+    return { view, configSection: null }
+  }
+  return { view: 'chat', configSection: null }
+}
+
+function pathForRoute(view: View, configSection: ConfigSection | null = null) {
+  if (view === 'config' && configSection) return `/config/${configSection}`
+  return viewPaths[view] ?? '/chat'
+}
+
 export function App() {
-  const [activeView, setActiveView] = useState<View>('chat')
+  const initialRoute = routeFromPath(window.location.pathname)
+  const [activeView, setActiveViewState] = useState<View>(initialRoute.view)
+  const [configSection, setConfigSection] = useState<ConfigSection | null>(initialRoute.configSection)
   const [railCollapsed, setRailCollapsed] = useState(false)
   const chatLogRef = useRef<HTMLDivElement | null>(null)
   const chatEndRef = useRef<HTMLDivElement | null>(null)
@@ -281,9 +348,35 @@ export function App() {
   const [tourStep, setTourStep] = useState(0)
   const [tourRect, setTourRect] = useState<TourRect | null>(null)
 
+  function navigateTo(view: View, section: ConfigSection | null = null, options: { replace?: boolean } = {}) {
+    const nextPath = pathForRoute(view, section)
+    setActiveViewState(view)
+    setConfigSection(view === 'config' ? section : null)
+    if (window.location.pathname !== nextPath) {
+      const method = options.replace ? 'replaceState' : 'pushState'
+      window.history[method]({}, '', nextPath)
+    }
+  }
+
   const pendingCount = approvals.length
   const enabledToolCount = useMemo(() => tools.filter((tool) => tool.enabled).length, [tools])
-  const activeLabel = views.find((view) => view.key === activeView)?.label ?? 'Dashboard'
+  const activeLabel = activeView === 'config' && configSection
+    ? `Config / ${configSectionLabels[configSection]}`
+    : views.find((view) => view.key === activeView)?.label ?? 'Dashboard'
+  const navItems: SidebarNavItem[] = views.map((view) => ({
+    ...view,
+    badge: view.key === 'approvals' && pendingCount > 0 ? pendingCount : undefined,
+    tourId:
+      view.key === 'downloads'
+        ? 'tour-downloads'
+        : view.key === 'models'
+          ? 'tour-models'
+          : view.key === 'config'
+            ? 'tour-config'
+            : view.key === 'logs'
+              ? 'tour-logs'
+              : undefined,
+  }))
 
   const openaiModelOptions = useMemo(() => {
     const options = new Set(openaiModels)
@@ -305,15 +398,25 @@ export function App() {
     if (localStorage.getItem('dmdagent4all:tutorial-complete') !== '1') {
       setTourOpen(true)
       setTourStep(0)
-      setActiveView(tourSteps[0].view)
+      navigateTo(tourSteps[0].view, null, { replace: true })
     }
+  }, [])
+
+  useEffect(() => {
+    const onPopState = () => {
+      const route = routeFromPath(window.location.pathname)
+      setActiveViewState(route.view)
+      setConfigSection(route.configSection)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
   useEffect(() => {
     if (!tourOpen) return
     const step = tourSteps[tourStep]
     if (step.view !== activeView) {
-      setActiveView(step.view)
+      navigateTo(step.view, null)
       return
     }
     const update = () => {
@@ -424,6 +527,7 @@ export function App() {
       plannerMaxTokens: String(configurationResult.llm.planner_max_tokens ?? 192),
       plannerTemperature: String(configurationResult.llm.planner_temperature ?? 0),
       plannerThink: Boolean(configurationResult.llm.planner_think),
+      chatSystemPrompt: configurationResult.system_prompts.chat.effective,
       plannerSystemPrompt: configurationResult.system_prompts.planner.effective,
       answerSystemPrompt: configurationResult.system_prompts.answer.effective,
       sendChatHistoryToCloud: Boolean(configurationResult.privacy.send_chat_history_to_cloud),
@@ -480,7 +584,7 @@ export function App() {
         response,
       },
     ])
-    if (focusChat) setActiveView('chat')
+    if (focusChat) navigateTo('chat')
   }
 
   async function runAgentAction(action: () => Promise<AgentResponse>, options: { focusChat?: boolean } = {}) {
@@ -602,6 +706,7 @@ export function App() {
           planner_max_tokens: toNumber(configDraft.plannerMaxTokens),
           planner_temperature: toNumber(configDraft.plannerTemperature),
           planner_think: configDraft.plannerThink,
+          chat_system_prompt: configDraft.chatSystemPrompt,
           planner_system_prompt: configDraft.plannerSystemPrompt,
           answer_system_prompt: configDraft.answerSystemPrompt,
           send_chat_history_to_cloud: configDraft.sendChatHistoryToCloud,
@@ -785,7 +890,422 @@ export function App() {
       return
     }
     setTourStep(nextStep)
-    setActiveView(tourSteps[nextStep].view)
+    navigateTo(tourSteps[nextStep].view)
+  }
+
+  function renderConfigRoutes() {
+    const gmailStatus = connectors.find((connector) => connector.name === 'gmail')?.status ?? 'unknown'
+    const outlookStatus = connectors.find((connector) => connector.name === 'outlook')?.status ?? 'unknown'
+    const entries: ConfigHubEntry[] = [
+      {
+        key: 'general',
+        title: 'General',
+        description: 'App identity, user name, language, and startup defaults',
+        status: String(configuration?.setup.agent_name ?? 'DMD Agent'),
+        group: 'Core setup',
+      },
+      {
+        key: 'models',
+        title: 'Models',
+        description: 'Planner behavior, prompt stack, token limits, and model-facing instructions',
+        status: String(status?.llm.provider ?? 'loading'),
+        group: 'Core setup',
+      },
+      {
+        key: 'tools',
+        title: 'Tools',
+        description: 'Browser scrape limits, email sign-in, and connector configuration',
+        status: `${gmailStatus} / ${outlookStatus}`,
+        group: 'Core setup',
+      },
+      {
+        key: 'workspace',
+        title: 'Workspace',
+        description: 'Downloads, current workspace, terminal policy, and command allowlist',
+        status: terminal?.ready ? 'ready' : 'not ready',
+        tone: terminal?.ready ? 'normal' : 'warning',
+        group: 'Core setup',
+      },
+      {
+        key: 'security',
+        title: 'Security',
+        description: 'Approvals, cloud context, emergency stop, and guarded execution policy',
+        status: `risk ${configuration?.permissions.approval_required_at_risk ?? 3}+`,
+        tone: 'warning',
+        group: 'Safety and system',
+      },
+      {
+        key: 'advanced',
+        title: 'System',
+        description: 'Memory, Telegram, system paths, doctor summary, and connector readiness',
+        status: `${doctor?.summary.warn ?? 0} warnings`,
+        group: 'Safety and system',
+      },
+    ]
+
+    if (configSection === null) {
+      return (
+        <ConfigHub
+          entries={entries}
+          onOpen={(key) => navigateTo('config', key as ConfigSection)}
+        />
+      )
+    }
+
+    if (configSection === 'general') {
+      return (
+        <ConfigSectionPage
+          title="General"
+          description="Human-facing defaults for the local assistant."
+          onBack={() => navigateTo('config')}
+        >
+          <SettingGroup title="Identity" description="Used in normal chat and setup/status surfaces.">
+            <div className="setting-rows">
+              <SettingRow label="Agent name" help="The assistant identity shown in chat and prompts.">
+                <input value={configDraft.agentName} onChange={(event) => setConfigDraft({ ...configDraft, agentName: event.target.value })} />
+              </SettingRow>
+              <SettingRow label="User name" help="Optional local profile name.">
+                <input value={configDraft.userName} onChange={(event) => setConfigDraft({ ...configDraft, userName: event.target.value })} />
+              </SettingRow>
+              <SettingRow label="Preferred language" help="Input preference. Use auto unless you need a fixed language.">
+                <input value={configDraft.preferredLanguage} onChange={(event) => setConfigDraft({ ...configDraft, preferredLanguage: event.target.value })} />
+              </SettingRow>
+              <SettingRow label="Response language" help="Output language for model responses.">
+                <input value={configDraft.responseLanguage} onChange={(event) => setConfigDraft({ ...configDraft, responseLanguage: event.target.value })} />
+              </SettingRow>
+            </div>
+            <div className="row-actions">
+              <button className="button" type="button" onClick={() => void saveConfiguration()}>Save General</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'models') {
+      return (
+        <ConfigSectionPage
+          title="Models"
+          description="Prompt stack and planner behavior. Provider/API keys remain in the main Models screen."
+          onBack={() => navigateTo('config')}
+        >
+          <SettingGroup title="Planner runtime" description="Small changes here affect tool selection and response shaping.">
+            <div className="setting-rows">
+              <SettingRow label="Planner max tokens" help="Budget for tool-selection JSON.">
+                <input value={configDraft.plannerMaxTokens} onChange={(event) => setConfigDraft({ ...configDraft, plannerMaxTokens: event.target.value })} inputMode="numeric" />
+              </SettingRow>
+              <SettingRow label="Planner temperature" help="Keep low for predictable routing.">
+                <input value={configDraft.plannerTemperature} onChange={(event) => setConfigDraft({ ...configDraft, plannerTemperature: event.target.value })} inputMode="decimal" />
+              </SettingRow>
+              <label className="setting-check">
+                <input type="checkbox" checked={configDraft.plannerThink} onChange={(event) => setConfigDraft({ ...configDraft, plannerThink: event.target.checked })} />
+                <span><strong>Planner think mode</strong><small>Passes the think flag to compatible local/cloud providers.</small></span>
+              </label>
+            </div>
+          </SettingGroup>
+          <SettingGroup title="System prompts" description="Chat controls normal conversation; planner controls tool selection; answer controls tool-result wording.">
+            <div className="prompt-grid">
+              <label>Chat system prompt
+                <textarea value={configDraft.chatSystemPrompt} onChange={(event) => setConfigDraft({ ...configDraft, chatSystemPrompt: event.target.value })} spellCheck={false} />
+                <span className="field-note">{configuration?.system_prompts.chat.customized ? 'Custom prompt is active.' : 'Currently using the code default.'}</span>
+              </label>
+              <label>Planner system prompt
+                <textarea value={configDraft.plannerSystemPrompt} onChange={(event) => setConfigDraft({ ...configDraft, plannerSystemPrompt: event.target.value })} spellCheck={false} />
+                <span className="field-note">{configuration?.system_prompts.planner.customized ? 'Custom prompt is active.' : 'Currently using the code default.'}</span>
+              </label>
+              <label>Answer system prompt
+                <textarea value={configDraft.answerSystemPrompt} onChange={(event) => setConfigDraft({ ...configDraft, answerSystemPrompt: event.target.value })} spellCheck={false} />
+                <span className="field-note">{configuration?.system_prompts.answer.customized ? 'Custom prompt is active.' : 'Currently using the code default.'}</span>
+              </label>
+            </div>
+            <div className="row-actions">
+              <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Model Settings</button>
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={() =>
+                  setConfigDraft({
+                    ...configDraft,
+                    chatSystemPrompt: configuration?.system_prompts.chat.default ?? '',
+                    plannerSystemPrompt: configuration?.system_prompts.planner.default ?? '',
+                    answerSystemPrompt: configuration?.system_prompts.answer.default ?? '',
+                  })
+                }
+              >
+                Load Code Defaults
+              </button>
+              <button className="button button-secondary" type="button" onClick={() => navigateTo('models')}>Open Provider Models</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'tools') {
+      return (
+        <ConfigSectionPage
+          title="Tools"
+          description="Connector limits and tool-adjacent settings. Tool enablement remains in the Tools screen."
+          onBack={() => navigateTo('config')}
+        >
+          <SettingGroup title="Browser scraping" description="Controls guarded HTTP/browser extraction size and timeout.">
+            <div className="setting-rows">
+              <SettingRow label="Browser timeout seconds">
+                <input value={configDraft.browserTimeout} onChange={(event) => setConfigDraft({ ...configDraft, browserTimeout: event.target.value })} inputMode="numeric" />
+              </SettingRow>
+              <SettingRow label="Max response bytes">
+                <input value={configDraft.browserMaxResponseBytes} onChange={(event) => setConfigDraft({ ...configDraft, browserMaxResponseBytes: event.target.value })} inputMode="numeric" />
+              </SettingRow>
+              <SettingRow label="Max text chars">
+                <input value={configDraft.browserMaxTextChars} onChange={(event) => setConfigDraft({ ...configDraft, browserMaxTextChars: event.target.value })} inputMode="numeric" />
+              </SettingRow>
+            </div>
+          </SettingGroup>
+          <SettingGroup title="Email connectors" description="IMAP/SMTP settings. Credentials stay in the current API process, not config.yaml.">
+            <div className="setting-rows">
+              <SettingRow label="Email body read limit">
+                <input value={configDraft.emailMaxBodyChars} onChange={(event) => setConfigDraft({ ...configDraft, emailMaxBodyChars: event.target.value })} inputMode="numeric" />
+              </SettingRow>
+              <label className="setting-check">
+                <input type="checkbox" checked={configDraft.gmailEnabled} onChange={(event) => setConfigDraft({ ...configDraft, gmailEnabled: event.target.checked })} />
+                <span><strong>Enable Gmail</strong><small>Status: {gmailStatus}</small></span>
+              </label>
+              <label className="setting-check">
+                <input type="checkbox" checked={configDraft.outlookEnabled} onChange={(event) => setConfigDraft({ ...configDraft, outlookEnabled: event.target.checked })} />
+                <span><strong>Enable Outlook</strong><small>Status: {outlookStatus}</small></span>
+              </label>
+            </div>
+            <div className="email-provider-grid">
+              <section className="email-provider">
+                <div className="section-heading"><strong>Gmail</strong><span>{configuration?.email.gmail.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span></div>
+                <div className="email-login-form">
+                  <label>Gmail address
+                    <input value={gmailCredentials.username} onChange={(event) => setGmailCredentials({ ...gmailCredentials, username: event.target.value })} placeholder="name@gmail.com" autoComplete="username" />
+                  </label>
+                  <label>App password
+                    <input type="password" value={gmailCredentials.appPassword} onChange={(event) => setGmailCredentials({ ...gmailCredentials, appPassword: event.target.value })} placeholder="Google app password" autoComplete="current-password" />
+                  </label>
+                  <label>From address
+                    <input value={gmailCredentials.fromAddress} onChange={(event) => setGmailCredentials({ ...gmailCredentials, fromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
+                  </label>
+                  <button className="button" type="button" onClick={() => void loadEmailCredentials('gmail')} disabled={busy}>Load Gmail Credentials</button>
+                </div>
+                <span className="field-note">Use a Google app password. The secret is loaded into the running API process and is not written to config.yaml.</span>
+                <details className="advanced-mail-settings">
+                  <summary>Connection and environment settings</summary>
+                  <div className="settings-form settings-form-compact">
+                    <label>IMAP host<input value={configDraft.gmailImapHost} onChange={(event) => setConfigDraft({ ...configDraft, gmailImapHost: event.target.value })} /></label>
+                    <label>IMAP port<input value={configDraft.gmailImapPort} onChange={(event) => setConfigDraft({ ...configDraft, gmailImapPort: event.target.value })} inputMode="numeric" /></label>
+                    <label>SMTP host<input value={configDraft.gmailSmtpHost} onChange={(event) => setConfigDraft({ ...configDraft, gmailSmtpHost: event.target.value })} /></label>
+                    <label>SMTP port<input value={configDraft.gmailSmtpPort} onChange={(event) => setConfigDraft({ ...configDraft, gmailSmtpPort: event.target.value })} inputMode="numeric" /></label>
+                    <label>Username env<input value={configDraft.gmailUsernameEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailUsernameEnv: event.target.value })} /></label>
+                    <label>Password env<input value={configDraft.gmailPasswordEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailPasswordEnv: event.target.value })} /></label>
+                    <label>From env<input value={configDraft.gmailFromEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailFromEnv: event.target.value })} /></label>
+                    <label>Mailbox<input value={configDraft.gmailMailbox} onChange={(event) => setConfigDraft({ ...configDraft, gmailMailbox: event.target.value })} /></label>
+                    <label className="setting-wide">Archive mailbox<input value={configDraft.gmailArchiveMailbox} onChange={(event) => setConfigDraft({ ...configDraft, gmailArchiveMailbox: event.target.value })} /></label>
+                  </div>
+                </details>
+              </section>
+              <section className="email-provider">
+                <div className="section-heading"><strong>Outlook</strong><span>{configuration?.email.outlook.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span></div>
+                <div className="email-login-form">
+                  <label>Outlook address
+                    <input value={outlookCredentials.username} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, username: event.target.value })} placeholder="name@outlook.com" autoComplete="username" />
+                  </label>
+                  <label>App password
+                    <input type="password" value={outlookCredentials.appPassword} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, appPassword: event.target.value })} placeholder="Microsoft app password" autoComplete="current-password" />
+                  </label>
+                  <label>From address
+                    <input value={outlookCredentials.fromAddress} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, fromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
+                  </label>
+                  <button className="button" type="button" onClick={() => void loadEmailCredentials('outlook')} disabled={busy}>Load Outlook Credentials</button>
+                </div>
+                <span className="field-note">Microsoft may require SMTP AUTH or an app password. The secret is kept only in the running API process.</span>
+                <details className="advanced-mail-settings">
+                  <summary>Connection and environment settings</summary>
+                  <div className="settings-form settings-form-compact">
+                    <label>IMAP host<input value={configDraft.outlookImapHost} onChange={(event) => setConfigDraft({ ...configDraft, outlookImapHost: event.target.value })} /></label>
+                    <label>IMAP port<input value={configDraft.outlookImapPort} onChange={(event) => setConfigDraft({ ...configDraft, outlookImapPort: event.target.value })} inputMode="numeric" /></label>
+                    <label>SMTP host<input value={configDraft.outlookSmtpHost} onChange={(event) => setConfigDraft({ ...configDraft, outlookSmtpHost: event.target.value })} /></label>
+                    <label>SMTP port<input value={configDraft.outlookSmtpPort} onChange={(event) => setConfigDraft({ ...configDraft, outlookSmtpPort: event.target.value })} inputMode="numeric" /></label>
+                    <label>Username env<input value={configDraft.outlookUsernameEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookUsernameEnv: event.target.value })} /></label>
+                    <label>Password env<input value={configDraft.outlookPasswordEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookPasswordEnv: event.target.value })} /></label>
+                    <label>From env<input value={configDraft.outlookFromEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookFromEnv: event.target.value })} /></label>
+                    <label>Mailbox<input value={configDraft.outlookMailbox} onChange={(event) => setConfigDraft({ ...configDraft, outlookMailbox: event.target.value })} /></label>
+                    <label className="setting-wide">Archive mailbox<input value={configDraft.outlookArchiveMailbox} onChange={(event) => setConfigDraft({ ...configDraft, outlookArchiveMailbox: event.target.value })} /></label>
+                  </div>
+                </details>
+              </section>
+            </div>
+            <div className="row-actions">
+              <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Tool Settings</button>
+              <button className="button button-secondary" type="button" onClick={() => navigateTo('tools')}>Open Tool Permissions</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'security') {
+      return (
+        <ConfigSectionPage title="Security" description="Approval and privacy settings enforced by backend policy." onBack={() => navigateTo('config')}>
+          <SettingGroup title="Approval policy" description="Risky actions stay approval-gated. Lower threshold means more approval prompts.">
+            <div className="setting-rows">
+              <SettingRow label="Approval risk threshold" help="Tools at or above this risk level require approval.">
+                <input value={configDraft.approvalRisk} onChange={(event) => setConfigDraft({ ...configDraft, approvalRisk: event.target.value })} inputMode="numeric" />
+              </SettingRow>
+              <label className="setting-check">
+                <input type="checkbox" checked={configDraft.sendChatHistoryToCloud} onChange={(event) => setConfigDraft({ ...configDraft, sendChatHistoryToCloud: event.target.checked })} />
+                <span><strong>Send chat and relevant memory context to cloud models</strong><small>Allows configured cloud providers to receive recent chat and relevant local memory snippets.</small></span>
+              </label>
+            </div>
+            <DangerZone>
+              <strong>Security baseline remains backend-enforced.</strong>
+              <p>Secret paths, destructive SQL, file deletion approvals, and emergency stop policy are enforced outside the prompt layer.</p>
+            </DangerZone>
+            <div className="row-actions">
+              <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Security</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'workspace') {
+      return (
+        <ConfigSectionPage title="Workspace" description="Where local files are stored and where terminal commands run." onBack={() => navigateTo('config')}>
+          <SettingGroup title="Storage" description="Downloads and scraped files stay local.">
+            <div className="setting-rows">
+              <SettingRow label="Downloads root" help="Absolute path, or empty for the default workspace.">
+                <input value={configDraft.downloadsRoot} onChange={(event) => setConfigDraft({ ...configDraft, downloadsRoot: event.target.value })} placeholder={configuration?.paths.workspace ?? '/absolute/path'} />
+              </SettingRow>
+            </div>
+            <div className="status-grid">
+              <span>Current workspace</span><strong>{configuration?.paths.current_workspace ?? '-'}</strong>
+              <span>Downloads</span><strong>{configuration?.paths.downloads_root ?? '-'}</strong>
+            </div>
+          </SettingGroup>
+          <SettingGroup title="Terminal policy" description="Stateless dashboard terminal commands resolve inside the current workspace policy.">
+            <div className="setting-rows">
+              <SettingRow label="Workspace root"><input value={terminalWorkspaceRoot} onChange={(event) => setTerminalWorkspaceRoot(event.target.value)} placeholder="/path/to/project" /></SettingRow>
+              <SettingRow label="Timeout seconds"><input value={terminalTimeout} onChange={(event) => setTerminalTimeout(event.target.value)} inputMode="numeric" /></SettingRow>
+              <SettingRow label="Max output chars"><input value={terminalMaxOutput} onChange={(event) => setTerminalMaxOutput(event.target.value)} inputMode="numeric" /></SettingRow>
+              <label className="setting-check">
+                <input type="checkbox" checked={terminalAutoApprove} onChange={(event) => setTerminalAutoApprove(event.target.checked)} />
+                <span><strong>Auto-approve exact allowlist</strong><small>Only exact allowlist matches can bypass approval.</small></span>
+              </label>
+            </div>
+            <div className="row-actions">
+              <button className={terminal?.enabled ? 'button button-danger' : 'button'} type="button" onClick={() => void runAction(() => (terminal?.enabled ? api.disableTerminal() : api.enableTerminal()), terminal?.enabled ? 'Terminal disabled.' : 'Terminal enabled.')}>{terminal?.enabled ? 'Disable Terminal' : 'Enable Terminal'}</button>
+              <button className="button button-secondary" type="button" onClick={() => void saveTerminalSettings()}>Save Terminal</button>
+              <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Storage</button>
+            </div>
+            <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void allowTerminalCommand() }}>
+              <input value={terminalCommand} onChange={(event) => setTerminalCommand(event.target.value)} placeholder="git status" />
+              <button className="button" type="submit">Allow Command</button>
+            </form>
+            <form className="run-form" onSubmit={(event) => { event.preventDefault(); void requestTerminalRun() }}>
+              <input value={terminalRunCommand} onChange={(event) => setTerminalRunCommand(event.target.value)} placeholder="pwd" />
+              <input value={terminalCwd} onChange={(event) => setTerminalCwd(event.target.value)} placeholder="workspace-relative cwd" />
+              <button className="button button-secondary" type="submit">Request Run</button>
+            </form>
+            <div className="table-list table-list--compact">
+              {terminal?.allowed_commands.map((command) => (
+                <article className="command-row" key={command.join('\u0000')}>
+                  <code>{command.join(' ')}</code>
+                  <button className="button button-danger" type="button" onClick={() => void runAction(() => api.removeTerminalCommand(command), `Removed: ${command.join(' ')}`)}>Remove</button>
+                </article>
+              ))}
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'memory') {
+      return (
+        <ConfigSectionPage title="Memory" description="Local long-term context and Markdown memory storage." onBack={() => navigateTo('config')}>
+          <SettingGroup title="Memory status">
+            <div className="status-grid">
+              <span>Memory root</span><strong>{configuration?.paths.memory ?? '-'}</strong>
+              <span>Files</span><strong>{memoryFiles.length}</strong>
+            </div>
+            <div className="row-actions">
+              <button className="button button-secondary" type="button" onClick={() => navigateTo('memory')}>Open Memory Files</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'telegram') {
+      return (
+        <ConfigSectionPage title="Telegram" description="Remote access configuration lives in the Telegram screen." onBack={() => navigateTo('config')}>
+          <SettingGroup title="Telegram status">
+            <div className="status-grid">
+              <span>Enabled</span><strong>{telegram?.enabled ? 'yes' : 'no'}</strong>
+              <span>Token loaded</span><strong>{telegram?.bot_token_available ? 'yes' : 'no'}</strong>
+              <span>Allowed users</span><strong>{telegram?.allowed_user_ids.length ?? 0}</strong>
+              <span>Polling</span><strong>{telegram?.polling ? 'running' : 'stopped'}</strong>
+            </div>
+            <div className="row-actions">
+              <button className="button button-secondary" type="button" onClick={() => navigateTo('telegram')}>Open Telegram Settings</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    if (configSection === 'emergency') {
+      return (
+        <ConfigSectionPage title="Emergency" description="Emergency stop remains available in the top bar from every screen." onBack={() => navigateTo('config')}>
+          <SettingGroup title="Emergency state">
+            <div className="status-grid">
+              <span>Status</span><strong>{emergency?.active ? 'active' : 'clear'}</strong>
+              <span>Triggered at</span><strong>{emergency?.triggered_at || '-'}</strong>
+              <span>Reason</span><strong>{emergency?.reason || '-'}</strong>
+              <span>Active terminal processes</span><strong>{emergency?.active_terminal_processes.length ?? 0}</strong>
+            </div>
+            <DangerZone>
+              <strong>Emergency Stop interrupts terminal activity and blocks tool execution.</strong>
+              <p>Use it when a running command or approval chain must stop immediately. Reset only when the system is safe to continue.</p>
+            </DangerZone>
+            <div className="row-actions">
+              <button className="button button-danger" type="button" onClick={() => void emergencyStop()}>Emergency Stop</button>
+              <button className="button button-secondary" type="button" onClick={() => void emergencyReset()} disabled={!emergency?.active}>Reset Emergency</button>
+            </div>
+          </SettingGroup>
+        </ConfigSectionPage>
+      )
+    }
+
+    return (
+      <ConfigSectionPage title="Advanced" description="System paths, doctor summary, and connector readiness." onBack={() => navigateTo('config')}>
+        <div className="two-column">
+          <SettingGroup title="System paths">
+            <div className="status-grid">
+              <span>Data</span><strong>{configuration?.paths.data_dir ?? '-'}</strong>
+              <span>Config</span><strong>{configuration?.paths.config ?? '-'}</strong>
+              <span>Workspace</span><strong>{configuration?.paths.workspace ?? '-'}</strong>
+              <span>Audit DB</span><strong>{configuration?.paths.audit_db ?? '-'}</strong>
+            </div>
+          </SettingGroup>
+          <SettingGroup title="Readiness">
+            <div className="metric-grid">
+              <div><span>OK</span><strong>{doctor?.summary.ok ?? 0}</strong></div>
+              <div><span>Warnings</span><strong>{doctor?.summary.warn ?? 0}</strong></div>
+              <div><span>Failures</span><strong>{doctor?.summary.fail ?? 0}</strong></div>
+              <div><span>Connectors</span><strong>{connectors.length}</strong></div>
+            </div>
+            <div className="mini-list">
+              {connectors.map((connector) => (
+                <div key={connector.name}><strong>{connector.name}</strong><span>{connector.status}</span></div>
+              ))}
+            </div>
+          </SettingGroup>
+        </div>
+      </ConfigSectionPage>
+    )
   }
 
   const currentTour = tourSteps[tourStep]
@@ -821,24 +1341,11 @@ export function App() {
           </div>
         </div>
 
-        <nav className="nav-list" aria-label="Dashboard views">
-          {views.map((view) => (
-            <button
-              key={view.key}
-              className={activeView === view.key ? 'nav-item nav-item--active' : 'nav-item'}
-              type="button"
-              onClick={() => setActiveView(view.key)}
-              data-tour={view.key === 'downloads' ? 'tour-downloads' : view.key === 'models' ? 'tour-models' : view.key === 'config' ? 'tour-config' : view.key === 'logs' ? 'tour-logs' : undefined}
-            >
-              <span className="nav-code">{view.short}</span>
-              <span className="nav-copy">
-                <strong>{view.label}</strong>
-                <small>{view.description}</small>
-              </span>
-              {view.key === 'chat' && pendingCount > 0 ? <b>{pendingCount}</b> : null}
-            </button>
-          ))}
-        </nav>
+        <SidebarNav
+          items={navItems}
+          activeKey={activeView}
+          onNavigate={(key) => navigateTo(key as View)}
+        />
 
         <div className="rail-status">
           <span>Runtime</span>
@@ -881,6 +1388,7 @@ export function App() {
           </div>
         ) : null}
 
+        <AppRoutes>
         {activeView === 'chat' ? (
           <section className="chat-workspace" data-tour="tour-chat">
             <div className="chat-main panel">
@@ -945,6 +1453,36 @@ export function App() {
                 </article>
               ))}
             </aside>
+          </section>
+        ) : null}
+
+        {activeView === 'approvals' ? (
+          <section className="approvals-console">
+            <div className="panel command-panel">
+              <div className="section-heading">
+                <strong>Approvals</strong>
+                <span>{pendingCount} pending action{pendingCount === 1 ? '' : 's'}</span>
+              </div>
+              <p className="section-copy">
+                Review high-risk or permission-gated tool actions before the agent executes them.
+              </p>
+              {approvals.length === 0 ? <p className="empty">No pending approvals.</p> : null}
+              <div className="approval-list">
+                {approvals.map((approval) => (
+                  <article className="approval-card approval-card--wide" key={approval.id}>
+                    <div>
+                      <strong>#{approval.id} {approval.tool}</strong>
+                      <span>Risk {approval.risk ?? '-'} - {approval.reason ?? approval.decision_reason ?? 'Needs approval'}</span>
+                    </div>
+                    <code>{JSON.stringify(approval.args)}</code>
+                    <div className="row-actions">
+                      <button className="button" type="button" onClick={() => void approveRequest(approval.id)}>Approve</button>
+                      <button className="button button-danger" type="button" onClick={() => void denyRequest(approval.id)}>Deny</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
           </section>
         ) : null}
 
@@ -1106,294 +1644,7 @@ export function App() {
           </section>
         ) : null}
 
-        {activeView === 'config' ? (
-          <section className="config-console" data-tour="tour-config">
-            <div className="panel command-panel">
-              <div className="section-heading">
-                <strong>Agent Configuration</strong>
-                <span>Storage, planner, browser, identity, and approvals</span>
-              </div>
-              <div className="settings-form">
-                <label className="setting-wide">Downloads root
-                  <input value={configDraft.downloadsRoot} onChange={(event) => setConfigDraft({ ...configDraft, downloadsRoot: event.target.value })} placeholder={configuration?.paths.workspace ?? '/absolute/path'} />
-                </label>
-                <label>Agent name
-                  <input value={configDraft.agentName} onChange={(event) => setConfigDraft({ ...configDraft, agentName: event.target.value })} />
-                </label>
-                <label>User name
-                  <input value={configDraft.userName} onChange={(event) => setConfigDraft({ ...configDraft, userName: event.target.value })} />
-                </label>
-                <label>Preferred language
-                  <input value={configDraft.preferredLanguage} onChange={(event) => setConfigDraft({ ...configDraft, preferredLanguage: event.target.value })} />
-                </label>
-                <label>Response language
-                  <input value={configDraft.responseLanguage} onChange={(event) => setConfigDraft({ ...configDraft, responseLanguage: event.target.value })} />
-                </label>
-                <label>Planner max tokens
-                  <input value={configDraft.plannerMaxTokens} onChange={(event) => setConfigDraft({ ...configDraft, plannerMaxTokens: event.target.value })} inputMode="numeric" />
-                </label>
-                <label>Planner temperature
-                  <input value={configDraft.plannerTemperature} onChange={(event) => setConfigDraft({ ...configDraft, plannerTemperature: event.target.value })} inputMode="decimal" />
-                </label>
-                <label>Browser timeout seconds
-                  <input value={configDraft.browserTimeout} onChange={(event) => setConfigDraft({ ...configDraft, browserTimeout: event.target.value })} inputMode="numeric" />
-                </label>
-                <label>Max response bytes
-                  <input value={configDraft.browserMaxResponseBytes} onChange={(event) => setConfigDraft({ ...configDraft, browserMaxResponseBytes: event.target.value })} inputMode="numeric" />
-                </label>
-                <label>Max text chars
-                  <input value={configDraft.browserMaxTextChars} onChange={(event) => setConfigDraft({ ...configDraft, browserMaxTextChars: event.target.value })} inputMode="numeric" />
-                </label>
-                <label>Approval risk threshold
-                  <input value={configDraft.approvalRisk} onChange={(event) => setConfigDraft({ ...configDraft, approvalRisk: event.target.value })} inputMode="numeric" />
-                </label>
-                <label className="setting-check">
-                  <input type="checkbox" checked={configDraft.plannerThink} onChange={(event) => setConfigDraft({ ...configDraft, plannerThink: event.target.checked })} />
-                  <span><strong>Planner think mode</strong><small>Passes the think flag to compatible local/cloud providers.</small></span>
-                </label>
-                <label className="setting-check">
-                  <input type="checkbox" checked={configDraft.sendChatHistoryToCloud} onChange={(event) => setConfigDraft({ ...configDraft, sendChatHistoryToCloud: event.target.checked })} />
-                  <span><strong>Send chat and relevant memory context to cloud models</strong><small>Allows OpenAI, DeepSeek, and compatible cloud providers to receive the recent chat window and relevant local memory snippets for follow-up questions.</small></span>
-                </label>
-                <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Configuration</button>
-              </div>
-            </div>
-
-            <div className="panel command-panel">
-              <div className="section-heading">
-                <strong>Email Connectors</strong>
-                <span>Gmail and Outlook IMAP/SMTP settings</span>
-              </div>
-              <div className="settings-form">
-                <label>Email body read limit
-                  <input value={configDraft.emailMaxBodyChars} onChange={(event) => setConfigDraft({ ...configDraft, emailMaxBodyChars: event.target.value })} inputMode="numeric" />
-                </label>
-                <label className="setting-check">
-                  <input type="checkbox" checked={configDraft.gmailEnabled} onChange={(event) => setConfigDraft({ ...configDraft, gmailEnabled: event.target.checked })} />
-                  <span><strong>Enable Gmail</strong><small>Status: {connectors.find((connector) => connector.name === 'gmail')?.status ?? 'unknown'}</small></span>
-                </label>
-                <label className="setting-check">
-                  <input type="checkbox" checked={configDraft.outlookEnabled} onChange={(event) => setConfigDraft({ ...configDraft, outlookEnabled: event.target.checked })} />
-                  <span><strong>Enable Outlook</strong><small>Status: {connectors.find((connector) => connector.name === 'outlook')?.status ?? 'unknown'}</small></span>
-                </label>
-              </div>
-
-              <div className="email-provider-grid">
-                <section className="email-provider">
-                  <div className="section-heading">
-                    <strong>Gmail</strong>
-                    <span>{configuration?.email.gmail.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span>
-                  </div>
-                  <div className="settings-form settings-form-compact">
-                    <label>IMAP host
-                      <input value={configDraft.gmailImapHost} onChange={(event) => setConfigDraft({ ...configDraft, gmailImapHost: event.target.value })} />
-                    </label>
-                    <label>IMAP port
-                      <input value={configDraft.gmailImapPort} onChange={(event) => setConfigDraft({ ...configDraft, gmailImapPort: event.target.value })} inputMode="numeric" />
-                    </label>
-                    <label>SMTP host
-                      <input value={configDraft.gmailSmtpHost} onChange={(event) => setConfigDraft({ ...configDraft, gmailSmtpHost: event.target.value })} />
-                    </label>
-                    <label>SMTP port
-                      <input value={configDraft.gmailSmtpPort} onChange={(event) => setConfigDraft({ ...configDraft, gmailSmtpPort: event.target.value })} inputMode="numeric" />
-                    </label>
-                    <label>Username env
-                      <input value={configDraft.gmailUsernameEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailUsernameEnv: event.target.value })} />
-                    </label>
-                    <label>Password env
-                      <input value={configDraft.gmailPasswordEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailPasswordEnv: event.target.value })} />
-                    </label>
-                    <label>From env
-                      <input value={configDraft.gmailFromEnv} onChange={(event) => setConfigDraft({ ...configDraft, gmailFromEnv: event.target.value })} />
-                    </label>
-                    <label>Mailbox
-                      <input value={configDraft.gmailMailbox} onChange={(event) => setConfigDraft({ ...configDraft, gmailMailbox: event.target.value })} />
-                    </label>
-                    <label className="setting-wide">Archive mailbox
-                      <input value={configDraft.gmailArchiveMailbox} onChange={(event) => setConfigDraft({ ...configDraft, gmailArchiveMailbox: event.target.value })} />
-                    </label>
-                  </div>
-                  <div className="inline-form email-secret-form">
-                    <input value={gmailCredentials.username} onChange={(event) => setGmailCredentials({ ...gmailCredentials, username: event.target.value })} placeholder="Gmail address" />
-                    <input type="password" value={gmailCredentials.appPassword} onChange={(event) => setGmailCredentials({ ...gmailCredentials, appPassword: event.target.value })} placeholder="Gmail app password" />
-                    <input value={gmailCredentials.fromAddress} onChange={(event) => setGmailCredentials({ ...gmailCredentials, fromAddress: event.target.value })} placeholder="From address optional" />
-                    <button className="button" type="button" onClick={() => void loadEmailCredentials('gmail')} disabled={busy}>Load Gmail Credentials</button>
-                  </div>
-                  <span className="field-note">Credentials are kept only in the current API process environment, not in config.yaml.</span>
-                </section>
-
-                <section className="email-provider">
-                  <div className="section-heading">
-                    <strong>Outlook</strong>
-                    <span>{configuration?.email.outlook.credentials_loaded ? 'credentials loaded' : 'credentials not loaded'}</span>
-                  </div>
-                  <div className="settings-form settings-form-compact">
-                    <label>IMAP host
-                      <input value={configDraft.outlookImapHost} onChange={(event) => setConfigDraft({ ...configDraft, outlookImapHost: event.target.value })} />
-                    </label>
-                    <label>IMAP port
-                      <input value={configDraft.outlookImapPort} onChange={(event) => setConfigDraft({ ...configDraft, outlookImapPort: event.target.value })} inputMode="numeric" />
-                    </label>
-                    <label>SMTP host
-                      <input value={configDraft.outlookSmtpHost} onChange={(event) => setConfigDraft({ ...configDraft, outlookSmtpHost: event.target.value })} />
-                    </label>
-                    <label>SMTP port
-                      <input value={configDraft.outlookSmtpPort} onChange={(event) => setConfigDraft({ ...configDraft, outlookSmtpPort: event.target.value })} inputMode="numeric" />
-                    </label>
-                    <label>Username env
-                      <input value={configDraft.outlookUsernameEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookUsernameEnv: event.target.value })} />
-                    </label>
-                    <label>Password env
-                      <input value={configDraft.outlookPasswordEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookPasswordEnv: event.target.value })} />
-                    </label>
-                    <label>From env
-                      <input value={configDraft.outlookFromEnv} onChange={(event) => setConfigDraft({ ...configDraft, outlookFromEnv: event.target.value })} />
-                    </label>
-                    <label>Mailbox
-                      <input value={configDraft.outlookMailbox} onChange={(event) => setConfigDraft({ ...configDraft, outlookMailbox: event.target.value })} />
-                    </label>
-                    <label className="setting-wide">Archive mailbox
-                      <input value={configDraft.outlookArchiveMailbox} onChange={(event) => setConfigDraft({ ...configDraft, outlookArchiveMailbox: event.target.value })} />
-                    </label>
-                  </div>
-                  <div className="inline-form email-secret-form">
-                    <input value={outlookCredentials.username} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, username: event.target.value })} placeholder="Outlook address" />
-                    <input type="password" value={outlookCredentials.appPassword} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, appPassword: event.target.value })} placeholder="Outlook app password" />
-                    <input value={outlookCredentials.fromAddress} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, fromAddress: event.target.value })} placeholder="From address optional" />
-                    <button className="button" type="button" onClick={() => void loadEmailCredentials('outlook')} disabled={busy}>Load Outlook Credentials</button>
-                  </div>
-                  <span className="field-note">Microsoft tenants may disable IMAP/SMTP; Graph OAuth can be added later if needed.</span>
-                </section>
-              </div>
-
-              <div className="row-actions">
-                <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Email Settings</button>
-              </div>
-            </div>
-
-            <div className="panel command-panel prompt-panel">
-              <div className="section-heading">
-                <strong>System Prompts</strong>
-                <span>Runtime instructions sent to the selected model</span>
-              </div>
-              <div className="prompt-grid">
-                <label>Planner system prompt
-                  <textarea
-                    value={configDraft.plannerSystemPrompt}
-                    onChange={(event) => setConfigDraft({ ...configDraft, plannerSystemPrompt: event.target.value })}
-                    spellCheck={false}
-                  />
-                  <span className="field-note">
-                    {configuration?.system_prompts.planner.customized ? 'Custom prompt is active.' : 'Currently using the code default.'}
-                  </span>
-                </label>
-                <label>Answer system prompt
-                  <textarea
-                    value={configDraft.answerSystemPrompt}
-                    onChange={(event) => setConfigDraft({ ...configDraft, answerSystemPrompt: event.target.value })}
-                    spellCheck={false}
-                  />
-                  <span className="field-note">
-                    {configuration?.system_prompts.answer.customized ? 'Custom prompt is active.' : 'Currently using the code default.'}
-                  </span>
-                </label>
-              </div>
-              <div className="row-actions">
-                <button className="button" type="button" onClick={() => void saveConfiguration()}>
-                  Save Prompts
-                </button>
-                <button
-                  className="button button-secondary"
-                  type="button"
-                  onClick={() =>
-                    setConfigDraft({
-                      ...configDraft,
-                      plannerSystemPrompt: configuration?.system_prompts.planner.default ?? '',
-                      answerSystemPrompt: configuration?.system_prompts.answer.default ?? '',
-                    })
-                  }
-                >
-                  Load Code Defaults
-                </button>
-              </div>
-            </div>
-
-            <div className="two-column">
-              <div className="panel command-panel">
-                <div className="section-heading"><strong>System Paths</strong><span>Current local storage map</span></div>
-                <div className="status-grid">
-                  <span>Data</span><strong>{configuration?.paths.data_dir ?? '-'}</strong>
-                  <span>Config</span><strong>{configuration?.paths.config ?? '-'}</strong>
-                  <span>Memory</span><strong>{configuration?.paths.memory ?? '-'}</strong>
-                  <span>Workspace</span><strong>{configuration?.paths.workspace ?? '-'}</strong>
-                  <span>Downloads</span><strong>{configuration?.paths.downloads_root ?? '-'}</strong>
-                  <span>Audit DB</span><strong>{configuration?.paths.audit_db ?? '-'}</strong>
-                </div>
-              </div>
-
-              <div className="panel command-panel">
-                <div className="section-heading"><strong>Readiness</strong><span>Doctor and connectors</span></div>
-                <div className="metric-grid">
-                  <div><span>OK</span><strong>{doctor?.summary.ok ?? 0}</strong></div>
-                  <div><span>Warnings</span><strong>{doctor?.summary.warn ?? 0}</strong></div>
-                  <div><span>Failures</span><strong>{doctor?.summary.fail ?? 0}</strong></div>
-                  <div><span>Connectors</span><strong>{connectors.length}</strong></div>
-                </div>
-                <div className="mini-list">
-                  {connectors.map((connector) => (
-                    <div key={connector.name}><strong>{connector.name}</strong><span>{connector.status}</span></div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="panel command-panel">
-              <div className="section-heading">
-                <strong>Terminal Policy</strong>
-                <span>{terminal?.ready ? 'ready' : 'not ready'}</span>
-              </div>
-              <div className="settings-form">
-                <label className="setting-wide">Workspace root
-                  <input value={terminalWorkspaceRoot} onChange={(event) => setTerminalWorkspaceRoot(event.target.value)} placeholder="/path/to/project" />
-                </label>
-                <label>Timeout seconds
-                  <input value={terminalTimeout} onChange={(event) => setTerminalTimeout(event.target.value)} inputMode="numeric" />
-                </label>
-                <label>Max output chars
-                  <input value={terminalMaxOutput} onChange={(event) => setTerminalMaxOutput(event.target.value)} inputMode="numeric" />
-                </label>
-                <label className="setting-check">
-                  <input type="checkbox" checked={terminalAutoApprove} onChange={(event) => setTerminalAutoApprove(event.target.checked)} />
-                  <span><strong>Auto-approve exact allowlist</strong><small>Only commands matching the exact allowlist can bypass approval.</small></span>
-                </label>
-                <div className="row-actions">
-                  <button className={terminal?.enabled ? 'button button-danger' : 'button'} type="button" onClick={() => void runAction(() => (terminal?.enabled ? api.disableTerminal() : api.enableTerminal()), terminal?.enabled ? 'Terminal disabled.' : 'Terminal enabled.')}>
-                    {terminal?.enabled ? 'Disable Terminal' : 'Enable Terminal'}
-                  </button>
-                  <button className="button button-secondary" type="button" onClick={() => void saveTerminalSettings()}>Save Terminal</button>
-                </div>
-              </div>
-              <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void allowTerminalCommand() }}>
-                <input value={terminalCommand} onChange={(event) => setTerminalCommand(event.target.value)} placeholder="git status" />
-                <button className="button" type="submit">Allow Command</button>
-              </form>
-              <form className="run-form" onSubmit={(event) => { event.preventDefault(); void requestTerminalRun() }}>
-                <input value={terminalRunCommand} onChange={(event) => setTerminalRunCommand(event.target.value)} placeholder="pwd" />
-                <input value={terminalCwd} onChange={(event) => setTerminalCwd(event.target.value)} placeholder="workspace-relative cwd" />
-                <button className="button button-secondary" type="submit">Request Run</button>
-              </form>
-              <div className="table-list table-list--compact">
-                {terminal?.allowed_commands.map((command) => (
-                  <article className="command-row" key={command.join('\u0000')}>
-                    <code>{command.join(' ')}</code>
-                    <button className="button button-danger" type="button" onClick={() => void runAction(() => api.removeTerminalCommand(command), `Removed: ${command.join(' ')}`)}>Remove</button>
-                  </article>
-                ))}
-              </div>
-            </div>
-          </section>
-        ) : null}
-
+        {activeView === 'config' ? renderConfigRoutes() : null}
         {activeView === 'telegram' ? (
           <section className="telegram-layout">
             <div className="panel settings-panel">
@@ -1551,15 +1802,16 @@ export function App() {
                 </article>
                 <article className="guide-card">
                   <strong>System prompts</strong>
-                  <p>Use Config to edit the planner and answer system prompts. Saving the code default clears the local override.</p>
+                  <p>Use Config to edit the chat, planner, and answer system prompts. Saving the code default clears the local override.</p>
                 </article>
               </div>
-              <button className="button button-secondary" type="button" onClick={() => { setTourStep(0); setActiveView('chat'); setTourOpen(true) }}>
+              <button className="button button-secondary" type="button" onClick={() => { setTourStep(0); navigateTo('chat'); setTourOpen(true) }}>
                 Replay Tour
               </button>
             </div>
           </section>
         ) : null}
+        </AppRoutes>
       </main>
 
       {tourOpen ? (
