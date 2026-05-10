@@ -1230,6 +1230,10 @@ def _looks_email_request(text: str) -> bool:
             "e-mail",
             "mail",
             "gmail",
+            "google mail",
+            "google",
+            "гугъл",
+            "джимейл",
             "outlook",
             "hotmail",
             "имейл",
@@ -1250,7 +1254,7 @@ def _email_provider_from_text(text: str, config: dict[str, Any]) -> str | None:
     )
     if any(marker in normalized for marker in {"outlook", "hotmail", "microsoft"}):
         return "outlook"
-    if "gmail" in normalized:
+    if any(marker in normalized for marker in {"gmail", "google mail", "google", "гугъл", "джимейл"}):
         return "gmail"
     enabled = [
         provider
@@ -1287,7 +1291,7 @@ def _looks_email_send_request(normalized: str) -> bool:
 
 
 def _looks_email_read_latest_request(normalized: str) -> bool:
-    has_read = any(marker in normalized for marker in {"read", "open", "прочети", "отвори", "покажи"})
+    has_read = any(marker in normalized for marker in {"read", "open", "прочети", "прочет", "отвори", "покажи"})
     has_latest = any(marker in normalized for marker in {"latest", "last", "newest", "послед", "нов", "получен"})
     return has_read and has_latest
 

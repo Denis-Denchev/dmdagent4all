@@ -435,10 +435,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(settings),
     }),
-  loadGmailOAuthClientSecret: (client_secret: string) =>
+  loadGmailOAuthClientSecret: (settings: {
+    client_secret: string
+    client_id?: string
+    email?: string
+    from_address?: string
+    redirect_uri?: string
+  }) =>
     request<AgentResponse>('/v1/email/oauth/google/client-secret', {
       method: 'POST',
-      body: JSON.stringify({ client_secret }),
+      body: JSON.stringify(settings),
     }),
   disconnectGmailOAuth: () => request<AgentResponse>('/v1/email/oauth/google/disconnect', { method: 'POST' }),
   memory: () => request<MemoryList>('/v1/memory'),

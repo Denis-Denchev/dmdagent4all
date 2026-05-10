@@ -246,6 +246,10 @@ class GmailOAuthStartRequest(BaseModel):
 
 class GmailOAuthSecretRequest(BaseModel):
     client_secret: str
+    client_id: str | None = None
+    email: str | None = None
+    from_address: str | None = None
+    redirect_uri: str | None = None
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -540,6 +544,21 @@ def create_app() -> FastAPI:
             storage = store_email_secret("gmail", "oauth_client_secret", request.client_secret)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if request.client_id or request.email or request.from_address or request.redirect_uri:
+            update_config(
+                lambda current: _configure_gmail_oauth(
+                    current,
+                    GmailOAuthStartRequest(
+                        client_id=request.client_id or "",
+                        email=request.email or "",
+                        from_address=request.from_address,
+                        redirect_uri=request.redirect_uri,
+                    ),
+                    require_ready_fields=False,
+                ),
+                paths.config,
+            )
+        config = load_config(paths.config)
         return {
             "status": "ok",
             "message": "Gmail OAuth client secret loaded into the local secret store.",
@@ -547,6 +566,7 @@ def create_app() -> FastAPI:
                 "provider": "gmail",
                 "secret_loaded": True,
                 "storage": storage,
+                "gmail": _email_configuration_response(config)["gmail"],
             },
         }
 
@@ -1532,12 +1552,17 @@ def _validated_oauth_redirect_uri(value: str) -> str:
     return redirect_uri
 
 
-def _configure_gmail_oauth(config: dict[str, Any], request: GmailOAuthStartRequest) -> None:
+def _configure_gmail_oauth(
+    config: dict[str, Any],
+    request: GmailOAuthStartRequest,
+    *,
+    require_ready_fields: bool = True,
+) -> None:
     client_id = request.client_id.strip()
     email = request.email.strip()
-    if not client_id:
+    if require_ready_fields and not client_id:
         raise HTTPException(status_code=400, detail="Google OAuth client ID is required.")
-    if not email:
+    if require_ready_fields and not email:
         raise HTTPException(status_code=400, detail="Gmail address is required.")
     _set_email_provider_enabled(config, "gmail", True)
     provider_config = config.setdefault("email", {}).setdefault("gmail", {})
@@ -1545,10 +1570,13 @@ def _configure_gmail_oauth(config: dict[str, Any], request: GmailOAuthStartReque
         provider_config = {}
         config["email"]["gmail"] = provider_config
     provider_config["auth_method"] = "oauth2"
-    provider_config["oauth_client_id"] = client_id
+    if client_id:
+        provider_config["oauth_client_id"] = client_id
     provider_config["oauth_redirect_uri"] = _validated_oauth_redirect_uri(request.redirect_uri or DEFAULT_GMAIL_OAUTH_REDIRECT_URI)
-    provider_config["oauth_email"] = email
-    provider_config["oauth_from_address"] = (request.from_address or "").strip()
+    if email:
+        provider_config["oauth_email"] = email
+    if request.from_address is not None:
+        provider_config["oauth_from_address"] = request.from_address.strip()
 
 
 def _disconnect_gmail_oauth(config: dict[str, Any]) -> None:

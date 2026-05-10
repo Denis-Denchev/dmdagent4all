@@ -793,7 +793,14 @@ export function App() {
       return
     }
     await runAction(
-      () => api.loadGmailOAuthClientSecret(clientSecret),
+      () =>
+        api.loadGmailOAuthClientSecret({
+          client_secret: clientSecret,
+          client_id: configDraft.gmailOauthClientId.trim() || undefined,
+          email: configDraft.gmailOauthEmail.trim() || undefined,
+          from_address: configDraft.gmailOauthFromAddress.trim() || undefined,
+          redirect_uri: configDraft.gmailOauthRedirectUri.trim() || undefined,
+        }),
       'Gmail OAuth client secret loaded.',
     )
     setGmailOAuthClientSecret('')

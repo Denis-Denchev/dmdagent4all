@@ -1530,6 +1530,30 @@ and this is the knowlage
             self.assertIn("Email", response.message)
             self.assertNotEqual((response.data or {}).get("tool"), "files.read")
 
+    def test_bulgarian_google_email_read_routes_to_gmail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            enabled_tools = frozenset({"gmail.read_thread"})
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=enabled_tools,
+                    granted_permissions=frozenset({"gmail.readonly"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            response = core.handle_text("искам да прочетеш последния ми мейл в гугъл")
+
+            self.assertEqual(response.status, "not_configured")
+            self.assertIn("Gmail", response.message)
+            self.assertNotIn("Outlook", response.message)
+
     def test_email_send_request_creates_draft_then_requires_send_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
