@@ -1,0 +1,14 @@
+{
+  "name": "files.mkdir",
+  "description": "Create a directory inside an allowed workspace root. Use this instead of terminal mkdir for safe folder creation.",
+  "risk": 2,
+  "permissions": [],
+  "args_schema": {
+    "path": "absolute path inside allowed roots or path relative to current workspace",
+    "parents": "true to create parent directories too"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

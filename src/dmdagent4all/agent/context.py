@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from dmdagent4all.audit import AuditStore
+from dmdagent4all.agent.runtime_state import runtime_state_snapshot
+from dmdagent4all.autonomy import local_dev_autonomy_enabled
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, ToolManifest
 from dmdagent4all.sandbox import TerminalPolicy
@@ -11,6 +13,25 @@ from dmdagent4all.security import redact_text
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.storage import downloads_root_from_config
 from dmdagent4all.workspace import WorkspaceManager
+
+
+_LOCAL_DEV_AUTONOMY_ENABLED_TOOLS = {
+    "browser.extract_text",
+    "browser.open",
+    "browser.scrape_markdown",
+    "developer.context",
+    "files.list",
+    "files.mkdir",
+    "files.read",
+    "files.write",
+    "files.write_many",
+    "memory.list",
+    "memory.read",
+    "project.scaffold_one_page_app",
+    "system.list_enabled_tools",
+    "terminal.run",
+    "workspace.status",
+}
 
 
 class AgentContextProvider:
@@ -43,8 +64,46 @@ class AgentContextProvider:
         setup = config.get("setup", {}) if isinstance(config.get("setup"), dict) else {}
         tools = _tool_registry_summary(self.manifests, config, self.permission_context)
         memory_files = _memory_index(self.runtime_context.memory_root)
+        autonomy_active = local_dev_autonomy_enabled(config)
+        downloads_root = downloads_root_from_config(config, default_root=self.runtime_context.workspace_root)
+        runtime_state = runtime_state_snapshot(
+            runtime_context=self.runtime_context,
+            manager=manager,
+            downloads_root=downloads_root,
+            memory_files=memory_files,
+            enabled_tools=list(tools["enabled"]),
+            disabled_tools=list(tools["disabled"]),
+            planner_active=planner_active,
+        )
         return {
             "agent_name": str(setup.get("agent_name") or "DMD Agent"),
+            "autonomy": {
+                "local_dev_autonomy": autonomy_active,
+                "enabled": autonomy_active,
+                "mode": "LOCAL_DEV_AUTONOMY" if autonomy_active else "default",
+                "safe_auto_approval_scope": (
+                    [
+                        "files.list",
+                        "files.mkdir",
+                        "files.read",
+                        "files.write",
+                        "files.write_many",
+                        "browser.open",
+                        "browser.extract_text",
+                        "browser.scrape_markdown",
+                        "memory.list",
+                        "memory.read",
+                        "project.scaffold_one_page_app",
+                        "workspace.status",
+                        "system.list_enabled_tools",
+                        "terminal.run (readonly commands only)",
+                        "terminal.run (validated workspace scripts)",
+                    ]
+                    if autonomy_active
+                    else []
+                ),
+                "hard_safety_source_of_truth": "backend",
+            },
             "runtime": {
                 "provider": str(llm.get("provider") or ""),
                 "model": str(llm.get("model") or ""),
@@ -52,15 +111,18 @@ class AgentContextProvider:
                 "planner_active": bool(planner_active),
                 "response_language": str(llm.get("response_language") or "auto"),
             },
+            "runtime_state": runtime_state,
             "workspace": {
                 "current": str(manager.current_workspace),
                 "default": str(manager.default_workspace),
                 "allowed_roots": [str(root) for root in manager.allowed_roots],
                 "blocked_paths": [str(path) for path in manager.blocked_paths],
                 "mounted_roots": _mounted_roots(config, manager, self.runtime_context.workspace_root),
+                "downloads_path": str(downloads_root),
             },
             "memory": {
                 "root": str(self.runtime_context.memory_root.resolve()),
+                "locations": [str(self.runtime_context.memory_root.resolve())],
                 "files": memory_files,
                 "file_count": len(memory_files),
             },
@@ -72,6 +134,11 @@ class AgentContextProvider:
                 "cloud_context_approved": self.permission_context.cloud_context_approved,
             },
             "terminal": _terminal_summary(config),
+            "config": {
+                "path": str(self.runtime_context.config_path or ""),
+                "sections": _config_section_summary(config),
+                "locations": [str(self.runtime_context.config_path)] if self.runtime_context.config_path else [],
+            },
             "config_sections": _config_section_summary(config),
             "email": _email_summary(config, tools["enabled"]),
             "approvals": {
@@ -114,6 +181,8 @@ def _tool_registry_summary(
             is_enabled = False
         if override.get("enabled") is False:
             is_enabled = False
+        if local_dev_autonomy_enabled(config) and manifest.name in _LOCAL_DEV_AUTONOMY_ENABLED_TOOLS:
+            is_enabled = True
         if is_enabled:
             enabled.append(name)
         else:
@@ -204,13 +273,18 @@ def _terminal_summary(config: dict[str, Any]) -> dict[str, Any]:
     try:
         policy = TerminalPolicy.from_config(config)
         allowed_commands = [" ".join(command) for command in policy.allowed_commands]
+        effective_enabled = policy.enabled
     except (TypeError, ValueError):
         allowed_commands = []
+        effective_enabled = bool(terminal.get("enabled", False))
     return {
-        "enabled": bool(terminal.get("enabled", False)),
+        "enabled": effective_enabled,
+        "configured_enabled": bool(terminal.get("enabled", False)),
         "mode": str(terminal.get("mode") or "allowlist"),
         "workspace_only": bool(terminal.get("workspace_only", True)),
         "auto_approve_allowlisted": bool(terminal.get("auto_approve_allowlisted", False)),
+        "local_dev_readonly_relaxation": local_dev_autonomy_enabled(config),
+        "local_dev_workspace_script_execution": local_dev_autonomy_enabled(config),
         "allowed_commands": allowed_commands[:80],
     }
 

@@ -4,6 +4,31 @@ export type AgentResponse = {
   data: unknown
 }
 
+export type AgentTraceEvent = {
+  at?: string
+  kind: string
+  title: string
+  status: string
+  detail?: string
+  tool?: string
+  metadata?: Record<string, unknown>
+}
+
+export type ChatStreamEvent =
+  | { type: 'trace'; event: AgentTraceEvent }
+  | { type: 'final'; response: AgentResponse }
+  | { type: 'error'; message: string }
+
+export type AutonomyStatus = {
+  enabled: boolean
+  configured_enabled: boolean
+  env_enabled: boolean
+  mode: 'standard_safe' | 'full_llm_first_autonomy' | string
+  toggle_locked_by_env: boolean
+  max_iterations: number
+  safe_invariants: string[]
+}
+
 export type Tool = {
   name: string
   description: string
@@ -106,6 +131,7 @@ export type Status = {
     allowed_user_ids: number[]
     bot_token_env: string
   }
+  autonomy?: AutonomyStatus
 }
 
 export type TerminalStatus = {
@@ -277,6 +303,8 @@ export type AgentConfiguration = {
   storage: {
     downloads_root?: string
   }
+  runtime?: Record<string, unknown>
+  autonomy?: AutonomyStatus
   system_prompts: {
     chat: {
       default: string
@@ -390,11 +418,60 @@ async function request<T>(
 
 export const api = {
   status: () => request<Status>('/v1/status'),
+  autonomy: () => request<AutonomyStatus>('/v1/autonomy'),
+  setAutonomy: (enabled: boolean) =>
+    request<AutonomyStatus>('/v1/autonomy', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
   chat: (message: string, session_id = 'dashboard') =>
     request<AgentResponse>('/v1/chat', {
       method: 'POST',
       body: JSON.stringify({ message, session_id }),
     }),
+  chatStream: async (
+    message: string,
+    session_id = 'dashboard',
+    onEvent: (event: ChatStreamEvent) => void,
+  ) => {
+    const response = await fetch('/v1/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, session_id }),
+    })
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`)
+    }
+    if (!response.body) {
+      throw new Error('Streaming response did not include a body.')
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let finalResponse: AgentResponse | null = null
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const event = JSON.parse(line) as ChatStreamEvent
+        onEvent(event)
+        if (event.type === 'final') finalResponse = event.response
+        if (event.type === 'error') throw new Error(event.message)
+      }
+    }
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer) as ChatStreamEvent
+      onEvent(event)
+      if (event.type === 'final') finalResponse = event.response
+      if (event.type === 'error') throw new Error(event.message)
+    }
+    if (!finalResponse) throw new Error('Agent stream ended without a final response.')
+    return finalResponse
+  },
   tools: () => request<Tool[]>('/v1/tools'),
   setTool: (tool: string, enabled: boolean) =>
     request<AgentResponse>(`/v1/tools/${encodeURIComponent(tool)}/${enabled ? 'enable' : 'disable'}`, {

@@ -32,9 +32,12 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("memory.organize_long_term", _memory_organize_long_term)
     registry.register_handler("profile.update", _profile_update)
     registry.register_handler("files.list", _files_list)
+    registry.register_handler("files.mkdir", _files_mkdir)
     registry.register_handler("files.read", _files_read)
     registry.register_handler("files.write", _files_write)
+    registry.register_handler("files.write_many", _files_write_many)
     registry.register_handler("files.delete", _files_delete)
+    registry.register_handler("project.scaffold_one_page_app", _project_scaffold_one_page_app)
     registry.register_handler("workspace.switch", _workspace_switch)
     registry.register_handler("workspace.status", _workspace_status)
     registry.register_handler("reminders.create", create_reminder)
@@ -299,26 +302,438 @@ def _bounded_list_limit(value: Any, *, default: int, maximum: int) -> int:
     return max(1, min(maximum, parsed))
 
 
+def _files_mkdir(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise ValueError("files.mkdir requires path.")
+    parents = bool(args.get("parents", True))
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    resolved = manager.validate_user_path(path, allow_missing=True)
+    existed = resolved.exists()
+    if existed and not resolved.is_dir():
+        raise ValueError("files.mkdir requires a directory path, not an existing file.")
+    resolved.mkdir(parents=parents, exist_ok=True)
+    return {
+        "path": str(resolved),
+        "created": not existed,
+        "existed": existed,
+    }
+
+
 def _files_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
     path = str(args.get("path") or "").strip()
     if not path:
         raise ValueError("files.write requires path.")
     content = str(args.get("content") or "")
     overwrite = bool(args.get("overwrite", False))
+    append = bool(args.get("append", False))
+    append_newline = bool(args.get("append_newline", append))
     manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
     resolved = manager.validate_user_path(path, allow_missing=True)
     existed = resolved.exists()
     if existed and resolved.is_dir():
         raise ValueError("files.write requires a file path, not a directory.")
-    if existed and not overwrite:
+    if existed and not overwrite and not append:
         raise ValueError("File already exists. Set overwrite=true after explicit approval to replace it.")
     resolved.parent.mkdir(parents=True, exist_ok=True)
+    if append and existed:
+        existing = resolved.read_text(encoding="utf-8", errors="replace")
+        separator = "\n" if append_newline and existing and not existing.endswith("\n") else ""
+        content = f"{existing}{separator}{content}"
     resolved.write_text(content, encoding="utf-8")
     return {
         "path": str(resolved),
         "bytes": len(content.encode("utf-8")),
         "overwritten": existed and overwrite,
+        "appended": existed and append,
     }
+
+
+def _files_write_many(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    raw_files = args.get("files")
+    if not isinstance(raw_files, list) or not raw_files:
+        raise ValueError("files.write_many requires a non-empty files array.")
+    if len(raw_files) > 80:
+        raise ValueError("files.write_many accepts at most 80 files per call.")
+    default_overwrite = bool(args.get("overwrite", False))
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    prepared: list[tuple[Path, str, bool]] = []
+    total_bytes = 0
+    for index, item in enumerate(raw_files):
+        if not isinstance(item, dict):
+            raise ValueError(f"files.write_many file #{index + 1} must be an object.")
+        path = str(item.get("path") or "").strip()
+        if not path:
+            raise ValueError(f"files.write_many file #{index + 1} requires path.")
+        content = str(item.get("content") or "")
+        overwrite = bool(item.get("overwrite", default_overwrite))
+        resolved = manager.validate_user_path(path, allow_missing=True)
+        if resolved.exists() and resolved.is_dir():
+            raise ValueError(f"files.write_many target is a directory: {path}")
+        if resolved.exists() and not overwrite:
+            raise ValueError(f"File already exists: {path}. Set overwrite=true to replace it.")
+        total_bytes += len(content.encode("utf-8"))
+        if total_bytes > 2_000_000:
+            raise ValueError("files.write_many content exceeds the 2 MB safety limit.")
+        prepared.append((resolved, content, overwrite))
+    written: list[dict[str, Any]] = []
+    for resolved, content, overwrite in prepared:
+        existed = resolved.exists()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8")
+        written.append(
+            {
+                "path": str(resolved),
+                "bytes": len(content.encode("utf-8")),
+                "overwritten": existed and overwrite,
+            }
+        )
+    return {"files": written, "count": len(written), "bytes": total_bytes}
+
+
+def _project_scaffold_one_page_app(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    path = str(args.get("path") or "one-page-app").strip()
+    if not path:
+        raise ValueError("project.scaffold_one_page_app requires path.")
+    owner_name = str(args.get("owner_name") or "Denis Denchev").strip()
+    role = str(args.get("role") or "AI Developer").strip()
+    theme = str(args.get("theme") or "developer tech dark").strip()
+    project_summary = str(args.get("project_summary") or "").strip()
+    include_backend = bool(args.get("include_backend", True))
+    overwrite = bool(args.get("overwrite", False))
+
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    root = manager.validate_user_path(path, allow_missing=True)
+    if root.exists() and not root.is_dir():
+        raise ValueError("project.scaffold_one_page_app path must be a directory.")
+    root.mkdir(parents=True, exist_ok=True)
+    files = _one_page_app_files(
+        project_name=root.name,
+        owner_name=owner_name,
+        role=role,
+        theme=theme,
+        project_summary=project_summary,
+        include_backend=include_backend,
+    )
+    written: list[dict[str, Any]] = []
+    for relative_path, content in files.items():
+        target = manager.validate_user_path(str(root / relative_path), allow_missing=True)
+        if target.exists() and target.is_dir():
+            raise ValueError(f"Scaffold target is a directory: {relative_path}")
+        if target.exists() and not overwrite:
+            raise ValueError(f"Scaffold target already exists: {relative_path}. Set overwrite=true to replace it.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        written.append({"path": str(target), "bytes": len(content.encode("utf-8"))})
+    return {
+        "path": str(root),
+        "files": written,
+        "count": len(written),
+        "next_commands": ["npm install", "npm run dev"],
+        "include_backend": include_backend,
+    }
+
+
+def _one_page_app_files(
+    *,
+    project_name: str,
+    owner_name: str,
+    role: str,
+    theme: str,
+    project_summary: str,
+    include_backend: bool,
+) -> dict[str, str]:
+    safe_package = re.sub(r"[^a-z0-9-]+", "-", project_name.casefold()).strip("-") or "one-page-app"
+    summary = project_summary or (
+        "Local-first AI agent runtime work: autonomous orchestration, workspace cognition, "
+        "tool execution, safety gates, and a cockpit UI for operating DMD Agent."
+    )
+    package = {
+        "name": safe_package,
+        "version": "0.1.0",
+        "private": True,
+        "type": "module",
+        "scripts": {
+            "dev": "vite --host 127.0.0.1",
+            "build": "vite build",
+            "preview": "vite preview --host 127.0.0.1",
+        },
+        "dependencies": {
+            "@vitejs/plugin-react": "^latest",
+            "vite": "^latest",
+            "react": "^latest",
+            "react-dom": "^latest",
+        },
+        "devDependencies": {},
+    }
+    if include_backend:
+        package["scripts"]["server"] = "node server/index.js"
+        package["dependencies"]["express"] = "^latest"
+    files = {
+        "package.json": json.dumps(package, indent=2, ensure_ascii=False) + "\n",
+        "index.html": f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{owner_name} - {role}</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+""",
+        "src/main.jsx": """import React from 'react'
+import { createRoot } from 'react-dom/client'
+import './styles.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(<App />)
+""",
+        "src/App.jsx": f"""const profile = {{
+  name: {json.dumps(owner_name, ensure_ascii=False)},
+  role: {json.dumps(role, ensure_ascii=False)},
+  theme: {json.dumps(theme, ensure_ascii=False)},
+  summary: {json.dumps(summary, ensure_ascii=False)},
+  metrics: [
+    ['Runtime', 'LLM-first autonomy'],
+    ['Focus', 'Workspace cognition'],
+    ['Safety', 'Local-first sandbox'],
+    ['Interface', 'Operator cockpit'],
+  ],
+  work: [
+    'Architecting DMD Agent as a persistent local AI runtime.',
+    'Building tool orchestration across files, browser, terminal, memory, and approvals.',
+    'Designing autonomy mode with live execution visibility and backend safety gates.',
+    'Improving planner resilience, runtime awareness, and developer workflows.',
+  ],
+}}
+
+export default function App() {{
+  return (
+    <main className="page-shell">
+      <section className="hero">
+        <div className="hero-copy">
+          <p className="eyebrow">AI Developer / Local Runtime Architect</p>
+          <h1>{{profile.name}}</h1>
+          <p className="role">{{profile.role}}</p>
+          <p className="summary">{{profile.summary}}</p>
+          <div className="actions">
+            <a href="mailto:hello@dmdflow.com">Contact</a>
+            <a href="#work" className="secondary">View Work</a>
+          </div>
+        </div>
+        <div className="signal-panel" aria-label="Runtime signals">
+          {{profile.metrics.map(([label, value]) => (
+            <div className="metric" key={{label}}>
+              <span>{{label}}</span>
+              <strong>{{value}}</strong>
+            </div>
+          ))}}
+        </div>
+      </section>
+
+      <section id="work" className="work-grid">
+        {{profile.work.map((item, index) => (
+          <article key={{item}}>
+            <span>{{String(index + 1).padStart(2, '0')}}</span>
+            <p>{{item}}</p>
+          </article>
+        ))}}
+      </section>
+    </main>
+  )
+}}
+""",
+        "src/styles.css": """* {
+  box-sizing: border-box;
+}
+
+:root {
+  color: #eef6ff;
+  background: #06080d;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 20% 12%, rgba(71, 176, 255, 0.22), transparent 28%),
+    radial-gradient(circle at 86% 8%, rgba(255, 117, 71, 0.18), transparent 26%),
+    linear-gradient(135deg, #05070b, #111824 54%, #080b10);
+}
+
+a {
+  color: inherit;
+}
+
+.page-shell {
+  width: min(1120px, calc(100% - 32px));
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 64px 0;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 40px;
+  align-items: center;
+  min-height: calc(100vh - 128px);
+}
+
+.eyebrow {
+  margin: 0 0 14px;
+  color: #64d7ff;
+  font: 800 0.78rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
+h1 {
+  max-width: 860px;
+  margin: 0;
+  font-size: clamp(3.5rem, 9vw, 7.4rem);
+  line-height: 0.88;
+  letter-spacing: 0;
+}
+
+.role {
+  margin: 22px 0 0;
+  color: #ffae73;
+  font-size: clamp(1.35rem, 2vw, 2rem);
+  font-weight: 850;
+}
+
+.summary {
+  max-width: 720px;
+  margin: 22px 0 0;
+  color: #b9c8d6;
+  font-size: 1.08rem;
+  line-height: 1.75;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 34px;
+}
+
+.actions a {
+  border: 1px solid rgba(100, 215, 255, 0.7);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #63d9ff, #2c8ccb);
+  color: #041018;
+  padding: 12px 18px;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.actions .secondary {
+  border-color: rgba(255, 174, 115, 0.52);
+  background: rgba(255, 174, 115, 0.08);
+  color: #ffd0ad;
+}
+
+.signal-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(135, 159, 181, 0.24);
+  border-radius: 8px;
+  background: rgba(9, 14, 22, 0.78);
+  padding: 18px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+.metric {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(135, 159, 181, 0.18);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.metric span {
+  color: #8295a7;
+  font: 800 0.75rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
+.metric strong {
+  overflow-wrap: anywhere;
+}
+
+.work-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.work-grid article {
+  min-height: 190px;
+  border: 1px solid rgba(135, 159, 181, 0.2);
+  border-radius: 8px;
+  background: rgba(10, 16, 25, 0.72);
+  padding: 18px;
+}
+
+.work-grid span {
+  color: #64d7ff;
+  font: 900 0.8rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.work-grid p {
+  margin: 38px 0 0;
+  color: #d5e2ee;
+  line-height: 1.55;
+}
+
+@media (max-width: 860px) {
+  .hero,
+  .work-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    min-height: auto;
+  }
+}
+""",
+        "README.md": f"""# {owner_name} - {role}
+
+One-page React project scaffolded for a developer/tech/dark personal profile.
+
+## Run
+
+```bash
+npm install
+npm run dev
+```
+""",
+    }
+    if include_backend:
+        files["server/index.js"] = """import express from 'express'
+
+const app = express()
+const port = process.env.PORT || 3001
+
+app.get('/api/profile', (_request, response) => {
+  response.json({
+    status: 'ok',
+    focus: 'DMD Agent local-first autonomous runtime',
+  })
+})
+
+app.listen(port, () => {
+  console.log(`Profile API listening on http://127.0.0.1:${port}`)
+})
+"""
+    return files
 
 
 def _files_delete(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:

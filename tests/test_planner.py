@@ -46,18 +46,34 @@ class PlannerTest(unittest.TestCase):
         result = parse_plan_response("Sure, I can help with that.")
         self.assertEqual(result.final_message, "Sure, I can help with that.")
 
-    def test_malformed_json_response_raises_for_repair(self) -> None:
+    def test_plain_text_with_config_json_snippet_becomes_final_answer(self) -> None:
+        raw = (
+            'За config знам, че llm изглежда така: {"provider":"deepseek","model":"deepseek-v4-pro"}. '
+            "Workspace и tools идват от runtime контекста."
+        )
+
+        result = parse_plan_response(raw)
+
+        self.assertEqual(result.final_message, raw)
+
+    def test_malformed_json_response_becomes_final_without_repair(self) -> None:
         raw = '{"type":"final","message":"Still answer naturally"'
-        with self.assertRaises(PlannerError):
-            parse_plan_response(raw)
+        result = parse_plan_response(raw)
+        self.assertEqual(result.final_message, raw)
+
+    def test_unclosed_json_fence_becomes_final_without_repair(self) -> None:
+        raw = '```json\n{"action":"answer","message":"partial"'
+        result = parse_plan_response(raw)
+        self.assertEqual(result.final_message, raw)
 
     def test_message_without_type_becomes_final_answer(self) -> None:
         result = parse_plan_response('{"message":"Hello without type"}')
         self.assertEqual(result.final_message, "Hello without type")
 
-    def test_rejects_unknown_type(self) -> None:
-        with self.assertRaises(PlannerError):
-            parse_plan_response('{"type":"unknown"}')
+    def test_unknown_type_becomes_final_answer(self) -> None:
+        raw = '{"type":"unknown"}'
+        result = parse_plan_response(raw)
+        self.assertEqual(result.final_message, raw)
 
     def test_custom_system_prompt_is_sent_to_provider(self) -> None:
         provider = RecordingProvider('{"type":"final","message":"ok"}')
@@ -81,7 +97,7 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(answer, "final answer")
         self.assertEqual(provider.messages[0].content, "Custom answer instructions")
 
-    def test_planner_repairs_malformed_json_once(self) -> None:
+    def test_planner_does_not_repair_malformed_json(self) -> None:
         provider = SequenceProvider(
             [
                 '{"type":"tool_request","tool":"memory.list","args":{}',
@@ -92,9 +108,29 @@ class PlannerTest(unittest.TestCase):
 
         result = planner.plan(user_message="list memory", manifests={})
 
-        self.assertIsNotNone(result.tool_request)
-        self.assertEqual(result.tool_request.tool, "memory.list")
-        self.assertEqual(provider.call_count, 2)
+        self.assertIsNone(result.tool_request)
+        self.assertEqual(provider.call_count, 1)
+
+    def test_parses_action_protocol_multi_tool_plan(self) -> None:
+        result = parse_plan_response(
+            """OBJECTIVE: Create project
+PLAN:
+- Create folder
+- Scaffold app
+ACTIONS:
+- tool: files.mkdir
+  args: {"path":"test","parents":true}
+  reason: Create folder.
+- tool: project.scaffold_one_page_app
+  args: {"path":"test","owner_name":"Denis Denchev","role":"AI Developer","theme":"developer tech dark","include_backend":true,"overwrite":true}
+  reason: Scaffold site.
+"""
+        )
+
+        self.assertEqual(result.objective, "Create project")
+        self.assertEqual(len(result.tool_plan), 2)
+        self.assertEqual(result.tool_plan[0].tool, "files.mkdir")
+        self.assertEqual(result.tool_plan[1].tool, "project.scaffold_one_page_app")
 
     def test_parses_scrape_to_file_multi_tool_plan(self) -> None:
         raw = json.dumps(
@@ -152,9 +188,9 @@ class PlannerTest(unittest.TestCase):
         )
         payload = json.loads(provider.messages[1].content)
 
-        self.assertEqual(payload["agent_context"], agent_context)
         self.assertEqual(payload["agent_context"]["runtime"]["model"], "qwen-context")
         self.assertIn("files.read", payload["agent_context"]["tools"]["enabled"])
+        self.assertIn("workspace", payload["agent_context"])
 
     def test_prompt_guides_context_aware_file_and_email_workflows(self) -> None:
         self.assertIn("agent_context.workspace.mounted_roots", SYSTEM_PROMPT)
@@ -163,6 +199,12 @@ class PlannerTest(unittest.TestCase):
         self.assertIn("path_from_selected_step", SYSTEM_PROMPT)
         self.assertIn("body_from_previous_step", SYSTEM_PROMPT)
         self.assertIn("draft_id_from_previous_step", SYSTEM_PROMPT)
+
+    def test_prompt_guides_local_dev_script_workflows(self) -> None:
+        self.assertIn("LOCAL_DEV_AUTONOMY", SYSTEM_PROMPT)
+        self.assertIn("create a script", SYSTEM_PROMPT)
+        self.assertIn("terminal.run", SYSTEM_PROMPT)
+        self.assertIn("python3", SYSTEM_PROMPT)
 
     def test_unrelated_visual_clarification_is_low_relevance_for_scrape_request(self) -> None:
         result = parse_plan_response(
@@ -176,7 +218,7 @@ class PlannerTest(unittest.TestCase):
             )
         )
 
-    def test_planner_retries_unrelated_output_with_strict_schema(self) -> None:
+    def test_planner_does_not_retry_unrelated_output_with_strict_schema(self) -> None:
         provider = SequenceProvider(
             [
                 '{"action":"ask_clarification","message":"I need the image or description of the rotating objects to determine which number is the rotating one."}',
@@ -206,10 +248,8 @@ class PlannerTest(unittest.TestCase):
             manifests={},
         )
 
-        self.assertEqual(provider.call_count, 2)
-        self.assertEqual(len(result.tool_plan), 2)
-        self.assertEqual(result.tool_plan[0].tool, "browser.scrape_markdown")
-        self.assertEqual(result.tool_plan[1].tool, "files.write")
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(result.clarification_message, "I need the image or description of the rotating objects to determine which number is the rotating one.")
 
     def test_planner_prompts_do_not_contain_visual_task_leakage(self) -> None:
         prompt_text = f"{SYSTEM_PROMPT}\n{REPAIR_PROMPT}".casefold()

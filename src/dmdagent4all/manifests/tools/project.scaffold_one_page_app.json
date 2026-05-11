@@ -1,0 +1,19 @@
+{
+  "name": "project.scaffold_one_page_app",
+  "description": "Scaffold a polished one-page React + Node project inside an allowed workspace folder from high-level page details. Use for portfolio, landing, business card, product, or tech one-pager requests.",
+  "risk": 4,
+  "permissions": [],
+  "args_schema": {
+    "path": "target project folder relative to current workspace or absolute path inside allowed roots",
+    "owner_name": "person, brand, or project name to feature",
+    "role": "short role or positioning line",
+    "theme": "visual style, for example developer tech dark",
+    "project_summary": "what the page should say about the person/project/work",
+    "include_backend": "true to include a minimal Node/Express backend",
+    "overwrite": "true to overwrite files that already exist"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

@@ -1,0 +1,14 @@
+{
+  "name": "files.write_many",
+  "description": "Create or overwrite multiple text/code files inside allowed workspace roots in one safe batch. Use for scaffolding small projects without requiring many separate files.write calls.",
+  "risk": 4,
+  "permissions": [],
+  "args_schema": {
+    "files": "array of objects with path, content, and optional overwrite",
+    "overwrite": "default overwrite value for every file when the file item does not specify it"
+  },
+  "approval_required": true,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

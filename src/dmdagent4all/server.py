@@ -4,6 +4,7 @@ import os
 import html
 import json
 import mimetypes
+import queue
 import re
 import secrets as token_secrets
 import shlex
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -25,6 +26,7 @@ from dmdagent4all import __version__
 from dmdagent4all.agent.planner import ANSWER_PROMPT, CHAT_PROMPT, SYSTEM_PROMPT
 from dmdagent4all.app_paths import AppPaths
 from dmdagent4all.audit import AuditEvent, AuditStore
+from dmdagent4all.autonomy import local_dev_autonomy_enabled
 from dmdagent4all.config import load_config, update_config, write_default_config
 from dmdagent4all.doctor import doctor_summary, run_doctor
 from dmdagent4all.email_oauth import (
@@ -58,6 +60,7 @@ from dmdagent4all.llm.openai_usage import (
 from dmdagent4all.permissions import ToolRequest
 from dmdagent4all.runtime import build_agent_core
 from dmdagent4all.sandbox import TerminalPolicy, active_terminal_processes, emergency_stop_terminal_processes
+from dmdagent4all.agent.runtime_state import invalidate_runtime_state_cache
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.storage import downloads_root_from_config
@@ -132,6 +135,10 @@ WORKSPACE_MAX_PREVIEW_BYTES = 200_000
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+
+
+class AutonomyModeRequest(BaseModel):
+    enabled: bool
 
 
 class MemoryWriteRequest(BaseModel):
@@ -321,6 +328,46 @@ def create_app() -> FastAPI:
     @app.post("/v1/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
         return asdict(build_agent_core().handle_text(request.message, session_id=request.session_id or "dashboard"))
+
+    @app.post("/v1/chat/stream")
+    def chat_stream(request: ChatRequest) -> StreamingResponse:
+        events: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+        def emit(event: dict[str, Any]) -> None:
+            events.put({"type": "trace", "event": event})
+
+        def run() -> None:
+            try:
+                response = build_agent_core(event_sink=emit).handle_text(
+                    request.message,
+                    session_id=request.session_id or "dashboard",
+                )
+                events.put({"type": "final", "response": asdict(response)})
+            except Exception as exc:
+                events.put({"type": "error", "message": str(exc)})
+            finally:
+                events.put(None)
+
+        threading.Thread(target=run, daemon=True).start()
+
+        def stream():
+            while True:
+                item = events.get()
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+    @app.get("/v1/autonomy")
+    def autonomy_status() -> dict[str, Any]:
+        return _autonomy_response(load_config(paths.config))
+
+    @app.post("/v1/autonomy")
+    def autonomy_update(request: AutonomyModeRequest) -> dict[str, Any]:
+        config = update_config(lambda current: _set_autonomy_mode(current, request.enabled), paths.config)
+        invalidate_runtime_state_cache()
+        return _autonomy_response(config)
 
     @app.get("/v1/permissions")
     def permissions() -> dict[str, Any]:
@@ -520,6 +567,7 @@ def create_app() -> FastAPI:
     @app.post("/v1/configuration")
     def configuration_update(request: AgentConfigurationRequest) -> dict[str, Any]:
         config = update_config(lambda current: _update_agent_configuration(current, request), paths.config)
+        invalidate_runtime_state_cache()
         return {
             "status": "ok",
             "message": "Agent configuration updated.",
@@ -676,6 +724,7 @@ def create_app() -> FastAPI:
                     "DMDAGENT_TELEGRAM_BOT_TOKEN",
                 ),
             },
+            "autonomy": _autonomy_response(config),
         }
 
     @app.get("/v1/models")
@@ -1348,8 +1397,46 @@ def _configuration_response(paths: AppPaths, config: dict[str, Any]) -> dict[str
         "privacy": config.get("privacy", {}),
         "permissions": config.get("permissions", {}),
         "storage": config.get("storage", {}),
+        "runtime": config.get("runtime", {}),
+        "autonomy": _autonomy_response(config),
         "workspace": WorkspaceManager.from_config(config, fallback_workspace=paths.workspace).workspace_info(),
     }
+
+
+def _autonomy_response(config: dict[str, Any]) -> dict[str, Any]:
+    runtime = config.get("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+    autonomy = runtime.get("autonomy", {})
+    if not isinstance(autonomy, dict):
+        autonomy = {}
+    env_enabled = local_dev_autonomy_enabled({})
+    effective_enabled = local_dev_autonomy_enabled(config)
+    configured_enabled = bool(autonomy.get("enabled", False))
+    return {
+        "enabled": effective_enabled,
+        "configured_enabled": configured_enabled,
+        "env_enabled": env_enabled,
+        "mode": "full_llm_first_autonomy" if effective_enabled else "standard_safe",
+        "toggle_locked_by_env": False,
+        "max_iterations": int(autonomy.get("max_iterations", 3)),
+        "safe_invariants": [
+            "workspace isolation",
+            "secret and .env blocking",
+            "path traversal protection",
+            "emergency stop",
+            "subprocess timeout limits",
+            "shell injection protections",
+            "no shell=True",
+        ],
+    }
+
+
+def _set_autonomy_mode(config: dict[str, Any], enabled: bool) -> None:
+    autonomy = config.setdefault("runtime", {}).setdefault("autonomy", {})
+    autonomy["enabled"] = bool(enabled)
+    autonomy["mode"] = "full" if enabled else "standard"
+    autonomy.setdefault("max_iterations", 3)
 
 
 def _email_configuration_response(config: dict[str, Any]) -> dict[str, Any]:

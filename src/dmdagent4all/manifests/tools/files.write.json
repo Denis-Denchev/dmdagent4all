@@ -1,13 +1,15 @@
 {
   "name": "files.write",
-  "description": "Create or overwrite a text/code file inside an allowed workspace root after explicit approval. Use for natural edit requests such as putting text in README.md, creating test.md with content, or modifying source code.",
+  "description": "Create, append to, or overwrite a text/code file inside an allowed workspace root after explicit approval. Use for natural edit requests such as putting text in README.md, appending text to README.md, creating test.md with content, or modifying source code.",
   "risk": 4,
   "permissions": [],
   "args_schema": {
     "path": "absolute path inside allowed roots or path relative to current workspace",
     "content": "full text content to write into the file",
     "content_from_previous_step": "true only inside a multi_tool_plan when files.write should write the prior tool's returned text/markdown",
-    "overwrite": "true only when replacing an existing file after explicit approval"
+    "overwrite": "true only when replacing an existing file after explicit approval",
+    "append": "true when adding content to the end of an existing file instead of replacing it",
+    "append_newline": "true to insert a newline before appended content when the file does not already end with one"
   },
   "approval_required": true,
   "cloud_allowed": false,

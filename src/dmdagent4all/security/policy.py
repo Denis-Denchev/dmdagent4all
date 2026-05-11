@@ -52,7 +52,7 @@ class ToolSafetyPolicy:
             fallback_workspace=context.workspace_root,
         )
 
-        if request.tool in {"files.list", "files.read", "files.write", "files.delete"}:
+        if request.tool in {"files.list", "files.read", "files.mkdir", "files.write", "files.delete"}:
             path = request.args.get("path")
             if request.tool == "files.list" and (path is None or str(path).strip() == ""):
                 path = "."
@@ -61,8 +61,32 @@ class ToolSafetyPolicy:
             try:
                 manager.validate_user_path(
                     path,
-                    allow_missing=request.tool == "files.write",
+                    allow_missing=request.tool in {"files.mkdir", "files.write"},
                 )
+            except WorkspaceError as exc:
+                return SafetyDecision.deny(str(exc), risk=RiskLevel.DANGEROUS_SYSTEM)
+
+        if request.tool == "files.write_many":
+            raw_files = request.args.get("files")
+            if not isinstance(raw_files, list) or not raw_files:
+                return SafetyDecision.deny("files.write_many requires a non-empty files array.")
+            try:
+                for item in raw_files:
+                    if not isinstance(item, dict):
+                        return SafetyDecision.deny("files.write_many files must be objects.")
+                    path = item.get("path")
+                    if not isinstance(path, str) or not path.strip():
+                        return SafetyDecision.deny("files.write_many file requires path.")
+                    manager.validate_user_path(path, allow_missing=True)
+            except WorkspaceError as exc:
+                return SafetyDecision.deny(str(exc), risk=RiskLevel.DANGEROUS_SYSTEM)
+
+        if request.tool == "project.scaffold_one_page_app":
+            path = request.args.get("path")
+            if not isinstance(path, str) or not path.strip():
+                return SafetyDecision.deny("project.scaffold_one_page_app requires path.")
+            try:
+                manager.validate_user_path(path, allow_missing=True)
             except WorkspaceError as exc:
                 return SafetyDecision.deny(str(exc), risk=RiskLevel.DANGEROUS_SYSTEM)
 

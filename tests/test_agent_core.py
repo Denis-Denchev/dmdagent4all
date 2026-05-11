@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import os
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -213,6 +214,64 @@ class AgentCoreTest(unittest.TestCase):
                 )
             )
 
+    def test_local_dev_autonomy_context_includes_runtime_locations_and_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloads = root / "Downloads"
+            downloads.mkdir()
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                root,
+                planner,
+                config={
+                    "llm": {"provider": "deepseek", "model": "deepseek-chat", "response_language": "auto"},
+                    "storage": {"downloads_root": str(downloads)},
+                    "tools": {"browser.scrape_markdown": {"enabled": False}},
+                    "workspace": {
+                        "default_path": str(root / "workspace"),
+                        "current_path": str(root / "workspace"),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": [],
+                    },
+                },
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                core.handle_text("what tools are enabled?")
+
+            context = planner.calls[0]["agent_context"]
+            self.assertTrue(context["autonomy"]["local_dev_autonomy"])
+            self.assertEqual(context["runtime"]["provider"], "deepseek")
+            self.assertEqual(context["workspace"]["downloads_path"], str(downloads.resolve()))
+            self.assertIn(str((root / "memory").resolve()), context["memory"]["locations"])
+            self.assertIn("sections", context["config"])
+            self.assertIn("browser.scrape_markdown", context["tools"]["enabled"])
+            self.assertIn("browser.read", context["permissions"]["granted"])
+            self.assertEqual(context["runtime_state"]["mode"], "full_llm_first_autonomy")
+            self.assertEqual(context["runtime_state"]["downloads"]["path"], str(downloads.resolve()))
+            self.assertIn("browser.scrape_markdown", context["runtime_state"]["tools"]["enabled"])
+
+    def test_autonomy_config_toggle_can_disable_env_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                root,
+                planner,
+                config={
+                    "runtime": {"autonomy": {"enabled": False, "mode": "standard"}},
+                    "tools": {"browser.scrape_markdown": {"enabled": False}},
+                },
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                core.handle_text("what tools are enabled?")
+
+            context = planner.calls[0]["agent_context"]
+            self.assertFalse(context["autonomy"]["enabled"])
+            self.assertEqual(context["runtime_state"]["mode"], "standard_safe")
+            self.assertIn("browser.scrape_markdown", context["tools"]["disabled"])
+
     def test_model_identity_uses_runtime_agent_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             planner = ContextAnsweringPlanner()
@@ -288,6 +347,65 @@ class AgentCoreTest(unittest.TestCase):
                 if mount["label"] == "downloads"
             )
             self.assertFalse(downloads["allowed"])
+
+    def test_memory_file_names_question_uses_agent_context_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/immich.md",
+                "Immich memory file.",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(root, ExplodingPlanner())
+
+            response = core.handle_text(
+                "кажи ми в memory какви .md имаш, искам само имената на файловете"
+            )
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("services/immich.md", response.message)
+            self.assertNotIn("LLM planner", response.message)
+            self.assertEqual(response.data["source"], "agent_context")
+            self.assertEqual(response.data["kind"], "memory_files")
+
+    def test_missing_tool_permissions_question_uses_agent_context_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), ExplodingPlanner())
+
+            response = core.handle_text("кажи ми на кои тулове не сме дали разрешение")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("terminal.run", response.message)
+            self.assertIn("terminal.run", response.data["missing_permissions_by_tool"])
+            self.assertNotIn("LLM planner", response.message)
+            self.assertEqual(response.data["source"], "agent_context")
+            self.assertEqual(response.data["kind"], "missing_tool_permissions")
+
+    def test_scraped_downloads_question_uses_local_downloads_without_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            downloads = root / "internet-files"
+            scrape_dir = downloads / "scrapefiles"
+            scrape_dir.mkdir(parents=True)
+            (scrape_dir / "fibank.md").write_text("# Fibank\n", encoding="utf-8")
+            (scrape_dir / "sportal.md").write_text("# Sportal\n", encoding="utf-8")
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "storage": {"downloads_root": str(downloads)},
+                },
+            )
+
+            response = core.handle_text("кажи какво имаме в downloads от скрейпнатите сайтове")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("scrapefiles/fibank.md", response.message)
+            self.assertIn("scrapefiles/sportal.md", response.message)
+            self.assertNotIn("LLM planner", response.message)
+            self.assertEqual(response.data["source"], "agent_context")
+            self.assertEqual(response.data["kind"], "scraped_downloads")
 
     def test_cloud_planner_does_not_receive_chat_history_without_context_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1151,6 +1269,446 @@ class AgentCoreTest(unittest.TestCase):
             self.assertNotIn("rotating objects", response.message)
             self.assertNotIn("repair prompt", response.message)
             self.assertEqual(response.status, "denied")
+
+    def test_planner_error_on_normal_question_does_not_claim_planner_inactive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(
+                Path(tmp),
+                FailingPlanner(PlannerError("Return valid JSON only. internal repair text")),
+            )
+
+            response = core.handle_text("искам да ми кажеш какво знаеш за конфиг")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("planner is active", response.message)
+            self.assertNotIn("planner is not active", response.message)
+            self.assertNotIn("Return valid JSON", response.message)
+            self.assertEqual(response.data, {"planner": "llm", "fallback": "planner_error"})
+
+    def test_local_dev_autonomy_recovers_malformed_planner_output_with_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = ChatOnlyPlanner("Config sections are available in runtime context.")
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_text("искам да ми кажеш какво знаеш за конфиг")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Config sections", response.message)
+            self.assertNotIn("planner is active", response.message)
+            self.assertEqual(response.data["fallback"], "local_dev_planner_chat")
+            self.assertEqual(response.data["runtime_mode"], "full_llm_first_autonomy")
+            self.assertGreaterEqual(len(response.data["trace"]), 2)
+            self.assertEqual(len(planner.chat_calls), 1)
+
+    def test_local_dev_autonomy_auto_approves_safe_file_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            core = _build_core(root, None, audit=audit)
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="files.write",
+                        args={"path": "readme.md", "content": "# Local dev\n", "overwrite": True},
+                        reason="Local dev write.",
+                    )
+                )
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+            self.assertEqual((workspace / "readme.md").read_text(encoding="utf-8"), "# Local dev\n")
+
+    def test_local_dev_autonomy_still_blocks_env_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(root, None, audit=audit)
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="files.write",
+                        args={"path": ".env", "content": "TOKEN=x"},
+                        reason="Secret write should remain blocked.",
+                    )
+                )
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("secret", response.message.casefold())
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_local_dev_autonomy_delete_still_requires_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "old.md").write_text("remove me\n", encoding="utf-8")
+            core = _build_core(root, None, audit=audit)
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="files.delete",
+                        args={"path": "old.md"},
+                        reason="Delete still needs approval.",
+                    )
+                )
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(audit.list_approvals(status="pending")[0]["tool"], "files.delete")
+            self.assertTrue((workspace / "old.md").exists())
+
+    def test_local_dev_autonomy_auto_enables_and_runs_scrape(self) -> None:
+        html = "<html><head><title>DMD Flow</title></head><body><main><p>Autonomy scrape.</p></main></body></html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(root, None, audit=audit)
+            page = FetchedPage(
+                url="https://dmdflow.com",
+                final_url="https://dmdflow.com/",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=128,
+                truncated=False,
+            )
+
+            with (
+                mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}),
+                mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page),
+            ):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="browser.scrape_markdown",
+                        args={"url": "dmdflow.com", "mode": "raw_page", "format": "clean_markdown"},
+                        reason="Safe scrape.",
+                    )
+                )
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Autonomy scrape", response.data["markdown"])
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_local_dev_autonomy_scrape_to_file_chain_writes_without_approval(self) -> None:
+        html = "<html><head><title>DMD Flow</title></head><body><main><p>Autonomous chain.</p></main></body></html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="browser.scrape_markdown",
+                                args={"url": "dmdflow.com", "mode": "raw_page", "format": "clean_markdown"},
+                                reason="Scrape requested page.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={"path": "readme123.md", "content_from_previous_step": True},
+                                reason="Write previous markdown.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+            )
+            page = FetchedPage(
+                url="https://dmdflow.com",
+                final_url="https://dmdflow.com/",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=128,
+                truncated=False,
+            )
+
+            with (
+                mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}),
+                mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page),
+            ):
+                response = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+            self.assertIn("Autonomous chain", (workspace / "readme123.md").read_text(encoding="utf-8"))
+
+    def test_local_dev_autonomy_scaffolds_one_page_project_without_terminal_mkdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="project.scaffold_one_page_app",
+                            args={
+                                "path": "test",
+                                "owner_name": "Денис Денчев",
+                                "role": "AI Developer",
+                                "theme": "developer tech dark",
+                                "project_summary": "Work on DMD Agent autonomous runtime.",
+                                "include_backend": True,
+                                "overwrite": True,
+                            },
+                            reason="Scaffold requested one-page site.",
+                        )
+                    )
+                ),
+                audit=audit,
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_text("създай one pager react node.js сайт в папка test")
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+            self.assertTrue((workspace / "test" / "package.json").exists())
+            self.assertTrue((workspace / "test" / "src" / "App.jsx").exists())
+            self.assertTrue((workspace / "test" / "server" / "index.js").exists())
+            self.assertIn("Денис Денчев", (workspace / "test" / "src" / "App.jsx").read_text(encoding="utf-8"))
+            self.assertNotIn("terminal.run", response.message)
+
+    def test_write_many_still_blocks_env_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(root, None, audit=audit)
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="files.write_many",
+                        args={"files": [{"path": ".env", "content": "TOKEN=x", "overwrite": True}]},
+                        reason="Secret batch write should remain blocked.",
+                    )
+                )
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("secret", response.message.casefold())
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_local_dev_autonomy_recovers_prose_file_append_as_real_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            readme = workspace / "README.md"
+            readme.write_text("# README\n\nThis is an empty README file.\n", encoding="utf-8")
+            core = _build_core(
+                root,
+                FakePlanner(PlanResult(final_message='Готово, Денис. Добавих "ТЕСТ" в README.md.')),
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_text('в README.md искам да добавиш текст "ТЕСТ"')
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Добавих", response.message)
+            self.assertIn("ТЕСТ", readme.read_text(encoding="utf-8"))
+
+    def test_file_chain_falls_back_to_scraped_downloads_when_previous_list_misses_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            downloads = root / "Downloads"
+            scrape_dir = downloads / "scrapefiles"
+            workspace.mkdir()
+            scrape_dir.mkdir(parents=True)
+            (workspace / "README.md").write_text("# README\n\n", encoding="utf-8")
+            source = scrape_dir / "футбол-спорт-спортни-новини-sportal.bg.md"
+            source.write_text("# Sportal\n\nFootball scrape body\n", encoding="utf-8")
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="files.list",
+                                args={"path": "."},
+                                reason="Planner incorrectly inspected the active workspace first.",
+                            ),
+                            ToolRequest(
+                                tool="files.read",
+                                args={"path_from_previous_step_match": "футбол-спорт-спортни-новини-sportal.bg.md"},
+                                reason="Read the named scraped file.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={"path": "README.md", "content_from_previous_step": True},
+                                reason="Write the scraped file content into README.md.",
+                            ),
+                        )
+                    )
+                ),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "storage": {"downloads_root": str(downloads)},
+                    "workspace": {
+                        "default_path": str(workspace),
+                        "current_path": str(workspace),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": [],
+                    },
+                },
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_text(
+                    "може ли да вземеш текста от футбол-спорт-спортни-новини-sportal.bg.md и да го преместиш в този празен README file"
+                )
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Football scrape body", (workspace / "README.md").read_text(encoding="utf-8"))
+
+    def test_local_dev_autonomy_emergency_stop_still_blocks_safe_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "runtime": {"emergency_stop": {"active": True, "reason": "test"}},
+                },
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="files.write",
+                        args={"path": "readme.md", "content": "blocked"},
+                        reason="Should be blocked by emergency stop.",
+                    )
+                )
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Emergency stop", response.message)
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_local_dev_autonomy_allows_readonly_terminal_inspection_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "marker.txt").write_text("ok\n", encoding="utf-8")
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(root, None, audit=audit)
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="terminal.run",
+                        args={"command": ["find", ".", "-maxdepth", "1", "-type", "f", "-print"]},
+                        reason="Readonly workspace inspection.",
+                    )
+                )
+                blocked = core.handle_tool_request(
+                    ToolRequest(
+                        tool="terminal.run",
+                        args={"command": ["git", "push"]},
+                        reason="Write-impact command.",
+                    )
+                )
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("marker.txt", response.data["stdout"])
+            self.assertEqual(blocked.status, "denied")
+            self.assertIn("allowlist", blocked.message)
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_local_dev_autonomy_executes_planned_workspace_python_script_without_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="files.write",
+                                args={
+                                    "path": "time_sofia.py",
+                                    "content": (
+                                        "from datetime import datetime\n"
+                                        "from zoneinfo import ZoneInfo\n"
+                                        "print(datetime.now(ZoneInfo('Europe/Sofia')).strftime('%H:%M'))\n"
+                                    ),
+                                    "overwrite": True,
+                                },
+                                reason="Create a local script requested by the user.",
+                            ),
+                            ToolRequest(
+                                tool="terminal.run",
+                                args={"command": [sys.executable, "time_sofia.py"]},
+                                reason="Execute the script to verify it works.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_text(
+                    "създай питонски скрипт за часа в София и го изпълни"
+                )
+
+            self.assertEqual(response.status, "ok")
+            self.assertTrue((workspace / "time_sofia.py").exists())
+            self.assertRegex(response.data["steps"][-1]["data"]["stdout"], r"\d{2}:\d{2}")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_local_dev_autonomy_does_not_auto_approve_write_impact_allowlisted_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["git", "push"]],
+                        "auto_approve_allowlisted": True,
+                    },
+                },
+            )
+
+            with mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}):
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="terminal.run",
+                        args={"command": ["git", "push"]},
+                        reason="Write-impact command must still require approval.",
+                    )
+                )
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(audit.list_approvals(status="pending")[0]["tool"], "terminal.run")
 
     def test_identity_answers_use_setup_config_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

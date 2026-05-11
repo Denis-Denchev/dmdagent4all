@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from dmdagent4all.autonomy import log_local_dev_autonomy
 from dmdagent4all.llm.base import LLMMessage, LLMProvider
 from dmdagent4all.permissions import ToolManifest, ToolRequest
 
@@ -19,10 +20,20 @@ For developer/coding work:
 - Use developer.context when the user asks to inspect a project, understand code, prepare a coding task, or needs project context.
 - Use files.read for a specific non-secret file read.
 - Use files.list to inspect an allowed workspace/downloads folder before choosing among files.
+- Use files.mkdir instead of terminal.run mkdir for safe folder creation.
 - Use files.write when the user asks to create/edit/overwrite a text/code file, including natural requests like "put this text in README.md" or "create test.md with 12345".
+- Use files.write with {"append":true} when the user asks to add/append text to an existing file.
+- Use files.write_many for compact multi-file scaffolding when you know the exact files and content.
 - Use files.delete only when the user explicitly wants deletion or a move that removes the original; deletion requires backend approval.
+- Use project.scaffold_one_page_app for portfolio, landing page, one-page website, React + Node, frontend/backend, or business-card site scaffolds when the user gives high-level page details.
 - Use terminal.run for explicit terminal commands. Put commands as an array of parts, for example {"command":["ls"]}.
-- Never invent a result after choosing a tool. Return only the tool_request JSON and let the backend execute or ask approval.
+- Never claim that a file was created, edited, appended, moved, copied, or overwritten unless you are summarizing an actual tool result. For requested file/project work, include executable ACTIONS, not prose-only progress text.
+
+For local scripts in LOCAL_DEV_AUTONOMY:
+- If the user asks you to create a script/program, write the script with files.write in the active workspace.
+- If the user asks to execute or test the script, follow with terminal.run using an interpreter command array such as {"command":["python3","script.py"]}.
+- If a previous turn established a local script for a future user question and the user now asks that matching question, use terminal.run to execute that workspace script instead of answering from memory.
+- Script execution is still backend-gated: workspace path validation, secret blocking, timeout, no shell=True, emergency stop, and command policy remain active.
 
 For email:
 - Use gmail.* tools for Gmail and outlook.* tools for Outlook.
@@ -41,6 +52,7 @@ For browser work:
 For file workflows:
 - If the user asks for a file from Downloads or another mounted folder, check agent_context.workspace.mounted_roots and allowed_roots.
 - If the folder is not mounted/allowed, answer with the missing configuration instead of guessing paths.
+- If the user names a scraped/downloaded file, especially one from downloads/scrapefiles or recent conversation, inspect agent_context.workspace.downloads_path/scrapefiles before searching the active workspace.
 - For "find the file about X", plan files.list first, then files.read with {"path_from_previous_step_match":"X"}.
 - To copy/write the selected file into another file, follow files.read with files.write and {"content_from_previous_step":true}.
 - To move the original, add files.delete with {"path_from_selected_step":true}; backend approval is required.
@@ -58,17 +70,21 @@ Use recent_conversation and memory context when they help. Answer in the user's 
 The current user message is authoritative. Ignore unrelated prior tasks, examples, benchmark questions, and stale repair text.
 Use agent_context as the source of truth for identity, provider/model, tools, permissions, workspace, memory files, pending approvals, and recent tool results. Do not claim to be a provider/model that is not in agent_context.runtime.
 
-Return exactly one JSON object:
-- For normal conversation:
-  {"action":"answer","message":"your answer"}
-- For one tool action:
-  {"action":"tool_call","tool":"tool.name","args":{},"reason":"why this tool is useful"}
-- For a short multi-step tool plan:
-  {"action":"multi_tool_plan","steps":[{"tool":"tool.name","args":{},"reason":"step reason"}],"reason":"why this plan is useful"}
-- To ask a clarification:
-  {"action":"ask_clarification","message":"your question"}
-- To search local memory:
-  {"action":"memory_search","query":"what to look up","reason":"why memory is needed"}
+Use a tolerant action protocol. You may answer naturally for normal conversation.
+For executable work, keep reasoning separate from actions and include an ACTIONS block at the end:
+
+OBJECTIVE: short user-facing objective
+PLAN:
+- short semantic step
+ACTIONS:
+- tool: files.mkdir
+  args: {"path":"test","parents":true}
+  reason: Create the project folder.
+- tool: project.scaffold_one_page_app
+  args: {"path":"test","owner_name":"Denis Denchev","role":"AI Developer","theme":"developer tech dark","project_summary":"Portfolio page about DMD Agent work","include_backend":true,"overwrite":true}
+  reason: Scaffold the requested one-page React + Node site.
+
+JSON is also accepted, but do not depend on fenced JSON. If you use JSON, return one normal object. Do not mix hidden reasoning into tool args.
 """
 
 
@@ -92,15 +108,12 @@ Do not preserve unrelated benchmark/task text. If the user asked for a tool acti
 """
 
 
-STRICT_PLANNER_PROMPT = SYSTEM_PROMPT + """
-
-Your previous response was rejected as unrelated or underspecified for the current user message.
-Return only one valid JSON object matching the schema. For explicit scrape/open/file/terminal requests, choose tool_call or multi_tool_plan unless a required value is truly missing.
-"""
+STRICT_PLANNER_PROMPT = SYSTEM_PROMPT
 
 
 _TOOL_INTENT_MARKERS = (
     "approval",
+    "append",
     "browser",
     "cat",
     "collect",
@@ -127,11 +140,22 @@ _TOOL_INTENT_MARKERS = (
     "tool",
     "visit",
     "write",
+    "вземи",
+    "вземеш",
+    "добави",
+    "добавиш",
     "запази",
+    "запиши",
     "изпълни",
+    "копирай",
+    "копираш",
     "отвори",
+    "премести",
+    "преместиш",
     "прочети",
     "пусни",
+    "сложи",
+    "сложиш",
     "скрейп",
 )
 
@@ -143,6 +167,8 @@ class PlanResult:
     final_message: str | None = None
     clarification_message: str | None = None
     memory_query: str | None = None
+    objective: str = ""
+    plan_summary: tuple[str, ...] = ()
     raw: str = ""
 
 
@@ -172,6 +198,7 @@ class LLMPlanner:
         temperature: float = 0.0,
         think: bool = False,
         system_prompt: str | None = None,
+        context_detail: str = "compact",
     ) -> PlanResult:
         planning_prompt = _build_planning_prompt(
             user_message=user_message,
@@ -184,6 +211,7 @@ class LLMPlanner:
             response_language=response_language,
             current_time=current_time,
             timezone_name=timezone_name,
+            context_detail=context_detail,
         )
         response = self.provider.chat(
             [
@@ -194,31 +222,8 @@ class LLMPlanner:
             temperature=temperature,
             think=think,
         )
-        result = self._parse_or_repair_plan_response(
-            response.content,
-            repair_max_tokens=repair_max_tokens,
-            think=think,
-        )
-        if not is_low_relevance_plan(result, user_message):
-            return result
-
-        retry_response = self.provider.chat(
-            [
-                LLMMessage(role="system", content=STRICT_PLANNER_PROMPT),
-                LLMMessage(role="user", content=planning_prompt),
-            ],
-            max_tokens=max_tokens,
-            temperature=0.0,
-            think=think,
-        )
-        retry_result = self._parse_or_repair_plan_response(
-            retry_response.content,
-            repair_max_tokens=repair_max_tokens,
-            think=think,
-        )
-        if is_low_relevance_plan(retry_result, user_message):
-            raise PlannerError("Planner returned an unrelated response for an explicit tool request.")
-        return retry_result
+        del repair_max_tokens
+        return parse_plan_response(response.content)
 
     def chat(
         self,
@@ -325,67 +330,83 @@ class LLMPlanner:
         repair_max_tokens: int,
         think: bool,
     ) -> PlanResult:
-        try:
-            return parse_plan_response(raw)
-        except PlannerError as exc:
-            repaired = self._repair_plan_response(
-                raw=raw,
-                max_tokens=repair_max_tokens,
-                think=think,
-            )
-            try:
-                return parse_plan_response(repaired)
-            except PlannerError:
-                raise exc from None
+        del repair_max_tokens, think
+        return parse_plan_response(raw)
 
 
 def parse_plan_response(raw: str) -> PlanResult:
+    action_block = _parse_action_protocol(raw)
+    if action_block is not None:
+        return action_block
+
     payload = _load_json(raw)
+    if payload is None:
+        return PlanResult(final_message=raw.strip(), raw=raw)
+    if isinstance(payload, list):
+        steps = [
+            request
+            for item in payload
+            if isinstance(item, dict) and (item.get("tool") or item.get("name"))
+            for request in [_tool_request_from_payload_or_none(item, default_reason=str(item.get("reason", "")).strip())]
+            if request is not None
+        ]
+        if steps:
+            return PlanResult(tool_plan=tuple(steps), raw=raw)
+        return PlanResult(final_message=raw.strip(), raw=raw)
+    if not isinstance(payload, dict):
+        return PlanResult(final_message=raw.strip(), raw=raw)
     plan_type = _plan_action(payload)
     if plan_type in {"answer", "final"}:
         message = str(payload.get("message", "")).strip()
         if not message:
-            raise PlannerError("Planner returned an empty final message.")
+            return PlanResult(final_message=raw.strip(), raw=raw)
         return PlanResult(final_message=message, raw=raw)
 
     if plan_type == "ask_clarification":
         message = str(payload.get("message", "")).strip()
         if not message:
-            raise PlannerError("Planner returned an empty clarification message.")
+            return PlanResult(final_message=raw.strip(), raw=raw)
         return PlanResult(clarification_message=message, raw=raw)
 
     if plan_type == "memory_search":
         query = str(payload.get("query") or payload.get("message") or "").strip()
         if not query:
-            raise PlannerError("Planner returned memory_search without a query.")
+            return PlanResult(final_message=raw.strip(), raw=raw)
         return PlanResult(memory_query=query, raw=raw)
 
     if plan_type == "multi_tool_plan":
         raw_steps = payload.get("steps", [])
         if not isinstance(raw_steps, list) or not raw_steps:
-            raise PlannerError("Planner multi_tool_plan requires a non-empty steps array.")
+            return PlanResult(final_message=raw.strip(), raw=raw)
         steps: list[ToolRequest] = []
         for step in raw_steps:
             if not isinstance(step, dict):
-                raise PlannerError("Planner multi_tool_plan steps must be objects.")
-            steps.append(_tool_request_from_payload(step, default_reason=str(step.get("reason", "")).strip()))
-        return PlanResult(tool_plan=tuple(steps), raw=raw)
+                continue
+            request = _tool_request_from_payload_or_none(step, default_reason=str(step.get("reason", "")).strip())
+            if request is not None:
+                steps.append(request)
+        if steps:
+            return PlanResult(tool_plan=tuple(steps), raw=raw)
+        return PlanResult(final_message=raw.strip(), raw=raw)
 
     if plan_type in {"tool_request", "tool", "tool_call", "function_call"} or (
         isinstance(payload.get("tool"), str) and not plan_type
     ):
-        return PlanResult(
-            tool_request=_tool_request_from_payload(payload, default_reason=str(payload.get("reason", "")).strip()),
-            raw=raw,
-        )
+        request = _tool_request_from_payload_or_none(payload, default_reason=str(payload.get("reason", "")).strip())
+        if request is not None:
+            return PlanResult(tool_request=request, raw=raw)
 
-    raise PlannerError("Planner response action must be answer, tool_call, multi_tool_plan, ask_clarification, or memory_search.")
+    if isinstance(payload.get("message"), str) and str(payload.get("message")).strip():
+        return PlanResult(final_message=str(payload.get("message")).strip(), raw=raw)
+    return PlanResult(final_message=raw.strip(), raw=raw)
 
 
 def is_low_relevance_plan(result: PlanResult, user_message: str) -> bool:
     message = (result.clarification_message or result.final_message or "").strip()
     if not message:
         return False
+    if result.final_message and _looks_like_explicit_file_mutation_request(user_message):
+        return True
     if not _looks_like_explicit_tool_request(user_message):
         return False
     return not _message_overlaps_tool_request(message, user_message)
@@ -424,12 +445,174 @@ def _tool_request_from_payload(payload: dict[str, Any], *, default_reason: str =
     )
 
 
+def _tool_request_from_payload_or_none(payload: dict[str, Any], *, default_reason: str = "") -> ToolRequest | None:
+    try:
+        return _tool_request_from_payload(payload, default_reason=default_reason)
+    except PlannerError:
+        return None
+
+
+def _parse_action_protocol(raw: str) -> PlanResult | None:
+    stripped = raw.strip()
+    if not stripped:
+        return PlanResult(final_message="", raw=raw)
+    objective = _prefixed_line(stripped, "OBJECTIVE")
+    summary = tuple(_plan_lines(stripped))
+    requests: list[ToolRequest] = []
+    lines = stripped.splitlines()
+    for index, line in enumerate(lines):
+        parsed = _request_from_action_line(line, following="\n".join(lines[index + 1 : index + 6]))
+        if parsed is not None:
+            requests.append(parsed)
+    requests.extend(_requests_from_yaml_tool_blocks(stripped))
+    requests = _dedupe_requests(requests)
+    if not requests:
+        return None
+    if len(requests) == 1:
+        return PlanResult(
+            tool_request=requests[0],
+            objective=objective,
+            plan_summary=summary,
+            raw=raw,
+        )
+    return PlanResult(
+        tool_plan=tuple(requests),
+        objective=objective,
+        plan_summary=summary,
+        raw=raw,
+    )
+
+
+def _request_from_action_line(line: str, *, following: str) -> ToolRequest | None:
+    match = re.match(
+        r"^\s*(?:[-*]\s*)?(?:@?tool|action)\s*:?\s+([a-zA-Z_][\w.-]*\.[\w.-]+)\s*(.*)$",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    tool = match.group(1).strip()
+    rest = match.group(2).strip()
+    args = _first_json_object(rest) or _args_from_following_lines(following) or {}
+    reason = _reason_from_text(following)
+    return ToolRequest(tool=tool, args=args, reason=reason)
+
+
+def _requests_from_yaml_tool_blocks(raw: str) -> list[ToolRequest]:
+    requests: list[ToolRequest] = []
+    pattern = re.compile(
+        r"(?ims)^\s*[-*]\s*tool\s*:\s*([a-zA-Z_][\w.-]*\.[\w.-]+)\s*$"
+        r"(?P<body>.*?)(?=^\s*[-*]\s*tool\s*:|\Z)"
+    )
+    for match in pattern.finditer(raw):
+        body = match.group("body") or ""
+        args = _args_from_following_lines(body) or {}
+        reason = _reason_from_text(body)
+        requests.append(ToolRequest(tool=match.group(1).strip(), args=args, reason=reason))
+    return requests
+
+
+def _args_from_following_lines(text: str) -> dict[str, Any] | None:
+    args_match = re.search(r"(?ims)^\s*args\s*:\s*(.+)$", text)
+    if args_match is None:
+        return _first_json_object(text)
+    return _first_json_object(args_match.group(1)) or _first_json_object(text[args_match.start() :])
+
+
+def _first_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            loaded, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+        start = text.find("{", start + 1)
+    return None
+
+
+def _reason_from_text(text: str) -> str:
+    match = re.search(r"(?im)^\s*reason\s*:\s*(.+)$", text)
+    return match.group(1).strip()[:240] if match else ""
+
+
+def _prefixed_line(text: str, prefix: str) -> str:
+    match = re.search(rf"(?im)^\s*{re.escape(prefix)}\s*:\s*(.+)$", text)
+    return match.group(1).strip()[:240] if match else ""
+
+
+def _plan_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    in_plan = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"(?i)^plan\s*:\s*$", stripped):
+            in_plan = True
+            continue
+        if re.match(r"(?i)^actions\s*:\s*$", stripped):
+            break
+        if in_plan and stripped.startswith(("-", "*")):
+            lines.append(stripped.lstrip("-* ").strip()[:240])
+    return lines[:8]
+
+
+def _dedupe_requests(requests: list[ToolRequest]) -> list[ToolRequest]:
+    unique: list[ToolRequest] = []
+    seen: set[tuple[str, str]] = set()
+    for request in requests:
+        key = (request.tool, json.dumps(request.args, sort_keys=True, ensure_ascii=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(request)
+    return unique
+
+
 def _looks_like_explicit_tool_request(user_message: str) -> bool:
     normalized = user_message.casefold()
     has_action = any(marker in normalized for marker in _TOOL_INTENT_MARKERS)
     if not has_action:
         return False
     return bool(_request_relevance_terms(user_message))
+
+
+def _looks_like_explicit_file_mutation_request(user_message: str) -> bool:
+    if not re.search(
+        r"\b[\w./-]+\.(?:md|txt|json|py|js|ts|tsx|jsx|html|css|yaml|yml|toml)\b",
+        user_message,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    normalized = user_message.casefold()
+    mutation_markers = {
+        "add",
+        "append",
+        "copy",
+        "create",
+        "edit",
+        "move",
+        "overwrite",
+        "place",
+        "put",
+        "save",
+        "write",
+        "вземи",
+        "вземеш",
+        "добави",
+        "добавиш",
+        "запази",
+        "запиши",
+        "копирай",
+        "копираш",
+        "премести",
+        "преместиш",
+        "сложи",
+        "сложиш",
+    }
+    return any(marker in normalized for marker in mutation_markers)
 
 
 def _message_overlaps_tool_request(message: str, user_message: str) -> bool:
@@ -465,29 +648,73 @@ def _request_relevance_terms(user_message: str) -> tuple[str, ...]:
     return tuple(unique)
 
 
-def _load_json(raw: str) -> dict[str, Any]:
+def _load_json(raw: str) -> Any | None:
+    stripped = raw.strip()
     try:
-        loaded = json.loads(raw)
+        loaded = json.loads(stripped)
     except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1:
-            stripped = raw.strip()
-            if stripped:
-                return {"type": "final", "message": stripped}
-            raise PlannerError("Planner response was not JSON.") from None
-        if end == -1 or end <= start:
-            raise PlannerError("Planner response JSON could not be parsed.") from None
-        try:
-            loaded = json.loads(raw[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise PlannerError(f"Planner response JSON could not be parsed: {exc}") from exc
+        if not stripped:
+            return None
+        if _looks_like_json_fence(stripped):
+            stripped = _strip_json_fence(stripped)
+            try:
+                loaded = json.loads(stripped)
+            except json.JSONDecodeError:
+                return None
+        elif stripped.startswith("```"):
+            return None
+        elif stripped.startswith("{"):
+            embedded = _first_embedded_planner_payload(stripped)
+            return embedded
+        else:
+            embedded = _first_embedded_planner_payload(stripped)
+            if embedded is None:
+                return None
+            loaded = embedded
 
-    if not isinstance(loaded, dict):
-        raise PlannerError("Planner response must be a JSON object.")
-    if "type" not in loaded and "action" not in loaded and isinstance(loaded.get("message"), str):
+    if isinstance(loaded, dict) and "type" not in loaded and "action" not in loaded and isinstance(loaded.get("message"), str):
         loaded["action"] = "answer"
     return loaded
+
+
+def _first_embedded_planner_payload(raw: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    index = raw.find("{")
+    while index != -1:
+        try:
+            loaded, _ = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            index = raw.find("{", index + 1)
+            continue
+        if isinstance(loaded, dict) and _looks_like_planner_payload(loaded):
+            return loaded
+        index = raw.find("{", index + 1)
+    return None
+
+
+def _looks_like_planner_payload(payload: dict[str, Any]) -> bool:
+    if isinstance(payload.get("action"), str) or isinstance(payload.get("type"), str):
+        return True
+    if isinstance(payload.get("tool"), str) or isinstance(payload.get("name"), str):
+        return True
+    keys = set(payload)
+    return bool("message" in keys and keys <= {"message", "reason"})
+
+
+def _looks_like_json_fence(raw: str) -> bool:
+    return raw.startswith("```") and raw.endswith("```")
+
+
+def _strip_json_fence(raw: str) -> str:
+    lines = raw.splitlines()
+    if len(lines) < 2:
+        return raw
+    first = lines[0].strip().casefold()
+    if not first.startswith("```"):
+        return raw
+    if lines[-1].strip() != "```":
+        return raw
+    return "\n".join(lines[1:-1]).strip()
 
 
 def _build_planning_prompt(
@@ -502,6 +729,7 @@ def _build_planning_prompt(
     response_language: str,
     current_time: str,
     timezone_name: str,
+    context_detail: str = "compact",
 ) -> str:
     tool_rows: list[dict[str, Any]] = []
     effective_enabled = set(enabled_tools or ())
@@ -519,7 +747,7 @@ def _build_planning_prompt(
                 "enabled": enabled,
                 "approval_required": manifest.approval_required,
                 "permissions": list(manifest.permissions),
-                "args": manifest.argument_schema,
+                "args": manifest.argument_schema if context_detail == "deep" else list(manifest.argument_schema.keys()),
             }
         )
     return json.dumps(
@@ -533,7 +761,7 @@ def _build_planning_prompt(
             },
             "memory": memory_context,
             "recent_conversation": conversation_context,
-            "agent_context": agent_context,
+            "agent_context": _agent_context_for_prompt(agent_context, detail=context_detail),
             "tools": tool_rows,
             "routing_hints": [
                 "Natural file edit/create requests should become files.write with path, content, and overwrite=true only when replacing existing content is intended.",
@@ -553,3 +781,69 @@ def _build_planning_prompt(
         ensure_ascii=True,
         separators=(",", ":"),
     )
+
+
+def _agent_context_for_prompt(agent_context: dict[str, Any], *, detail: str) -> dict[str, Any]:
+    if detail == "full":
+        return agent_context
+    runtime = _dict_value(agent_context, "runtime")
+    workspace = _dict_value(agent_context, "workspace")
+    memory = _dict_value(agent_context, "memory")
+    tools = _dict_value(agent_context, "tools")
+    autonomy = _dict_value(agent_context, "autonomy")
+    runtime_state = _dict_value(agent_context, "runtime_state")
+    compact = {
+        "agent_name": agent_context.get("agent_name", "DMD Agent"),
+        "autonomy": {
+            "enabled": autonomy.get("enabled"),
+            "mode": autonomy.get("mode"),
+        },
+        "runtime": runtime,
+        "workspace": {
+            "current": workspace.get("current"),
+            "downloads_path": workspace.get("downloads_path"),
+            "allowed_roots": workspace.get("allowed_roots", [])[:8],
+            "mounted_roots": workspace.get("mounted_roots", [])[:8],
+        },
+        "memory": {
+            "root": memory.get("root"),
+            "file_count": memory.get("file_count"),
+            "files": list(memory.get("files") or [])[:40],
+        },
+        "tools": {
+            "enabled": list(tools.get("enabled") or [])[:80],
+            "disabled": list(tools.get("disabled") or [])[:80],
+            "count": tools.get("count"),
+        },
+        "permissions": agent_context.get("permissions", {}),
+        "terminal": agent_context.get("terminal", {}),
+        "approvals": agent_context.get("approvals", {}),
+        "recent_activity": agent_context.get("recent_activity", {}),
+        "runtime_state": {
+            "mode": runtime_state.get("mode"),
+            "cache": runtime_state.get("cache"),
+            "workspace": _compact_folder_state(_dict_value(runtime_state, "workspace")),
+            "downloads": _compact_folder_state(_dict_value(runtime_state, "downloads")),
+        },
+    }
+    if detail == "deep":
+        compact["config"] = agent_context.get("config", {})
+        compact["email"] = agent_context.get("email", {})
+        compact["security_invariants"] = agent_context.get("security_invariants", [])
+    return compact
+
+
+def _compact_folder_state(folder: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": folder.get("path"),
+        "exists": folder.get("exists"),
+        "allowed": folder.get("allowed"),
+        "folders": list(folder.get("folders") or [])[:40],
+        "files": list(folder.get("files") or [])[:40],
+        "file_count": folder.get("file_count"),
+    }
+
+
+def _dict_value(mapping: dict[str, Any], key: str) -> dict[str, Any]:
+    value = mapping.get(key)
+    return value if isinstance(value, dict) else {}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from dmdagent4all.agent import AgentCore
@@ -15,7 +16,11 @@ from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
 
 
-def build_agent_core(*, planner_enabled: bool = True) -> AgentCore:
+def build_agent_core(
+    *,
+    planner_enabled: bool = True,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
+) -> AgentCore:
     paths = AppPaths.default()
     paths.ensure()
     write_default_config(paths.config)
@@ -34,6 +39,7 @@ def build_agent_core(*, planner_enabled: bool = True) -> AgentCore:
         ),
         audit_store=AuditStore(paths.audit_db),
         planner=LLMPlanner(provider) if provider is not None else None,
+        event_sink=event_sink,
     )
 
 

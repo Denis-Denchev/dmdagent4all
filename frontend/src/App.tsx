@@ -1,7 +1,9 @@
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  type AgentTraceEvent,
   type AgentConfiguration,
   type AgentResponse,
+  type AutonomyStatus,
   type Approval,
   type AuditEvent,
   api,
@@ -228,6 +230,20 @@ function approvalIdFromResponse(response?: AgentResponse) {
   return typeof approvalId === 'number' ? approvalId : null
 }
 
+function traceFromResponse(response?: AgentResponse): AgentTraceEvent[] {
+  const trace = dataObject(response?.data).trace
+  return Array.isArray(trace) ? (trace as AgentTraceEvent[]) : []
+}
+
+function visibleTrace(events: AgentTraceEvent[]): AgentTraceEvent[] {
+  return events.filter((event) => dataObject(event.metadata).visibility !== 'debug')
+}
+
+function latestTraceTitle(events: AgentTraceEvent[]): string {
+  const visible = visibleTrace(events)
+  return visible[visible.length - 1]?.title ?? 'Preparing runtime'
+}
+
 function initialConfigDraft(): ConfigDraft {
   return {
     downloadsRoot: '',
@@ -310,6 +326,8 @@ export function App() {
   const [permissions, setPermissions] = useState<PermissionItem[]>([])
   const [connectors, setConnectors] = useState<ConnectorStatus[]>([])
   const [terminal, setTerminal] = useState<TerminalStatus | null>(null)
+  const [autonomy, setAutonomy] = useState<AutonomyStatus | null>(null)
+  const [activeTrace, setActiveTrace] = useState<AgentTraceEvent[]>([])
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null)
   const [openai, setOpenAI] = useState<OpenAIStatus | null>(null)
   const [deepseek, setDeepSeek] = useState<DeepSeekStatus | null>(null)
@@ -371,6 +389,7 @@ export function App() {
 
   const pendingCount = approvals.length
   const enabledToolCount = useMemo(() => tools.filter((tool) => tool.enabled).length, [tools])
+  const autonomyEnabled = Boolean(autonomy?.enabled)
   const activeLabel = activeView === 'config' && configSection
     ? `Config / ${configSectionLabels[configSection]}`
     : views.find((view) => view.key === activeView)?.label ?? 'Dashboard'
@@ -471,6 +490,7 @@ export function App() {
       permissionsResult,
       connectorsResult,
       terminalResult,
+      autonomyResult,
       telegramResult,
       openaiResult,
       deepseekResult,
@@ -488,6 +508,7 @@ export function App() {
       api.permissions(),
       api.connectors(),
       api.terminal(),
+      api.autonomy(),
       api.telegram(),
       api.openai(),
       api.deepseek(),
@@ -505,6 +526,7 @@ export function App() {
     setPermissions(permissionsResult.available)
     setConnectors(connectorsResult)
     setTerminal(terminalResult)
+    setAutonomy(autonomyResult)
     setTelegram(telegramResult)
     setOpenAI(openaiResult)
     setDeepSeek(deepseekResult)
@@ -589,6 +611,22 @@ export function App() {
     }
   }
 
+  async function toggleAutonomyMode() {
+    const nextEnabled = !autonomyEnabled
+    setBusy(true)
+    setNotice(null)
+    try {
+      const result = await api.setAutonomy(nextEnabled)
+      setAutonomy(result)
+      setNotice(result.enabled ? 'Full LLM-first autonomy mode enabled.' : 'Standard safe mode enabled.')
+      await refreshAll()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not update autonomy mode')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function appendAgentResponse(response: AgentResponse, focusChat = false) {
     setMessages((current) => [
       ...current,
@@ -628,8 +666,15 @@ export function App() {
     setChatInput('')
     setMessages((current) => [...current, { id: `${Date.now()}-user`, role: 'user', text: message }])
     setBusy(true)
+    setActiveTrace([])
     try {
-      const response = await api.chat(message, 'dashboard')
+      const response = autonomyEnabled
+        ? await api.chatStream(message, 'dashboard', (event) => {
+          if (event.type === 'trace') {
+            setActiveTrace((current) => [...current, event.event])
+          }
+        })
+        : await api.chat(message, 'dashboard')
       appendAgentResponse(response)
       await refreshAll()
     } catch (error) {
@@ -642,6 +687,7 @@ export function App() {
         },
       ])
     } finally {
+      setActiveTrace([])
       setBusy(false)
     }
   }
@@ -1451,7 +1497,11 @@ export function App() {
     : { left: 24, top: 96 }
 
   return (
-    <div className={railCollapsed ? 'app-shell app-shell--rail-collapsed' : 'app-shell'}>
+    <div className={[
+      'app-shell',
+      railCollapsed ? 'app-shell--rail-collapsed' : '',
+      autonomyEnabled ? 'app-shell--autonomy' : '',
+    ].filter(Boolean).join(' ')}>
       <aside className="command-rail">
         <button
           className="rail-toggle"
@@ -1483,6 +1533,8 @@ export function App() {
           <strong>{status?.llm.provider ?? 'loading'} / {status?.llm.model ?? '-'}</strong>
           <span>Enabled tools</span>
           <strong>{enabledToolCount}</strong>
+          <span>Mode</span>
+          <strong>{autonomyEnabled ? 'AUTONOMY' : 'SAFE'}</strong>
           <span>Pending approvals</span>
           <strong>{pendingCount}</strong>
         </div>
@@ -1495,6 +1547,16 @@ export function App() {
             <h1>{activeLabel}</h1>
           </div>
           <div className="topbar-actions">
+            <button
+              className={autonomyEnabled ? 'autonomy-toggle autonomy-toggle--active' : 'autonomy-toggle'}
+              type="button"
+              onClick={() => void toggleAutonomyMode()}
+              disabled={busy || autonomy?.toggle_locked_by_env}
+              title={autonomy?.toggle_locked_by_env ? 'LOCAL_DEV_AUTONOMY env var is forcing autonomy mode.' : 'Switch runtime orchestration mode'}
+            >
+              <span className="autonomy-dot" />
+              <span>{autonomyEnabled ? 'AUTONOMY MODE ACTIVE' : 'Standard Safe Mode'}</span>
+            </button>
             {emergency?.active ? (
               <button className="button" type="button" onClick={() => void emergencyReset()}>
                 Reset Emergency
@@ -1529,6 +1591,21 @@ export function App() {
                     <div className="message-avatar">{message.role === 'user' ? 'YOU' : message.role === 'system' ? 'SYS' : 'AI'}</div>
                     <div className="message-body">
                       <p>{message.text}</p>
+                      {visibleTrace(traceFromResponse(message.response)).length > 0 ? (
+                        <details className="reasoning-panel">
+                          <summary>Cognition trace ({visibleTrace(traceFromResponse(message.response)).length})</summary>
+                          <div className="reasoning-events">
+                            {visibleTrace(traceFromResponse(message.response)).map((event, index) => (
+                              <div className="reasoning-event" key={`${message.id}-trace-${index}`}>
+                                <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
+                                <strong>{event.title}</strong>
+                                {event.tool ? <code>{event.tool}</code> : null}
+                                {event.detail ? <small>{event.detail}</small> : null}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      ) : null}
                       {approvalIdFromResponse(message.response) !== null ? (
                         <div className="approval-inline">
                           <span>Approval required for {String(dataObject(message.response?.data).tool ?? 'tool')}</span>
@@ -1545,6 +1622,29 @@ export function App() {
                     </div>
                   </article>
                 ))}
+                {busy && visibleTrace(activeTrace).length > 0 ? (
+                  <article className="message message--agent message--runtime">
+                    <div className="message-avatar">RUN</div>
+                    <div className="message-body">
+                      <div className="reasoning-panel reasoning-panel--live">
+                        <div className="reasoning-live-header">
+                          <strong>{latestTraceTitle(activeTrace)}</strong>
+                          <span>{visibleTrace(activeTrace).length} events</span>
+                        </div>
+                        <div className="reasoning-events">
+                          {visibleTrace(activeTrace).slice(-8).map((event, index) => (
+                            <div className="reasoning-event" key={`active-trace-${index}-${event.title}`}>
+                              <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
+                              <strong>{event.title}</strong>
+                              {event.tool ? <code>{event.tool}</code> : null}
+                              {event.detail ? <small>{event.detail}</small> : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                ) : null}
                 <div ref={chatEndRef} aria-hidden="true" />
               </div>
               <form
