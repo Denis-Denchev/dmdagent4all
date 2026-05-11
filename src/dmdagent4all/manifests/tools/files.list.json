@@ -1,0 +1,14 @@
+{
+  "name": "files.list",
+  "description": "List files in a directory inside an allowed workspace root. Filters blocked secret paths from results.",
+  "risk": 0,
+  "permissions": [],
+  "args_schema": {
+    "path": "optional absolute path inside allowed roots or path relative to current workspace; defaults to current workspace",
+    "limit": "optional maximum number of entries to return"
+  },
+  "approval_required": false,
+  "cloud_allowed": false,
+  "default_enabled": true,
+  "sandbox_required": true
+}

@@ -15,7 +15,7 @@ GENERIC_SECRET_RE = re.compile(
 )
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d .()-]{7,}\d)(?!\d)")
-CARD_RE = re.compile(r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)")
+CARD_RE = re.compile(r"(?<![\w/-])(?:\d[ -]*?){13,19}(?![\w/-])")
 
 
 def redact_text(

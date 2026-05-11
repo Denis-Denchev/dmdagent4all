@@ -3,18 +3,20 @@ from __future__ import annotations
 import json
 import calendar
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from dmdagent4all.audit import AuditEvent, AuditStore
+from dmdagent4all.agent.context import AgentContextProvider
 from dmdagent4all.agent.history import ChatHistory
-from dmdagent4all.agent.planner import LLMPlanner, PlannerError
+from dmdagent4all.agent.planner import LLMPlanner, PlannerError, is_low_relevance_plan
 from dmdagent4all.agent.router import ConversationRouter
 from dmdagent4all.config import save_config
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
 from dmdagent4all.sandbox import TerminalPolicy, emergency_stop_terminal_processes
+from dmdagent4all.security import redact_text
 from dmdagent4all.security.policy import ToolSafetyPolicy
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.registry import ToolExecutionError, ToolRegistry
@@ -51,6 +53,7 @@ class EmailSendIntent:
 class PendingContinuation:
     original_message: str
     steps: tuple[ToolRequest | UnsupportedAction, ...]
+    chain_state: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentCore:
@@ -77,6 +80,20 @@ class AgentCore:
         self.safety_policy = ToolSafetyPolicy()
         self._session_corrections: dict[str, list[str]] = {}
         self._pending_continuations: dict[int, PendingContinuation] = {}
+        self._last_denial_reason = ""
+        self._last_tool_result_summary: dict[str, Any] = {}
+
+    def _agent_context_snapshot(self) -> dict[str, Any]:
+        return AgentContextProvider(
+            runtime_context=self.runtime_context,
+            manifests=self.tool_registry.manifests,
+            permission_context=self._permission_context(),
+            audit_store=self.audit_store,
+        ).snapshot(
+            planner_active=self.planner is not None,
+            last_denial_reason=self._last_denial_reason,
+            last_tool_result_summary=self._last_tool_result_summary,
+        )
 
     def handle_text(self, text: str, *, session_id: str = "default") -> AgentResponse:
         stripped = text.strip()
@@ -94,6 +111,21 @@ class AgentCore:
                     reason="User requested enabled tools.",
                 )
             )
+        if stripped == "/help":
+            return AgentResponse(
+                status="ok",
+                message=_answer_without_llm(stripped, self.runtime_context.config)
+                or "Use /tools to list tools and /status to show the current workspace.",
+                data={"planner": "deterministic", "control": "help"},
+            )
+        if stripped == "/status":
+            request = ToolRequest(
+                tool="workspace.status",
+                args={},
+                reason="User requested current local agent status.",
+            )
+            response = self.handle_tool_request(request)
+            return self._shape_tool_response(stripped, request, response)
         emergency_response = self._handle_emergency_text(stripped)
         if emergency_response is not None:
             return emergency_response
@@ -106,15 +138,6 @@ class AgentCore:
         feedback_answer = self._handle_session_feedback(stripped, session_id=session_id)
         if feedback_answer is not None:
             return feedback_answer
-        multi_step_answer = self._handle_multi_step_request(
-            stripped,
-            conversation_context=conversation_context,
-        )
-        if multi_step_answer is not None:
-            return multi_step_answer
-        interactive_answer = _interactive_terminal_response(stripped)
-        if interactive_answer is not None:
-            return interactive_answer
         if stripped.startswith("{"):
             try:
                 payload = json.loads(stripped)
@@ -130,6 +153,40 @@ class AgentCore:
                     status="error",
                     message=f"Invalid tool request JSON: {exc}",
                 )
+
+        if self.planner is not None:
+            return self._handle_with_planner(
+                stripped,
+                text,
+                session_id=session_id,
+                conversation_context=self._planner_conversation_context(session_id),
+            )
+
+        return self._handle_without_llm(
+            stripped,
+            text,
+            session_id=session_id,
+            conversation_context=conversation_context,
+        )
+
+    def _handle_without_llm(
+        self,
+        stripped: str,
+        text: str,
+        *,
+        session_id: str,
+        conversation_context: str,
+        planner_error: Exception | None = None,
+    ) -> AgentResponse:
+        multi_step_answer = self._handle_multi_step_request(
+            stripped,
+            conversation_context=conversation_context,
+        )
+        if multi_step_answer is not None:
+            return multi_step_answer
+        interactive_answer = _interactive_terminal_response(stripped)
+        if interactive_answer is not None:
+            return interactive_answer
 
         routed = self.router.route(stripped)
         if routed is not None:
@@ -157,7 +214,7 @@ class AgentCore:
                 conversation_context=conversation_context,
             )
 
-        if self.planner is None:
+        if self.planner is None or planner_error is not None:
             identity_update = _handle_identity_update(stripped, self.runtime_context)
             if identity_update is not None:
                 return identity_update
@@ -207,31 +264,35 @@ class AgentCore:
             return self._run_user_tool_request(stripped, route_without_llm, conversation_context=conversation_context)
         fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
         if fast_answer is not None and _is_fast_control_answer(stripped):
+            data: dict[str, Any] = {"planner": "deterministic"}
+            if planner_error is not None:
+                data["fallback"] = "llm_unavailable"
             return AgentResponse(
                 status="ok",
                 message=fast_answer,
-                data={"planner": "deterministic"},
-            )
-
-        if self.planner is not None:
-            return self._handle_with_planner(
-                stripped,
-                text,
-                conversation_context=self._planner_conversation_context(session_id),
+                data=data,
             )
 
         if fast_answer is not None:
+            data = {"planner": "deterministic"}
+            if planner_error is not None:
+                data["fallback"] = "llm_unavailable"
             return AgentResponse(
                 status="ok",
                 message=fast_answer,
-                data={"planner": "deterministic"},
+                data=data,
             )
+        if planner_error is not None:
+            unavailable_answer = _answer_llm_unavailable(stripped, self.runtime_context.config, planner_error)
+            if unavailable_answer is not None:
+                return unavailable_answer
         return AgentResponse(
             status="ok",
             message=(
-                "Agent core is initialized without a planner. Use /tools or send a "
-                "structured tool request JSON."
+                "The LLM planner is not active, so I cannot perform context-aware tasks. "
+                "I can still show basic system status and tools."
             ),
+            data={"planner": "inactive"},
         )
 
     def _handle_with_planner(
@@ -239,6 +300,7 @@ class AgentCore:
         stripped: str,
         text: str,
         *,
+        session_id: str,
         conversation_context: str,
     ) -> AgentResponse:
         try:
@@ -256,9 +318,11 @@ class AgentCore:
                 profile=_profile_from_config(self.runtime_context.config),
                 memory_context=memory_context,
                 conversation_context=conversation_context,
+                agent_context=self._agent_context_snapshot(),
                 enabled_tools=_enabled_tools_from_config(
                     self.tool_registry.manifests,
                     self.runtime_context.config,
+                    self._permission_context(),
                 ),
                 response_language=llm_config.get("response_language", "auto"),
                 current_time=now.isoformat(timespec="seconds"),
@@ -270,34 +334,149 @@ class AgentCore:
                 system_prompt=_llm_system_prompt(llm_config, "planner"),
             )
         except Exception as exc:
-            fast_answer = _answer_without_llm(stripped, self.runtime_context.config)
-            if fast_answer is not None and _is_fast_control_answer(stripped):
-                return AgentResponse(
-                    status="ok",
-                    message=fast_answer,
-                    data={"planner": "deterministic", "fallback": "llm_unavailable"},
-                )
-            unavailable_answer = _answer_llm_unavailable(stripped, self.runtime_context.config, exc)
-            if unavailable_answer is not None:
-                return unavailable_answer
-            return AgentResponse(
-                status="ok",
-                message=_tool_selection_failure_message(stripped),
-                data={"debug": {"planner_error": str(exc)}},
-        )
+            return self._handle_without_llm(
+                stripped,
+                text,
+                session_id=session_id,
+                conversation_context=self._conversation_context(session_id),
+                planner_error=exc,
+            )
+
+        if is_low_relevance_plan(plan, stripped):
+            return self._handle_without_llm(
+                stripped,
+                text,
+                session_id=session_id,
+                conversation_context=self._conversation_context(session_id),
+                planner_error=PlannerError("Planner returned an unrelated response for an explicit tool request."),
+            )
 
         if plan.tool_request is not None:
-            request = _request_with_original_message(plan.tool_request, stripped)
+            request = _normalize_planner_tool_request(plan.tool_request, stripped)
             return self._run_user_tool_request(
                 stripped,
                 request,
                 conversation_context=conversation_context,
             )
 
+        if plan.tool_plan:
+            return self._run_user_tool_plan(
+                stripped,
+                plan.tool_plan,
+                conversation_context=conversation_context,
+            )
+
+        if plan.memory_query:
+            return self._handle_memory_search_decision(
+                stripped,
+                plan.memory_query,
+                conversation_context=conversation_context,
+            )
+
+        if plan.clarification_message:
+            return AgentResponse(
+                status="needs_input",
+                message=plan.clarification_message,
+                data={"planner": "llm", "decision": "ask_clarification"},
+            )
+
         return AgentResponse(
             status="ok",
             message=plan.final_message or "",
-            data={"planner": "llm"},
+            data={"planner": "llm", "decision": "answer"},
+        )
+
+    def _run_user_tool_plan(
+        self,
+        user_message: str,
+        requests: tuple[ToolRequest, ...],
+        *,
+        conversation_context: str,
+    ) -> AgentResponse:
+        if not requests:
+            return AgentResponse(
+                status="ok",
+                message=_tool_selection_failure_message(user_message),
+                data={"planner": "llm", "decision": "empty_tool_plan"},
+            )
+        normalized_requests = tuple(
+            _normalize_planner_tool_request(request, user_message)
+            for request in requests
+        )
+        first, *continuations = normalized_requests
+        first_request = _request_with_original_message(first, user_message)
+        response = self.handle_tool_request(first_request)
+        if response.status == "approval_required":
+            approval_id = (response.data or {}).get("approval_id")
+            if isinstance(approval_id, int) and continuations:
+                self._pending_continuations[approval_id] = PendingContinuation(
+                    original_message=user_message,
+                    steps=tuple(continuations),
+                )
+                return AgentResponse(
+                    status=response.status,
+                    message=_multi_step_approval_message(user_message, first_request, continuations),
+                    data={
+                        **(response.data or {}),
+                        "plan": _continuation_plan_for_user(continuations),
+                        "planner": "llm",
+                        "decision": "multi_tool_plan",
+                    },
+                )
+        if response.status != "ok" or not continuations:
+            return self._shape_tool_response(user_message, first_request, response)
+        return self._execute_continuation_steps(
+            user_message,
+            first_request=first_request,
+            first_response=response,
+            steps=tuple(continuations),
+        )
+
+    def _handle_memory_search_decision(
+        self,
+        user_message: str,
+        query: str,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse:
+        memory_context_for_query = "" if _service_from_text(query) is not None else conversation_context
+        memory_answer = _answer_memory_recall_question(
+            query,
+            self.runtime_context,
+            conversation_context=memory_context_for_query,
+        )
+        if memory_answer is None:
+            return AgentResponse(
+                status="ok",
+                message=(
+                    "Не намирам това в локалната memory още."
+                    if _looks_bulgarian(user_message)
+                    else "I do not have that in local memory yet."
+                ),
+                data={"planner": "llm", "decision": "memory_search"},
+            )
+        if _service_from_text(query) is not None:
+            return AgentResponse(
+                status=memory_answer.status,
+                message=memory_answer.message,
+                data={"planner": "llm", "decision": "memory_search"},
+            )
+        if self._can_send_private_context_to_llm():
+            synthesized = self._synthesize_memory_recall_response(
+                user_message,
+                memory_answer,
+                conversation_context=conversation_context,
+            )
+            if synthesized is not None:
+                return AgentResponse(
+                    status=synthesized.status,
+                    message=synthesized.message,
+                    data={"planner": "llm", "decision": "memory_search"},
+                )
+        return AgentResponse(
+            status=memory_answer.status,
+            message=memory_answer.message,
+            data={"planner": "llm", "decision": "memory_search"},
         )
 
     def _handle_normal_chat(
@@ -328,6 +507,7 @@ class AgentCore:
                     max_chars=4000,
                 ),
                 conversation_context=conversation_context,
+                agent_context=self._agent_context_snapshot(),
                 response_language=llm_config.get("response_language", "auto"),
                 max_tokens=int(llm_config.get("chat_max_tokens", 1024)),
                 temperature=0.4,
@@ -464,39 +644,76 @@ class AgentCore:
         first_request: ToolRequest,
         first_response: AgentResponse,
         steps: tuple[ToolRequest | UnsupportedAction, ...],
+        initial_chain_state: dict[str, Any] | None = None,
     ) -> AgentResponse:
         messages: list[str] = []
         data: dict[str, Any] = {
             "tool": "multi_step",
             "first_tool": first_request.tool,
+            "plan": _continuation_plan_for_user(steps),
             "steps": [],
         }
         shaped_first = self._shape_tool_response(user_message, first_request, first_response)
         if shaped_first.message:
             messages.append(shaped_first.message)
-        for step in steps:
+        previous_response = first_response
+        chain_state: dict[str, Any] = dict(initial_chain_state or {})
+        _update_chain_state(chain_state, first_request, first_response)
+        for index, step in enumerate(steps):
             if isinstance(step, UnsupportedAction):
                 unsupported = _unsupported_action_response(user_message, step)
                 messages.append(unsupported.message)
                 data["steps"].append({"kind": step.kind, "target": step.target, "status": "unsupported"})
                 continue
-            response = self.handle_tool_request(_request_with_original_message(step, user_message))
-            shaped = self._shape_tool_response(user_message, step, response)
+            try:
+                runnable_step = _resolve_previous_step_content(
+                    step,
+                    previous_response=previous_response,
+                    chain_state=chain_state,
+                    config=self.runtime_context.config,
+                )
+            except ValueError as exc:
+                return AgentResponse(
+                    status="error",
+                    message="\n\n".join([*messages, str(exc)]).strip(),
+                    data=data,
+                )
+            response = self.handle_tool_request(_request_with_original_message(runnable_step, user_message))
+            shaped = self._shape_tool_response(user_message, runnable_step, response)
             messages.append(shaped.message)
             data["steps"].append(
                 {
-                    "tool": step.tool,
-                    "args": step.args,
+                    "tool": runnable_step.tool,
+                    "args": _redact_step_args_for_response(runnable_step.args),
                     "status": shaped.status,
                     "data": shaped.data or {},
                 }
             )
             if shaped.status != "ok":
+                if isinstance(shaped.data, dict):
+                    for key in ("approval_id", "risk", "missing_permissions", "emergency_stop"):
+                        if key in shaped.data:
+                            data[key] = shaped.data[key]
+                    data["pending_tool"] = shaped.data.get("tool", runnable_step.tool)
+                    approval_id = shaped.data.get("approval_id")
+                    remaining_steps = tuple(steps[index + 1 :])
+                    if (
+                        shaped.status == "approval_required"
+                        and isinstance(approval_id, int)
+                        and remaining_steps
+                    ):
+                        self._pending_continuations[approval_id] = PendingContinuation(
+                            original_message=user_message,
+                            steps=remaining_steps,
+                            chain_state=dict(chain_state),
+                        )
                 return AgentResponse(
                     status=shaped.status,
                     message="\n\n".join(message for message in messages if message),
                     data=data,
                 )
+            previous_response = response
+            _update_chain_state(chain_state, runnable_step, response)
         return AgentResponse(
             status="ok",
             message="\n\n".join(message for message in messages if message),
@@ -514,6 +731,15 @@ class AgentCore:
         data = response.data or {}
         if request.tool == "terminal.run":
             return _terminal_user_response(user_message, request, data)
+        if request.tool == "files.list":
+            path = str(data.get("path") or request.args.get("path") or "")
+            count = int(data.get("count") or 0)
+            message = (
+                f"Намерих {count} елемента в: {path}"
+                if _looks_bulgarian(user_message)
+                else f"Found {count} item(s) in: {path}"
+            )
+            return AgentResponse(status="ok", message=message, data={"tool": request.tool, **data})
         if request.tool == "files.read":
             return _file_read_user_response(user_message, data)
         if request.tool.startswith(("gmail.", "outlook.")):
@@ -560,6 +786,8 @@ class AgentCore:
                 else f"Loaded developer context for {file_count} files in: {scan_root}"
             )
             return AgentResponse(status="ok", message=message, data=data)
+        if request.tool == "browser.scrape_markdown":
+            return _browser_scrape_user_response(user_message, data)
         return response
 
     def _handle_approval_action_from_text(self, text: str) -> AgentResponse | None:
@@ -684,6 +912,7 @@ class AgentCore:
                     allow_cloud_context=allow_cloud_memory,
                 ),
                 conversation_context=conversation_context,
+                agent_context=self._agent_context_snapshot(),
                 tool_result=tool_response.data or {},
                 response_language=llm_config.get("response_language", "auto"),
                 max_tokens=max(256, int(llm_config.get("synthesis_max_tokens", 1024))),
@@ -716,6 +945,7 @@ class AgentCore:
                     allow_cloud_context=self._cloud_context_approved,
                 ),
                 conversation_context=conversation_context,
+                agent_context=self._agent_context_snapshot(),
                 tool_result={
                     "kind": "memory_recall",
                     "answer": memory_answer.message,
@@ -752,9 +982,11 @@ class AgentCore:
                     allow_cloud_context=self._cloud_context_approved,
                 ),
                 conversation_context=self._conversation_context(session_id),
+                agent_context=self._agent_context_snapshot(),
                 enabled_tools=_enabled_tools_from_config(
                     self.tool_registry.manifests,
                     self.runtime_context.config,
+                    self._permission_context(),
                 ),
                 response_language=llm_config.get("response_language", "auto"),
                 current_time=now.isoformat(timespec="seconds"),
@@ -872,18 +1104,31 @@ class AgentCore:
         except (OSError, ValueError):
             return
 
+    def _remember_tool_response(self, request: ToolRequest, response: AgentResponse) -> AgentResponse:
+        if response.status in {"denied", "approval_required", "error", "not_configured", "not_implemented"}:
+            self._last_denial_reason = response.message
+        if response.status == "ok":
+            self._last_denial_reason = ""
+        self._last_tool_result_summary = {
+            "tool": request.tool,
+            "status": response.status,
+            "message": response.message[:500],
+            "data": _safe_tool_result_summary(response.data or {}),
+        }
+        return response
+
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
         if _emergency_stop_active(self.runtime_context.config) and request.tool not in {
             "system.list_enabled_tools",
             "workspace.status",
         }:
-            return AgentResponse(
+            return self._remember_tool_response(request, AgentResponse(
                 status="denied",
                 message=(
                     "Emergency stop is active. Tool execution is blocked until you reset emergency mode."
                 ),
                 data={"missing_permissions": [], "emergency_stop": True},
-            )
+            ))
         safety = self.safety_policy.evaluate(request, self.runtime_context)
         if not safety.allowed:
             self.audit_store.record_tool_call(
@@ -893,11 +1138,11 @@ class AgentCore:
                 decision=safety.reason,
                 result_status="blocked",
             )
-            return AgentResponse(
+            return self._remember_tool_response(request, AgentResponse(
                 status="denied",
                 message=safety.reason,
                 data={"missing_permissions": []},
-            )
+            ))
 
         auto_approved = _is_auto_approved_terminal_request(request, self.runtime_context.config)
         decision = self.permission_engine.evaluate(
@@ -920,11 +1165,11 @@ class AgentCore:
         if decision.approval_required or decision.allowed:
             terminal_policy_error = _terminal_policy_error(request, self.runtime_context.config)
             if terminal_policy_error is not None:
-                return AgentResponse(
+                return self._remember_tool_response(request, AgentResponse(
                     status="denied",
                     message=terminal_policy_error,
                     data={"missing_permissions": []},
-                )
+                ))
 
         if decision.approval_required:
             approval_id = self.audit_store.record_approval(
@@ -944,7 +1189,7 @@ class AgentCore:
                     metadata={"reason": decision.reason},
                 )
             )
-            return AgentResponse(
+            return self._remember_tool_response(request, AgentResponse(
                 status="approval_required",
                 message=_approval_message(request, decision.reason),
                 data={
@@ -952,19 +1197,19 @@ class AgentCore:
                     "tool": request.tool,
                     "risk": None if decision.risk is None else int(decision.risk),
                 },
-            )
+            ))
 
         if not decision.allowed:
-            return AgentResponse(
+            return self._remember_tool_response(request, AgentResponse(
                 status="denied",
                 message=_denial_message(request, decision.reason),
                 data={"missing_permissions": list(decision.missing_permissions)},
-            )
+            ))
 
-        return self._execute_tool_request(
+        return self._remember_tool_response(request, self._execute_tool_request(
             request,
             risk=None if decision.risk is None else int(decision.risk),
-        )
+        ))
 
     def _handle_emergency_text(self, text: str) -> AgentResponse | None:
         normalized = _normalize_for_match(text)
@@ -1086,6 +1331,7 @@ class AgentCore:
                 first_request=request,
                 first_response=response,
                 steps=continuation.steps,
+                initial_chain_state=continuation.chain_state,
             )
         if (
             response.status == "ok"
@@ -1566,6 +1812,8 @@ def _continuation_plan_for_user(
                 plan.append(f"unsupported action: {step.kind}")
         elif step.tool == "workspace.switch":
             plan.append(f"switch workspace to {step.args.get('path')}")
+        elif step.tool == "files.write":
+            plan.append(f"write file {step.args.get('path')}")
         else:
             plan.append(step.tool)
     return plan
@@ -3860,14 +4108,205 @@ def _chat_history_allowed_to_cloud(config: dict[str, Any]) -> bool:
 def _enabled_tools_from_config(
     manifests: dict[str, Any],
     config: dict[str, Any],
+    permission_context: PermissionContext | None = None,
 ) -> frozenset[str]:
     overrides = config.get("tools", {})
     enabled: set[str] = set()
     for name, manifest in manifests.items():
         override = overrides.get(name, {})
-        if bool(override.get("enabled", getattr(manifest, "default_enabled", False))):
+        is_enabled = bool(getattr(manifest, "default_enabled", False))
+        if permission_context is not None and name in permission_context.enabled_tools:
+            is_enabled = True
+        if isinstance(override, dict) and override.get("enabled") is True:
+            is_enabled = True
+        if permission_context is not None and name in permission_context.disabled_tools:
+            is_enabled = False
+        if isinstance(override, dict) and override.get("enabled") is False:
+            is_enabled = False
+        if is_enabled:
             enabled.add(name)
     return frozenset(enabled)
+
+
+def _normalize_planner_tool_request(request: ToolRequest, user_message: str) -> ToolRequest:
+    args = dict(request.args)
+    if request.tool in {"browser.open", "browser.scrape_markdown", "browser.extract_text"}:
+        url = args.get("url")
+        if isinstance(url, str):
+            args["url"] = _normalize_browser_url_arg(url)
+        if request.tool == "browser.scrape_markdown":
+            args.setdefault("instructions", user_message)
+            args.setdefault("format", "clean_markdown")
+    if request.tool == "files.write" and args.get("content_from_previous_step") is True:
+        args.setdefault("overwrite", True)
+    return ToolRequest(tool=request.tool, args=args, reason=request.reason)
+
+
+def _resolve_previous_step_content(
+    request: ToolRequest,
+    *,
+    previous_response: AgentResponse,
+    chain_state: dict[str, Any] | None = None,
+    config: dict[str, Any],
+) -> ToolRequest:
+    args = dict(request.args)
+    chain_state = chain_state if chain_state is not None else {}
+    path_match = args.get("path_from_previous_step_match")
+    if isinstance(path_match, str) and path_match.strip():
+        selected_path = _path_from_previous_list_result(previous_response, path_match.strip())
+        if not selected_path:
+            raise ValueError(f"Could not find a previous listed file matching: {path_match.strip()}")
+        args["path"] = selected_path
+        args.pop("path_from_previous_step_match", None)
+        chain_state["selected_path"] = selected_path
+    if args.get("path_from_selected_step") is True:
+        selected_path = str(chain_state.get("selected_path") or "").strip()
+        if not selected_path:
+            raise ValueError("No previously selected file path is available.")
+        args["path"] = selected_path
+        args.pop("path_from_selected_step", None)
+    if args.get("body_from_previous_step") is True:
+        content = _content_from_previous_tool_response(previous_response)
+        if content is None:
+            raise ValueError("Previous tool result did not include text content for the draft body.")
+        args.pop("body_from_previous_step", None)
+        args["body"] = _cap_chained_content(content, config)
+    if args.get("draft_id_from_previous_step") is True:
+        draft_id = _draft_id_from_previous_tool_response(previous_response)
+        if not draft_id:
+            raise ValueError("Previous tool result did not include a draft_id.")
+        args.pop("draft_id_from_previous_step", None)
+        args["draft_id"] = draft_id
+    if args.get("content_from_previous_step") is not True:
+        return ToolRequest(tool=request.tool, args=args, reason=request.reason)
+    if request.tool != "files.write":
+        raise ValueError("content_from_previous_step is only supported for files.write.")
+    content = _content_from_previous_tool_response(previous_response)
+    if content is None:
+        raise ValueError("Previous tool result did not include text content to write.")
+    content = _cap_chained_content(content, config)
+    args.pop("content_from_previous_step", None)
+    args["content"] = content
+    args.setdefault("overwrite", True)
+    return ToolRequest(tool=request.tool, args=args, reason=request.reason)
+
+
+def _content_from_previous_tool_response(response: AgentResponse) -> str | None:
+    data = response.data if isinstance(response.data, dict) else {}
+    for key in ("markdown", "content", "text"):
+        value = data.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _draft_id_from_previous_tool_response(response: AgentResponse) -> str:
+    data = response.data if isinstance(response.data, dict) else {}
+    draft_id = data.get("draft_id")
+    return draft_id if isinstance(draft_id, str) else ""
+
+
+def _path_from_previous_list_result(response: AgentResponse, match_text: str) -> str:
+    data = response.data if isinstance(response.data, dict) else {}
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return ""
+    normalized_match = _normalize_for_match(match_text)
+    best_path = ""
+    best_score = -1
+    for entry in entries:
+        if not isinstance(entry, dict) or bool(entry.get("is_dir")):
+            continue
+        name = str(entry.get("name") or "")
+        relative_path = str(entry.get("relative_path") or "")
+        path = str(entry.get("path") or relative_path)
+        haystack = _normalize_for_match(f"{name} {relative_path} {path}")
+        score = _match_score(normalized_match, haystack)
+        if score > best_score:
+            best_score = score
+            best_path = path
+    return best_path if best_score > 0 else ""
+
+
+def _match_score(needle: str, haystack: str) -> int:
+    if not needle or not haystack:
+        return 0
+    if needle in haystack:
+        return 100 + len(needle)
+    score = 0
+    for token in needle.split():
+        if len(token) >= 3 and token in haystack:
+            score += 10 + len(token)
+    return score
+
+
+def _update_chain_state(chain_state: dict[str, Any], request: ToolRequest, response: AgentResponse) -> None:
+    if response.status != "ok":
+        return
+    data = response.data if isinstance(response.data, dict) else {}
+    if request.tool == "files.read":
+        path = data.get("path") or request.args.get("path")
+        if isinstance(path, str) and path:
+            chain_state["selected_path"] = path
+
+
+def _cap_chained_content(content: str, config: dict[str, Any]) -> str:
+    files_config = config.get("files", {})
+    browser_config = config.get("browser", {})
+    raw_cap = (
+        files_config.get("max_chained_content_chars")
+        if isinstance(files_config, dict)
+        else None
+    )
+    if raw_cap is None and isinstance(browser_config, dict):
+        raw_cap = browser_config.get("max_text_chars")
+    try:
+        cap = int(raw_cap if raw_cap is not None else 12_000)
+    except (TypeError, ValueError):
+        cap = 12_000
+    cap = max(500, min(cap, 200_000))
+    if len(content) <= cap:
+        return content
+    return content[:cap].rstrip() + "\n\n[content truncated]\n"
+
+
+def _redact_step_args_for_response(args: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(args)
+    for key in ("content", "body"):
+        if key in redacted:
+            content = str(redacted[key])
+            redacted[f"{key}_preview"] = content[:500]
+            redacted[f"{key}_chars"] = len(content)
+            redacted.pop(key, None)
+    return redacted
+
+
+def _safe_tool_result_summary(data: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in {"content", "markdown", "text", "body", "source_markdown"}:
+            text = str(value)
+            safe[f"{key}_chars"] = len(text)
+            safe[f"{key}_preview"] = redact_text(text[:500])
+            continue
+        if key in {"entries", "files", "items", "messages", "summary"} and isinstance(value, list):
+            safe[key] = value[:10]
+            safe[f"{key}_count"] = len(value)
+            continue
+        if isinstance(value, str):
+            safe[key] = redact_text(value[:500])
+        else:
+            safe[key] = value
+    return safe
+
+
+def _normalize_browser_url_arg(url: str) -> str:
+    value = url.strip()
+    if not value or "://" in value:
+        return value
+    if value.startswith("www.") or ("." in value and " " not in value):
+        return f"https://{value}"
+    return value
 
 
 def _request_with_original_message(request: ToolRequest, user_message: str) -> ToolRequest:
@@ -4045,6 +4484,8 @@ def _tool_success_message(request: ToolRequest) -> str:
         return "Profile updated."
     if request.tool == "files.read":
         return "File read."
+    if request.tool == "files.list":
+        return "Files listed."
     if request.tool == "files.write":
         return "File written."
     if request.tool == "files.delete":
@@ -4102,6 +4543,47 @@ def _safe_tool_synthesis_fallback(response: AgentResponse, user_message: str) ->
             data={"planner": "deterministic", "source": "memory.list", "file_count": count},
         )
     return response
+
+
+def _browser_scrape_user_response(user_message: str, data: dict[str, Any]) -> AgentResponse:
+    bulgarian = _looks_bulgarian(user_message)
+    path = str(data.get("relative_path") or data.get("path") or "")
+    final_url = str(data.get("final_url") or data.get("url") or "")
+    mode = str(data.get("scrape_mode") or "raw_page")
+    requested_mode = str(data.get("requested_mode") or mode)
+    count = int(data.get("extracted_count") or 0)
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    if bool(data.get("raw_fallback")):
+        message = (
+            f"Targeted extraction failed for {final_url}; saved a raw page fallback to {path}."
+            if not bulgarian
+            else f"Targeted extraction не намери достатъчно статии от {final_url}; запазих raw fallback в {path}."
+        )
+        return AgentResponse(status="ok", message=message, data={**data, "tool": "browser.scrape_markdown"})
+    if mode == "targeted" and count:
+        intro = (
+            f"Extracted {count} article(s) from {final_url} and saved them to {path}:"
+            if not bulgarian
+            else f"Извлякох {count} статии от {final_url} и ги запазих в {path}:"
+        )
+        lines = [intro]
+        for index, item in enumerate(items[:count], start=1):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if title:
+                lines.append(f"{index}. {title}")
+        return AgentResponse(
+            status="ok",
+            message="\n".join(lines),
+            data={**data, "tool": "browser.scrape_markdown"},
+        )
+    message = (
+        f"Scraped page in {requested_mode} mode and saved Markdown to {path}."
+        if not bulgarian
+        else f"Скрейпнах страницата в режим {requested_mode} и запазих Markdown в {path}."
+    )
+    return AgentResponse(status="ok", message=message, data={**data, "tool": "browser.scrape_markdown"})
 
 
 def _terminal_user_response(user_message: str, request: ToolRequest, data: dict[str, Any]) -> AgentResponse:

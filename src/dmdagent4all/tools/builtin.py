@@ -31,6 +31,7 @@ def build_builtin_registry() -> ToolRegistry:
     registry.register_handler("memory.write", _memory_write)
     registry.register_handler("memory.organize_long_term", _memory_organize_long_term)
     registry.register_handler("profile.update", _profile_update)
+    registry.register_handler("files.list", _files_list)
     registry.register_handler("files.read", _files_read)
     registry.register_handler("files.write", _files_write)
     registry.register_handler("files.delete", _files_delete)
@@ -252,6 +253,50 @@ def _files_read(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, 
         "content": redact_text(body.decode("utf-8", errors="replace")),
         "truncated": truncated,
     }
+
+
+def _files_list(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:
+    manager = WorkspaceManager.from_config(context.config, fallback_workspace=context.workspace_root)
+    raw_path = str(args.get("path") or ".").strip()
+    limit = _bounded_list_limit(args.get("limit"), default=200, maximum=1000)
+    resolved = manager.validate_user_path(raw_path)
+    if not resolved.is_dir():
+        raise ValueError("files.list requires a directory path.")
+    entries: list[dict[str, Any]] = []
+    for child in sorted(resolved.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold())):
+        if manager.is_secret_path(child):
+            continue
+        stat = child.stat()
+        try:
+            relative_path = str(child.relative_to(manager.current_workspace))
+        except ValueError:
+            relative_path = str(child)
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "relative_path": relative_path,
+                "is_dir": child.is_dir(),
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+            }
+        )
+        if len(entries) >= limit:
+            break
+    return {
+        "path": str(resolved),
+        "entries": entries,
+        "count": len(entries),
+        "truncated": len(entries) >= limit,
+    }
+
+
+def _bounded_list_limit(value: Any, *, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(maximum, parsed))
 
 
 def _files_write(args: dict[str, Any], context: ToolRuntimeContext) -> dict[str, Any]:

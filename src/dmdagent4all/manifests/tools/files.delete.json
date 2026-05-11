@@ -5,6 +5,7 @@
   "permissions": [],
   "args_schema": {
     "path": "absolute path inside allowed roots or path relative to current workspace",
+    "path_from_selected_step": "inside a multi_tool_plan, delete the file selected/read earlier in the plan",
     "recursive": "true only when deleting a directory tree"
   },
   "approval_required": true,

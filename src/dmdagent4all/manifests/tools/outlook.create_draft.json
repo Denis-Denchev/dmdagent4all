@@ -8,7 +8,8 @@
     "cc": "optional cc recipients",
     "bcc": "optional bcc recipients",
     "subject": "draft subject",
-    "body": "draft body"
+    "body": "draft body",
+    "body_from_previous_step": "true inside a multi_tool_plan to use the previous files.read content as the draft body"
   },
   "approval_required": false,
   "cloud_allowed": false,

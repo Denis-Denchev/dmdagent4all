@@ -4,7 +4,8 @@
   "risk": 0,
   "permissions": [],
   "args_schema": {
-    "path": "absolute path inside allowed roots or path relative to current workspace"
+    "path": "absolute path inside allowed roots or path relative to current workspace",
+    "path_from_previous_step_match": "inside a multi_tool_plan, choose a file from the previous files.list result by matching this text"
   },
   "approval_required": false,
   "cloud_allowed": false,

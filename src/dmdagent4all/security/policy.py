@@ -52,8 +52,10 @@ class ToolSafetyPolicy:
             fallback_workspace=context.workspace_root,
         )
 
-        if request.tool in {"files.read", "files.write", "files.delete"}:
+        if request.tool in {"files.list", "files.read", "files.write", "files.delete"}:
             path = request.args.get("path")
+            if request.tool == "files.list" and (path is None or str(path).strip() == ""):
+                path = "."
             if not isinstance(path, str) or not path.strip():
                 return SafetyDecision.deny(f"{request.tool} requires a path.")
             try:

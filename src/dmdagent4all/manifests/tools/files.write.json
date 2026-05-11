@@ -6,6 +6,7 @@
   "args_schema": {
     "path": "absolute path inside allowed roots or path relative to current workspace",
     "content": "full text content to write into the file",
+    "content_from_previous_step": "true only inside a multi_tool_plan when files.write should write the prior tool's returned text/markdown",
     "overwrite": "true only when replacing an existing file after explicit approval"
   },
   "approval_required": true,

@@ -4,7 +4,8 @@
   "risk": 4,
   "permissions": ["gmail.send"],
   "args_schema": {
-    "draft_id": "Gmail draft id"
+    "draft_id": "Gmail draft id",
+    "draft_id_from_previous_step": "true inside a multi_tool_plan to send the draft created by the previous create_draft step"
   },
   "approval_required": true,
   "cloud_allowed": false,

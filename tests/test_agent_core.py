@@ -7,13 +7,14 @@ from pathlib import Path
 from unittest import mock
 
 from dmdagent4all.agent import AgentCore
-from dmdagent4all.agent.planner import PlanResult
+from dmdagent4all.agent.planner import PlanResult, PlannerError
 from dmdagent4all.agent.router import ConversationRouter
 from dmdagent4all.audit import AuditStore
 from dmdagent4all.memory import MemoryManager
 from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.web import FetchedPage
 
 
 class FakePlanner:
@@ -74,6 +75,52 @@ class ChatOnlyPlanner:
         return self.answer
 
 
+class ContextAnsweringPlanner:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def plan(self, **kwargs) -> PlanResult:
+        self.calls.append(kwargs)
+        context = kwargs.get("agent_context") or {}
+        text = str(kwargs.get("user_message") or "").casefold()
+        if "model" in text:
+            runtime = context.get("runtime") or {}
+            return PlanResult(
+                final_message=(
+                    f"Provider: {runtime.get('provider', '')}; "
+                    f"model: {runtime.get('model', '')}"
+                )
+            )
+        if "tools" in text:
+            tools = context.get("tools") or {}
+            return PlanResult(
+                final_message=(
+                    f"Enabled: {', '.join(tools.get('enabled') or [])}\n"
+                    f"Disabled: {', '.join(tools.get('disabled') or [])}"
+                )
+            )
+        if "downloads" in text or "download" in text:
+            workspace = context.get("workspace") or {}
+            mounts = workspace.get("mounted_roots") or []
+            downloads = next(
+                (
+                    item
+                    for item in mounts
+                    if isinstance(item, dict) and item.get("label") == "downloads"
+                ),
+                {},
+            )
+            if not downloads.get("allowed"):
+                return PlanResult(
+                    final_message=(
+                        "Downloads is not mounted under an allowed root. Configure "
+                        "storage.downloads_root or workspace.allowed_roots before I can inspect it."
+                    )
+                )
+            return PlanResult(final_message=f"Downloads mounted at {downloads.get('path', '')}")
+        return PlanResult(final_message="ok")
+
+
 class AgentCoreTest(unittest.TestCase):
     def test_planner_final_response_is_returned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +147,147 @@ class AgentCoreTest(unittest.TestCase):
             self.assertGreaterEqual(len(planner.calls), 2)
             self.assertIn("Говорим за настройката", planner.calls[1]["conversation_context"])
             self.assertIn("Assistant: разбрах", planner.calls[1]["conversation_context"])
+
+    def test_agent_context_passed_to_planner_includes_runtime_workspace_tools_and_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            downloads = root / "Downloads"
+            workspace.mkdir()
+            downloads.mkdir()
+            MemoryManager(root / "memory").write(
+                "services/platform.md",
+                "Platform context file.",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            planner = RecordingPlanner(answer="ok")
+            core = _build_core(
+                root,
+                planner,
+                config={
+                    "setup": {"agent_name": "DMD Runtime"},
+                    "llm": {
+                        "provider": "ollama",
+                        "model": "qwen-context",
+                        "planner_model": "qwen-planner",
+                        "response_language": "auto",
+                    },
+                    "storage": {"downloads_root": str(downloads)},
+                    "workspace": {
+                        "default_path": str(workspace),
+                        "current_path": str(workspace),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": [],
+                    },
+                    "tools": {"browser.scrape_markdown": {"enabled": True}},
+                    "terminal": {
+                        "enabled": True,
+                        "allowed_commands": [["ls"], ["git", "status"]],
+                        "auto_approve_allowlisted": True,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft"}),
+                    granted_permissions=frozenset({"browser.read", "gmail.compose"}),
+                ),
+            )
+
+            core.handle_text("what model and tools are configured?")
+            context = planner.calls[0]["agent_context"]
+
+            self.assertEqual(context["agent_name"], "DMD Runtime")
+            self.assertEqual(context["runtime"]["provider"], "ollama")
+            self.assertEqual(context["runtime"]["model"], "qwen-context")
+            self.assertEqual(context["runtime"]["planner_model"], "qwen-planner")
+            self.assertEqual(context["workspace"]["current"], str(workspace.resolve()))
+            self.assertIn(str(root.resolve()), context["workspace"]["allowed_roots"])
+            self.assertIn("services/platform.md", context["memory"]["files"])
+            self.assertIn("browser.scrape_markdown", context["tools"]["enabled"])
+            self.assertIn("gmail.create_draft", context["tools"]["enabled"])
+            self.assertIn("browser.read", context["permissions"]["granted"])
+            self.assertIn("ls", context["terminal"]["allowed_commands"])
+            self.assertTrue(
+                any(
+                    mount["label"] == "downloads" and mount["allowed"]
+                    for mount in context["workspace"]["mounted_roots"]
+                )
+            )
+
+    def test_model_identity_uses_runtime_agent_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = ContextAnsweringPlanner()
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={
+                    "llm": {
+                        "provider": "deepseek",
+                        "model": "deepseek-chat",
+                        "response_language": "auto",
+                    }
+                },
+            )
+
+            response = core.handle_text("what model are you?")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("deepseek", response.message)
+            self.assertIn("deepseek-chat", response.message)
+            self.assertEqual(planner.calls[0]["agent_context"]["runtime"]["model"], "deepseek-chat")
+
+    def test_tools_question_uses_tool_registry_state_from_agent_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = ContextAnsweringPlanner()
+            core = _build_core(
+                Path(tmp),
+                planner,
+                config={
+                    "llm": {"provider": "ollama", "model": "qwen3:8b", "response_language": "auto"},
+                    "tools": {
+                        "browser.scrape_markdown": {"enabled": True},
+                        "terminal.run": {"enabled": False},
+                    },
+                },
+            )
+
+            response = core.handle_text("what tools do you have?")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("browser.scrape_markdown", response.message)
+            self.assertIn("terminal.run", response.message)
+            self.assertIn("terminal.run", planner.calls[0]["agent_context"]["tools"]["disabled"])
+
+    def test_downloads_unavailable_context_answer_is_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside_downloads = root.parent / f"{root.name}-outside-downloads"
+            planner = ContextAnsweringPlanner()
+            core = _build_core(
+                root,
+                planner,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "storage": {"downloads_root": str(outside_downloads)},
+                    "workspace": {
+                        "default_path": str(root / "workspace"),
+                        "current_path": str(root / "workspace"),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": [],
+                    },
+                },
+            )
+
+            response = core.handle_text("look in Downloads for the football file")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Downloads is not mounted", response.message)
+            self.assertIn("allowed root", response.message)
+            downloads = next(
+                mount
+                for mount in planner.calls[0]["agent_context"]["workspace"]["mounted_roots"]
+                if mount["label"] == "downloads"
+            )
+            self.assertFalse(downloads["allowed"])
 
     def test_cloud_planner_does_not_receive_chat_history_without_context_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,6 +370,17 @@ class AgentCoreTest(unittest.TestCase):
             self.assertIn("API key is not loaded", response.message)
             self.assertIn("DMDAGENT_OPENAI_API_KEY", response.message)
             self.assertEqual(response.data, {"planner": "deterministic", "fallback": "missing_api_key"})
+
+    def test_planner_unavailable_mode_mentions_context_aware_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = _build_core(Path(tmp), None)
+
+            response = core.handle_text("inspect mounted roots and decide the next workflow")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("LLM planner is not active", response.message)
+            self.assertIn("context-aware tasks", response.message)
+            self.assertEqual(response.data, {"planner": "inactive"})
 
     def test_local_planner_receives_retrieved_memory_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -316,6 +515,642 @@ class AgentCoreTest(unittest.TestCase):
             )
             self.assertEqual(response.status, "denied")
             self.assertIn("Tool is disabled: browser.scrape_markdown", response.message)
+
+    def test_llm_first_scrape_request_is_not_stolen_by_memory_recall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "preferences.md",
+                "Preferences is on port 192.",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="browser.scrape_markdown",
+                            args={"url": "sportal.bg", "instructions": "scrape sportal.bg"},
+                            reason="User asked to scrape a web page.",
+                        )
+                    )
+                ),
+            )
+
+            response = core.handle_text("i want you to scrape sportal.bg")
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Tool is disabled: browser.scrape_markdown", response.message)
+            self.assertNotIn("Preferences", response.message)
+            self.assertNotIn("port 192", response.message)
+
+    def test_llm_first_open_domain_routes_to_browser_open_not_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "preferences.md",
+                "Preferences is on port 192.",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="browser.open",
+                            args={"url": "sportal.bg"},
+                            reason="User asked to open a web page.",
+                        )
+                    )
+                ),
+            )
+
+            response = core.handle_text("open sportal.bg")
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Tool is disabled: browser.open", response.message)
+            self.assertNotIn("Preferences", response.message)
+
+    def test_browser_scrape_chat_response_includes_count_path_and_preview(self) -> None:
+        html = """
+        <html>
+          <head><title>Daily Example</title></head>
+          <body>
+            <main>
+              <article>
+                <h2><a href="/news/first-real-story-1001">First real article title today</a></h2>
+                <p>First article summary.</p>
+              </article>
+              <article>
+                <h2><a href="/news/second-real-story-1002">Second real article headline here</a></h2>
+                <p>Second article summary.</p>
+              </article>
+            </main>
+          </body>
+        </html>
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="browser.scrape_markdown",
+                            args={
+                                "url": "https://news.example.test",
+                                "mode": "targeted",
+                                "content_type": "articles",
+                                "limit": 2,
+                                "format": "clean_markdown",
+                            },
+                            reason="User asked to scrape two articles.",
+                        )
+                    )
+                ),
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"browser.scrape_markdown"}),
+                    granted_permissions=frozenset({"browser.read"}),
+                ),
+            )
+            page = FetchedPage(
+                url="https://news.example.test",
+                final_url="https://news.example.test/",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=1024,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                response = core.handle_text("scrape first 2 articles from news.example.test")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Extracted 2 article", response.message)
+            self.assertIn("scrapefiles/", response.message)
+            self.assertIn("First real article title today", response.message)
+            self.assertIn("Second real article headline here", response.message)
+
+    def test_llm_memory_search_decision_can_still_answer_plex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            MemoryManager(root / "memory").write(
+                "services/plex.md",
+                "Plex port: 32400",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "homelab/homelab-primary.md",
+                "LAN IP: 192.0.2.43\nTailscale IP: 198.51.100.43",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            MemoryManager(root / "memory").write(
+                "homelab/proxmox.md",
+                "Proxmox web UI: https://192.0.2.25:8006",
+                metadata={"type": "organized_long_term_memory", "memory_scope": "long-term"},
+            )
+            core = _build_core(
+                root,
+                FakePlanner(PlanResult(memory_query="на кой адрес е plex")),
+            )
+            core.chat_history.append("default", "user", "а проксмокс на кой адрес беше")
+            core.chat_history.append("default", "assistant", "Proxmox web UI: https://192.0.2.25:8006")
+
+            response = core.handle_text("на кой адрес е plex")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("Plex", response.message)
+            self.assertIn("http://192.0.2.43:32400/web", response.message)
+            self.assertNotIn("Proxmox", response.message)
+            self.assertEqual(response.data, {"planner": "llm", "decision": "memory_search"})
+
+    def test_llm_multi_tool_plan_still_uses_backend_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "terminal": {
+                    "enabled": True,
+                    "allowed_commands": [["ls"]],
+                    "auto_approve_allowlisted": True,
+                    "workspace_root": str(workspace),
+                },
+                "workspace": {
+                    "default_path": str(workspace),
+                    "current_path": str(workspace),
+                    "allowed_roots": [str(root)],
+                    "blocked_paths": [],
+                },
+            }
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="terminal.run",
+                                args={"command": ["mkdir", "test1"]},
+                                reason="Create requested folder.",
+                            ),
+                            ToolRequest(
+                                tool="workspace.switch",
+                                args={"path": "test1"},
+                                reason="Move into the new folder.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                config=config,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            pending = core.handle_text("mkdir test1 then open the folder")
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+            self.assertEqual(approved.status, "ok")
+            self.assertTrue((workspace / "test1").exists())
+            self.assertEqual(config["workspace"]["current_path"], str((workspace / "test1").resolve()))
+
+    def test_scrape_to_file_plan_passes_markdown_to_files_write_approval(self) -> None:
+        html = """
+        <html>
+          <head><title>DMD Flow</title></head>
+          <body><main><h1>DMD Flow</h1><p>Planner regression content.</p></main></body>
+        </html>
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "readme123.md").write_text("old content\n", encoding="utf-8")
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="browser.scrape_markdown",
+                                args={
+                                    "url": "dmdflow.com",
+                                    "mode": "raw_page",
+                                    "format": "clean_markdown",
+                                    "instructions": "Scrape dmdflow.com",
+                                },
+                                reason="Scrape the requested page.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={
+                                    "path": "readme123.md",
+                                    "content_from_previous_step": True,
+                                },
+                                reason="Write the scraped Markdown to the requested file.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"browser.scrape_markdown", "files.write"}),
+                    granted_permissions=frozenset({"browser.read"}),
+                ),
+            )
+            page = FetchedPage(
+                url="https://dmdflow.com",
+                final_url="https://dmdflow.com/",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=512,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                pending = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
+
+            approval = audit.list_approvals(status="pending")[0]
+            self.assertEqual(pending.status, "approval_required")
+            self.assertEqual(approval["tool"], "files.write")
+            self.assertEqual(approval["args"]["path"], "readme123.md")
+            self.assertTrue(approval["args"]["overwrite"])
+            self.assertIn("Planner regression content", approval["args"]["content"])
+            self.assertNotIn("content_from_previous_step", approval["args"])
+            self.assertIn("write file readme123.md", pending.data["plan"])
+
+    def test_scrape_to_file_approval_writes_target_under_workspace(self) -> None:
+        html = """
+        <html>
+          <head><title>DMD Flow</title></head>
+          <body><main><h1>DMD Flow</h1><p>Validated workspace write.</p></main></body>
+        </html>
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="browser.scrape_markdown",
+                                args={"url": "https://dmdflow.com"},
+                                reason="Scrape the requested page.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={"path": "readme123.md", "content_from_previous_step": True},
+                                reason="Write the scraped Markdown.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"browser.scrape_markdown", "files.write"}),
+                    granted_permissions=frozenset({"browser.read"}),
+                ),
+            )
+            page = FetchedPage(
+                url="https://dmdflow.com",
+                final_url="https://dmdflow.com/",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=512,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                pending = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
+            approved = core.approve_and_execute(pending.data["approval_id"])
+
+            target = workspace / "readme123.md"
+            self.assertEqual(approved.status, "ok")
+            self.assertTrue(target.exists())
+            self.assertEqual(approved.data["path"], str(target.resolve()))
+            self.assertIn("Validated workspace write", target.read_text(encoding="utf-8"))
+
+    def test_downloads_file_move_workflow_uses_multi_tool_plan_and_delete_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            downloads = root / "Downloads"
+            workspace.mkdir()
+            downloads.mkdir()
+            source = downloads / "football-notes.md"
+            source.write_text("Football file contents\n", encoding="utf-8")
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="files.list",
+                                args={"path": str(downloads)},
+                                reason="Inspect mounted Downloads.",
+                            ),
+                            ToolRequest(
+                                tool="files.read",
+                                args={"path_from_previous_step_match": "football"},
+                                reason="Read the matching football file.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={"path": "readme.md", "content_from_previous_step": True},
+                                reason="Write the selected file contents to readme.md.",
+                            ),
+                            ToolRequest(
+                                tool="files.delete",
+                                args={"path_from_selected_step": True},
+                                reason="Delete the original after the write is approved.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "storage": {"downloads_root": str(downloads)},
+                    "workspace": {
+                        "default_path": str(workspace),
+                        "current_path": str(workspace),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": [],
+                    },
+                },
+            )
+
+            pending_write = core.handle_text(
+                "виж в downloads имам един файл за футбол искам да го преместиш в readme.md"
+            )
+            approved_write = core.approve_and_execute(pending_write.data["approval_id"])
+            approved_delete = core.approve_and_execute(approved_write.data["approval_id"])
+
+            self.assertEqual(pending_write.status, "approval_required")
+            self.assertEqual(pending_write.data["pending_tool"], "files.write")
+            self.assertEqual(approved_write.status, "approval_required")
+            self.assertEqual(approved_write.data["pending_tool"], "files.delete")
+            self.assertTrue((workspace / "readme.md").exists())
+            self.assertIn(
+                "Football file contents",
+                (workspace / "readme.md").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(approved_delete.status, "ok")
+            self.assertFalse(source.exists())
+
+    def test_llm_file_to_email_workflow_creates_draft_then_requires_send_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            source = workspace / "report.md"
+            source.write_text("Project report body\n", encoding="utf-8")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="files.read",
+                                args={"path": "report.md"},
+                                reason="Read the file to send.",
+                            ),
+                            ToolRequest(
+                                tool="gmail.create_draft",
+                                args={
+                                    "to": "person@example.com",
+                                    "subject": "Requested file",
+                                    "body_from_previous_step": True,
+                                },
+                                reason="Create a local email draft with the file body.",
+                            ),
+                            ToolRequest(
+                                tool="gmail.send_draft",
+                                args={"draft_id_from_previous_step": True},
+                                reason="Send only after approval.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                    "workspace": {
+                        "default_path": str(workspace),
+                        "current_path": str(workspace),
+                        "allowed_roots": [str(root)],
+                        "blocked_paths": [],
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text("прати този файл на person@example.com по мейл")
+
+            approval = audit.list_approvals(status="pending")[0]
+            draft_id = str(approval["args"]["draft_id"])
+            draft_path = root / "email-drafts" / "gmail" / f"{draft_id}.json"
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(response.data["pending_tool"], "gmail.send_draft")
+            self.assertEqual(approval["tool"], "gmail.send_draft")
+            self.assertEqual(draft["to"], ["person@example.com"])
+            self.assertEqual(draft["subject"], "Requested file")
+            self.assertEqual(draft["body"], "Project report body")
+
+    def test_scrape_to_env_file_is_denied_by_path_policy(self) -> None:
+        html = "<html><head><title>DMD Flow</title></head><body><p>Secret target test.</p></body></html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="browser.scrape_markdown",
+                                args={"url": "https://dmdflow.com"},
+                                reason="Scrape the requested page.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={"path": ".env", "content_from_previous_step": True},
+                                reason="Write the scraped Markdown.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"browser.scrape_markdown", "files.write"}),
+                    granted_permissions=frozenset({"browser.read"}),
+                ),
+            )
+            page = FetchedPage(
+                url="https://dmdflow.com",
+                final_url="https://dmdflow.com/",
+                status=200,
+                content_type="text/html",
+                body=html,
+                bytes_read=256,
+                truncated=False,
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+                response = core.handle_text("scrape dmdflow.com and place the results in .env")
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("secret", response.message.casefold())
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_llm_selected_secret_read_and_write_are_blocked_by_backend_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / ".env").write_text("SECRET_TOKEN=abc\n", encoding="utf-8")
+            read_core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="files.read",
+                            args={"path": ".env"},
+                            reason="LLM attempted to read a secret file.",
+                        )
+                    )
+                ),
+                audit=audit,
+            )
+            write_core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="files.write",
+                            args={"path": ".env", "content": "new secret"},
+                            reason="LLM attempted to write a secret file.",
+                        )
+                    )
+                ),
+                audit=audit,
+            )
+
+            read_response = read_core.handle_text("read .env")
+            write_response = write_core.handle_text("write to .env")
+
+            self.assertEqual(read_response.status, "denied")
+            self.assertEqual(write_response.status, "denied")
+            self.assertIn("secret", read_response.message.casefold())
+            self.assertIn("secret", write_response.message.casefold())
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_emergency_stop_blocks_scrape_to_file_plan_before_any_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="browser.scrape_markdown",
+                                args={"url": "https://dmdflow.com"},
+                                reason="Scrape the requested page.",
+                            ),
+                            ToolRequest(
+                                tool="files.write",
+                                args={"path": "readme123.md", "content_from_previous_step": True},
+                                reason="Write the scraped Markdown.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "runtime": {"emergency_stop": {"active": True, "triggered_at": "now", "reason": "test"}},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"browser.scrape_markdown", "files.write"}),
+                    granted_permissions=frozenset({"browser.read"}),
+                ),
+            )
+            with mock.patch("dmdagent4all.tools.web.fetch_page") as fetch:
+                response = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Emergency stop", response.message)
+            fetch.assert_not_called()
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+
+    def test_unrelated_visual_planner_clarification_is_not_shown_to_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        clarification_message=(
+                            "I need the image or description of the rotating objects to determine "
+                            "which number is the rotating one."
+                        )
+                    )
+                ),
+            )
+
+            response = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
+
+            self.assertNotIn("rotating objects", response.message)
+            self.assertNotIn("which number", response.message)
+            self.assertNotIn("image or description", response.message)
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Tool is disabled: browser.scrape_markdown", response.message)
+
+    def test_planner_error_fallback_does_not_leak_repair_debug_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            core = _build_core(
+                root,
+                FailingPlanner(
+                    PlannerError(
+                        "Return valid JSON only. rotating objects repair prompt debug"
+                    )
+                ),
+            )
+
+            response = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
+
+            self.assertNotIn("Return valid JSON", response.message)
+            self.assertNotIn("rotating objects", response.message)
+            self.assertNotIn("repair prompt", response.message)
+            self.assertEqual(response.status, "denied")
 
     def test_identity_answers_use_setup_config_without_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2146,6 +2981,41 @@ and this is the knowlage
             self.assertIn("Emergency stop", tool_response.message)
             self.assertEqual(approved.status, "denied")
             self.assertIn("Emergency stop", approved.message)
+
+    def test_emergency_stop_blocks_llm_selected_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {
+                "llm": {"provider": "ollama", "response_language": "auto"},
+                "runtime": {"emergency_stop": {"active": True, "triggered_at": "now", "reason": "test"}},
+                "terminal": {
+                    "enabled": True,
+                    "allowed_commands": [["ls"]],
+                    "auto_approve_allowlisted": True,
+                },
+            }
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="terminal.run",
+                            args={"command": ["ls"]},
+                            reason="User asked to list files.",
+                        )
+                    )
+                ),
+                config=config,
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"terminal.run"}),
+                    granted_permissions=frozenset({"terminal.run"}),
+                ),
+            )
+
+            response = core.handle_text("run ls")
+
+            self.assertEqual(response.status, "denied")
+            self.assertIn("Emergency stop", response.message)
 
 
 def _build_core(

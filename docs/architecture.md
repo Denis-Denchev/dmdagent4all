@@ -9,7 +9,7 @@ User Interfaces
 Web UI / Telegram / CLI
         |
 Agent Core
-ConversationRouter / Normal Chat / Tool Planner / Memory
+Minimal Controls / LLM Decision / Policy-Gated Tools / Memory
         |
 WorkspaceManager / ToolSafetyPolicy
         |
@@ -28,13 +28,13 @@ Docker / OAuth / Local APIs
 The agent core:
 
 - receives user messages
-- routes obvious normal chat to normal chat mode
-- routes obvious terminal, file read/delete, memory, browser, reminder, and workspace requests before the JSON planner
-- lets the planner choose `files.write` for natural code/file edit requests instead of relying on phrase regexes
-- treats `cd <folder>`, `open <folder>`, and "go into folder" as workspace changes, not as stateless shell `cd`
-- handles conservative multi-step requests such as `mkdir test then open the folder` by approving the write step first and continuing only with validated follow-up steps
+- handles only minimal deterministic controls before model routing: slash/help-style commands, approve/deny, emergency stop/reset, explicit JSON tool requests, chat-history lookup, and session corrections
+- asks the LLM for a structured decision for normal chat, tool calls, multi-tool plans, clarification questions, and memory search
+- lets the LLM choose `files.write` for natural code/file edit requests instead of relying on phrase regexes
+- treats `cd <folder>`, `open <folder>`, and "go into folder" as workspace changes when selected by the LLM or fallback router, not as stateless shell `cd`
+- supports short LLM multi-tool plans while approving the first risky step before any continuation runs
 - blocks tool execution when emergency stop mode is active
-- uses the JSON planner only when tool selection is genuinely needed
+- keeps older regex/deterministic parsers only as local fallback when the LLM is unavailable
 - sends tool requests through backend safety policy and then the permission engine
 - returns natural-language tool results to the user
 
@@ -44,18 +44,35 @@ The core does not bypass the safety policy or permission engine.
 
 ```text
 User message
-  -> ConversationRouter
-  -> normal_chat | tool_request | planner_needed
+  -> minimal deterministic controls
+  -> LLM structured decision
+  -> answer | tool_call | multi_tool_plan | ask_clarification | memory_search
   -> ToolSafetyPolicy
   -> PermissionEngine / approvals
   -> Tool executor
   -> Answer synthesis / response shaping
 ```
 
-Normal chat uses `llm.chat_max_tokens` and does not require planner JSON.
+The LLM decision schema supports:
+
+- `answer` for normal conversation and simple Q&A
+- `tool_call` for one backend tool
+- `multi_tool_plan` for short ordered tool plans
+- `ask_clarification` when required inputs are missing
+- `memory_search` when the user asks about saved local facts
+
+Explicit browser, terminal, email, file, reminder, and workspace intents are not
+answered by early memory regexes. Memory lookup is now a decision, so a request
+such as `scrape sportal.bg` routes to `browser.scrape_markdown` instead of being
+stolen by unrelated saved memory.
+
 Planner mode uses a smaller planner history window and `llm.planner_max_tokens`.
 Tool result synthesis uses `llm.synthesis_max_tokens`. Planner JSON repair uses
 `llm.repair_max_tokens`.
+
+If the LLM is unavailable, the backend falls back to the older deterministic
+router for local/offline usability. The fallback still goes through the same
+workspace, safety, permission, and approval gates.
 
 ## Workspace Manager
 
@@ -178,6 +195,14 @@ Initial tool groups:
 - `browser.*` manifests
 
 High-risk tools are disabled by default.
+
+`browser.scrape_markdown` supports `raw_page` mode for full page Markdown and
+`targeted` mode for article extraction. Targeted article mode uses static HTML
+only in the default runtime: JSON-LD `NewsArticle`, `<article>` elements,
+headings with nearby links, and article-like links are converted into compact
+Markdown sections. If targeted extraction cannot find candidates, the tool marks
+the result as a raw fallback instead of pretending the targeted scrape worked.
+Playwright/rendered scraping remains optional and is not the default path.
 
 `terminal.run` is intentionally narrow: command arrays only, exact allowlist,
 workspace-only cwd, timeout, output limit, redaction, audit, and approval.

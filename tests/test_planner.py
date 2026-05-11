@@ -1,6 +1,14 @@
+import json
 import unittest
 
-from dmdagent4all.agent.planner import LLMPlanner, PlannerError, parse_plan_response
+from dmdagent4all.agent.planner import (
+    LLMPlanner,
+    PlannerError,
+    REPAIR_PROMPT,
+    SYSTEM_PROMPT,
+    is_low_relevance_plan,
+    parse_plan_response,
+)
 from dmdagent4all.llm.base import LLMMessage, LLMResponse
 
 
@@ -87,6 +95,131 @@ class PlannerTest(unittest.TestCase):
         self.assertIsNotNone(result.tool_request)
         self.assertEqual(result.tool_request.tool, "memory.list")
         self.assertEqual(provider.call_count, 2)
+
+    def test_parses_scrape_to_file_multi_tool_plan(self) -> None:
+        raw = json.dumps(
+            {
+                "action": "multi_tool_plan",
+                "steps": [
+                    {
+                        "tool": "browser.scrape_markdown",
+                        "args": {
+                            "url": "https://dmdflow.com",
+                            "mode": "raw_page",
+                            "format": "clean_markdown",
+                            "instructions": "Scrape dmdflow.com",
+                        },
+                    },
+                    {
+                        "tool": "files.write",
+                        "args": {
+                            "path": "readme123.md",
+                            "content_from_previous_step": True,
+                        },
+                    },
+                ],
+            }
+        )
+
+        result = parse_plan_response(raw)
+
+        self.assertEqual(len(result.tool_plan), 2)
+        self.assertEqual(result.tool_plan[0].tool, "browser.scrape_markdown")
+        self.assertEqual(result.tool_plan[0].args["url"], "https://dmdflow.com")
+        self.assertEqual(result.tool_plan[1].tool, "files.write")
+        self.assertTrue(result.tool_plan[1].args["content_from_previous_step"])
+
+    def test_scrape_to_file_prompt_guides_multi_tool_plan(self) -> None:
+        self.assertIn("content_from_previous_step", SYSTEM_PROMPT)
+        self.assertIn("multi_tool_plan", SYSTEM_PROMPT)
+        self.assertIn("browser.scrape_markdown", SYSTEM_PROMPT)
+        self.assertIn("files.write", SYSTEM_PROMPT)
+
+    def test_prompt_receives_agent_context_snapshot(self) -> None:
+        provider = RecordingProvider('{"type":"final","message":"ok"}')
+        planner = LLMPlanner(provider)
+        agent_context = {
+            "runtime": {"provider": "ollama", "model": "qwen-context"},
+            "workspace": {"current": "/tmp/workspace"},
+            "tools": {"enabled": ["files.read"], "disabled": ["terminal.run"]},
+            "memory": {"files": ["long-term/profile.md"]},
+        }
+
+        planner.plan(
+            user_message="what model are you",
+            manifests={},
+            agent_context=agent_context,
+        )
+        payload = json.loads(provider.messages[1].content)
+
+        self.assertEqual(payload["agent_context"], agent_context)
+        self.assertEqual(payload["agent_context"]["runtime"]["model"], "qwen-context")
+        self.assertIn("files.read", payload["agent_context"]["tools"]["enabled"])
+
+    def test_prompt_guides_context_aware_file_and_email_workflows(self) -> None:
+        self.assertIn("agent_context.workspace.mounted_roots", SYSTEM_PROMPT)
+        self.assertIn("files.list", SYSTEM_PROMPT)
+        self.assertIn("path_from_previous_step_match", SYSTEM_PROMPT)
+        self.assertIn("path_from_selected_step", SYSTEM_PROMPT)
+        self.assertIn("body_from_previous_step", SYSTEM_PROMPT)
+        self.assertIn("draft_id_from_previous_step", SYSTEM_PROMPT)
+
+    def test_unrelated_visual_clarification_is_low_relevance_for_scrape_request(self) -> None:
+        result = parse_plan_response(
+            '{"action":"ask_clarification","message":"I need the image or description of the rotating objects to determine which number is the rotating one."}'
+        )
+
+        self.assertTrue(
+            is_low_relevance_plan(
+                result,
+                "scrape dmdflow.com and place the results in readme123.md",
+            )
+        )
+
+    def test_planner_retries_unrelated_output_with_strict_schema(self) -> None:
+        provider = SequenceProvider(
+            [
+                '{"action":"ask_clarification","message":"I need the image or description of the rotating objects to determine which number is the rotating one."}',
+                json.dumps(
+                    {
+                        "action": "multi_tool_plan",
+                        "steps": [
+                            {
+                                "tool": "browser.scrape_markdown",
+                                "args": {"url": "https://dmdflow.com"},
+                                "reason": "Scrape the requested page.",
+                            },
+                            {
+                                "tool": "files.write",
+                                "args": {"path": "readme123.md", "content_from_previous_step": True},
+                                "reason": "Write the scraped Markdown to the requested file.",
+                            },
+                        ],
+                    }
+                ),
+            ]
+        )
+        planner = LLMPlanner(provider)
+
+        result = planner.plan(
+            user_message="scrape dmdflow.com and place the results in readme123.md",
+            manifests={},
+        )
+
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(len(result.tool_plan), 2)
+        self.assertEqual(result.tool_plan[0].tool, "browser.scrape_markdown")
+        self.assertEqual(result.tool_plan[1].tool, "files.write")
+
+    def test_planner_prompts_do_not_contain_visual_task_leakage(self) -> None:
+        prompt_text = f"{SYSTEM_PROMPT}\n{REPAIR_PROMPT}".casefold()
+        for marker in (
+            "rotating objects",
+            "rotating one",
+            "image or description",
+            "determine which number",
+        ):
+            self.assertNotIn(marker, prompt_text)
 
 
 class RecordingProvider:
