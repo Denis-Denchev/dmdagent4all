@@ -116,6 +116,40 @@ class TelegramInterfaceTest(unittest.TestCase):
             self.assertEqual(api.sent_messages[0]["text"], "Hello from the local agent.")
             self.assertIsNone(api.sent_messages[0]["reply_markup"])
 
+    def test_tool_data_is_summarized_without_raw_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = FakeTelegramAPI()
+            core = FakeCore(
+                AgentResponse(
+                    status="ok",
+                    message="Files written.",
+                    data={
+                        "tool": "files.write_many",
+                        "files": [{"path": "src/app.tsx"}, {"path": "src/styles.css"}],
+                        "count": 2,
+                    },
+                )
+            )
+            interface = TelegramInterface(
+                settings=TelegramSettings(
+                    enabled=True,
+                    allowed_user_ids=frozenset({100}),
+                ),
+                api=api,
+                audit_store=AuditStore(Path(tmp) / "audit.db"),
+                core_factory=lambda: core,
+            )
+
+            interface.handle_update(_message_update(user_id=100, text="write files"))
+
+            text = api.sent_messages[0]["text"]
+            self.assertIn("Files written.", text)
+            self.assertIn("Tool: files.write_many", text)
+            self.assertIn("Files: 2", text)
+            self.assertIn("- src/app.tsx", text)
+            self.assertNotIn('"files"', text)
+            self.assertNotIn("{", text)
+
     def test_approval_required_adds_inline_buttons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             api = FakeTelegramAPI()
@@ -144,6 +178,36 @@ class TelegramInterfaceTest(unittest.TestCase):
             self.assertEqual(buttons[0]["callback_data"], "approve:7")
             self.assertEqual(buttons[1]["callback_data"], "deny:7")
             self.assertNotIn('"approval_id"', api.sent_messages[0]["text"])
+
+    def test_approvals_command_is_readable_without_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = FakeTelegramAPI()
+            core = FakeCore(AgentResponse(status="ok", message="unused"))
+            audit = AuditStore(Path(tmp) / "audit.db")
+            approval_id = audit.record_approval(
+                tool="files.write",
+                risk=3,
+                args={"path": "README.md"},
+                request_reason="write requested",
+                decision_reason="requires approval",
+            )
+            interface = TelegramInterface(
+                settings=TelegramSettings(
+                    enabled=True,
+                    allowed_user_ids=frozenset({100}),
+                ),
+                api=api,
+                audit_store=audit,
+                core_factory=lambda: core,
+            )
+
+            interface.handle_update(_message_update(user_id=100, text="/approvals"))
+
+            text = api.sent_messages[0]["text"]
+            self.assertIn("Pending approvals:", text)
+            self.assertIn(f"#{approval_id}: files.write", text)
+            self.assertNotIn('"args"', text)
+            self.assertNotIn("{", text)
 
     def test_approve_callback_executes_stored_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

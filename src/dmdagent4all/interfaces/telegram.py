@@ -533,18 +533,226 @@ def _format_agent_response(response: AgentResponse) -> str:
         lines.append("Fix from the project terminal:")
         lines.append("  start model fast --pull")
         lines.append("  start telegram run")
-    hidden_data_shapes = (
-        {"planner"},
-        {"approval_id"},
-        {"approval_id", "tool"},
-        {"approval_id", "risk", "tool"},
-        {"path"},
-    )
     if response.data == {"missing_permissions": []}:
         return _fit_message(redact_text("\n".join(lines)))
-    if response.data and set(response.data.keys()) not in hidden_data_shapes:
-        lines.append(json.dumps(response.data, indent=2, sort_keys=True, ensure_ascii=False))
+    data_lines = _telegram_data_summary(response.data)
+    if data_lines:
+        lines.append("")
+        lines.extend(data_lines)
     return _fit_message(redact_text("\n".join(lines)))
+
+
+_TELEGRAM_SILENT_DATA_KEYS = {
+    "approval_id",
+    "control",
+    "debug",
+    "decision",
+    "emergency_stop",
+    "fallback",
+    "missing",
+    "missing_permissions",
+    "mode",
+    "planner",
+    "runtime_mode",
+    "source",
+    "target",
+    "trace",
+    "unsupported",
+}
+
+_TELEGRAM_LARGE_DATA_KEYS = {
+    "body",
+    "content",
+    "focus_files",
+    "markdown",
+    "source_markdown",
+    "stdout",
+    "stderr",
+    "text",
+}
+
+
+def _telegram_data_summary(data: dict[str, Any] | None) -> list[str]:
+    if not isinstance(data, dict) or not data:
+        return []
+    keys = set(data.keys())
+    if keys <= _TELEGRAM_SILENT_DATA_KEYS:
+        return []
+
+    lines: list[str] = []
+    approvals = data.get("approvals")
+    if isinstance(approvals, list):
+        return _telegram_approval_lines(approvals)
+
+    reminders = data.get("reminders")
+    if isinstance(reminders, list):
+        return _telegram_reminder_lines(reminders)
+
+    reminder = data.get("reminder")
+    if isinstance(reminder, dict):
+        lines.append(_telegram_reminder_line(reminder))
+
+    files = data.get("files")
+    if isinstance(files, list):
+        lines.extend(_telegram_file_lines(files, count=_as_int(data.get("count"))))
+
+    items = data.get("items")
+    if isinstance(items, list):
+        lines.extend(_telegram_item_lines(items))
+
+    path = _first_text(data, "relative_path", "path")
+    if path and not lines:
+        lines.append(f"Path: {path}")
+
+    workspace = data.get("current_workspace")
+    if isinstance(workspace, str) and workspace.strip():
+        lines.append(f"Workspace: {workspace.strip()}")
+
+    count = _as_int(data.get("count") or data.get("file_count") or data.get("extracted_count"))
+    if count is not None and not any(line.startswith(("Files:", "Items:", "Approvals:", "Reminders:")) for line in lines):
+        lines.append(f"Count: {count}")
+
+    tool = data.get("tool")
+    if isinstance(tool, str) and tool.strip() and not _line_mentions(lines, tool):
+        lines.insert(0, f"Tool: {tool.strip()}")
+
+    scalar_lines = _telegram_scalar_lines(data, used_keys=_handled_telegram_data_keys())
+    for line in scalar_lines:
+        if not _line_mentions(lines, line):
+            lines.append(line)
+        if len(lines) >= 10:
+            break
+    return lines[:10]
+
+
+def _handled_telegram_data_keys() -> set[str]:
+    return {
+        *_TELEGRAM_SILENT_DATA_KEYS,
+        *_TELEGRAM_LARGE_DATA_KEYS,
+        "approvals",
+        "current_workspace",
+        "extracted_count",
+        "file_count",
+        "files",
+        "items",
+        "path",
+        "relative_path",
+        "reminder",
+        "reminders",
+        "tool",
+    }
+
+
+def _telegram_approval_lines(approvals: list[Any]) -> list[str]:
+    if not approvals:
+        return []
+    lines = [f"Approvals: {len(approvals)} pending"]
+    for approval in approvals[:8]:
+        if not isinstance(approval, dict):
+            continue
+        approval_id = approval.get("id")
+        tool = str(approval.get("tool") or "tool")
+        risk = approval.get("risk")
+        status = str(approval.get("status") or "pending")
+        risk_text = f", risk {risk}" if risk is not None else ""
+        lines.append(f"- #{approval_id}: {tool} ({status}{risk_text})")
+    if len(approvals) > 8:
+        lines.append(f"...and {len(approvals) - 8} more.")
+    return lines
+
+
+def _telegram_file_lines(files: list[Any], *, count: int | None = None) -> list[str]:
+    total = count if count is not None else len(files)
+    lines = [f"Files: {total}"]
+    for file_item in files[:8]:
+        if isinstance(file_item, dict):
+            path = _first_text(file_item, "path", "relative_path", "name")
+            if not path:
+                continue
+            size = file_item.get("bytes") or file_item.get("size")
+            suffix = f" ({size} bytes)" if isinstance(size, int) else ""
+            lines.append(f"- {path}{suffix}")
+        elif isinstance(file_item, str):
+            lines.append(f"- {file_item}")
+    if len(files) > 8:
+        lines.append(f"...and {len(files) - 8} more.")
+    return lines
+
+
+def _telegram_item_lines(items: list[Any]) -> list[str]:
+    if not items:
+        return []
+    lines = [f"Items: {len(items)}"]
+    for item in items[:6]:
+        if isinstance(item, dict):
+            title = _first_text(item, "title", "name", "url")
+            if title:
+                lines.append(f"- {title}")
+        elif isinstance(item, str):
+            lines.append(f"- {item}")
+    if len(items) > 6:
+        lines.append(f"...and {len(items) - 6} more.")
+    return lines
+
+
+def _telegram_reminder_lines(reminders: list[Any]) -> list[str]:
+    if not reminders:
+        return []
+    lines = [f"Reminders: {len(reminders)}"]
+    for reminder in reminders[:8]:
+        if isinstance(reminder, dict):
+            lines.append(f"- {_telegram_reminder_line(reminder)}")
+    if len(reminders) > 8:
+        lines.append(f"...and {len(reminders) - 8} more.")
+    return lines
+
+
+def _telegram_reminder_line(reminder: dict[str, Any]) -> str:
+    reminder_id = reminder.get("id")
+    title = str(reminder.get("title") or "Reminder").strip() or "Reminder"
+    due_at = str(reminder.get("due_at") or "").strip()
+    status = str(reminder.get("status") or "").strip()
+    parts = [f"#{reminder_id}" if reminder_id is not None else "", title]
+    if due_at:
+        parts.append(f"due {due_at}")
+    if status:
+        parts.append(status)
+    return " - ".join(part for part in parts if part)
+
+
+def _telegram_scalar_lines(data: dict[str, Any], *, used_keys: set[str]) -> list[str]:
+    lines: list[str] = []
+    for key, value in data.items():
+        if key in used_keys:
+            continue
+        if isinstance(value, (dict, list, tuple, set)) or value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if len(text) > 180:
+            text = f"{text[:177].rstrip()}..."
+        lines.append(f"{_human_key(key)}: {text}")
+        if len(lines) >= 6:
+            break
+    return lines
+
+
+def _first_text(data: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _human_key(key: str) -> str:
+    return key.replace("_", " ").strip().capitalize()
+
+
+def _line_mentions(lines: list[str], text: str) -> bool:
+    needle = text.strip()
+    return bool(needle) and any(needle in line for line in lines)
 
 
 def _approval_keyboard(response: AgentResponse) -> dict[str, Any] | None:

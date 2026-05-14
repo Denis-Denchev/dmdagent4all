@@ -1495,6 +1495,34 @@ export function App() {
             : tourRect.top + tourRect.height + 18,
       }
     : { left: 24, top: 96 }
+  const telegramEnabled = Boolean(telegram?.enabled)
+  const telegramTokenLoaded = Boolean(telegram?.bot_token_available)
+  const telegramAllowedCount = telegram?.allowed_user_ids.length ?? 0
+  const telegramReady = Boolean(telegram?.ready)
+  const telegramPolling = Boolean(telegram?.polling)
+  const telegramState = telegram?.polling_error
+    ? 'error'
+    : telegramPolling
+      ? 'live'
+      : telegramReady
+        ? 'ready'
+        : telegramEnabled
+          ? 'setup'
+          : 'offline'
+  const telegramStateLabel = telegram?.polling_error
+    ? 'Error'
+    : telegramPolling
+      ? 'Live'
+      : telegramReady
+        ? 'Ready'
+        : telegramEnabled
+          ? 'Setup required'
+          : 'Offline'
+  const telegramMissingSteps = [
+    telegramEnabled ? '' : 'Enable Telegram interface',
+    telegramTokenLoaded ? '' : 'Load a BotFather token',
+    telegramAllowedCount > 0 ? '' : 'Allow at least one Telegram user ID',
+  ].filter(Boolean)
 
   return (
     <div className={[
@@ -1534,7 +1562,7 @@ export function App() {
           <span>Enabled tools</span>
           <strong>{enabledToolCount}</strong>
           <span>Mode</span>
-          <strong>{autonomyEnabled ? 'AUTONOMY' : 'SAFE'}</strong>
+          <strong>{autonomyEnabled ? 'DANGER' : 'SAFE'}</strong>
           <span>Pending approvals</span>
           <strong>{pendingCount}</strong>
         </div>
@@ -1555,7 +1583,7 @@ export function App() {
               title={autonomy?.toggle_locked_by_env ? 'LOCAL_DEV_AUTONOMY env var is forcing autonomy mode.' : 'Switch runtime orchestration mode'}
             >
               <span className="autonomy-dot" />
-              <span>{autonomyEnabled ? 'AUTONOMY MODE ACTIVE' : 'Standard Safe Mode'}</span>
+              <span>{autonomyEnabled ? 'Danger Mode' : 'Standard Safe Mode'}</span>
             </button>
             {emergency?.active ? (
               <button className="button" type="button" onClick={() => void emergencyReset()}>
@@ -1593,14 +1621,22 @@ export function App() {
                       <p>{message.text}</p>
                       {visibleTrace(traceFromResponse(message.response)).length > 0 ? (
                         <details className="reasoning-panel">
-                          <summary>Cognition trace ({visibleTrace(traceFromResponse(message.response)).length})</summary>
+                          <summary>
+                            <span className="reasoning-summary-main">
+                              <span className="reasoning-dot" />
+                              <span>Reasoning</span>
+                            </span>
+                            <span>{visibleTrace(traceFromResponse(message.response)).length} steps</span>
+                          </summary>
                           <div className="reasoning-events">
                             {visibleTrace(traceFromResponse(message.response)).map((event, index) => (
                               <div className="reasoning-event" key={`${message.id}-trace-${index}`}>
                                 <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
-                                <strong>{event.title}</strong>
+                                <span className="reasoning-event-copy">
+                                  <strong>{event.title}</strong>
+                                  {event.detail ? <small>{event.detail}</small> : null}
+                                </span>
                                 {event.tool ? <code>{event.tool}</code> : null}
-                                {event.detail ? <small>{event.detail}</small> : null}
                               </div>
                             ))}
                           </div>
@@ -1628,16 +1664,21 @@ export function App() {
                     <div className="message-body">
                       <div className="reasoning-panel reasoning-panel--live">
                         <div className="reasoning-live-header">
-                          <strong>{latestTraceTitle(activeTrace)}</strong>
-                          <span>{visibleTrace(activeTrace).length} events</span>
+                          <span className="reasoning-summary-main">
+                            <span className="reasoning-dot reasoning-dot--live" />
+                            <strong>{latestTraceTitle(activeTrace)}</strong>
+                          </span>
+                          <span>{visibleTrace(activeTrace).length} steps</span>
                         </div>
                         <div className="reasoning-events">
                           {visibleTrace(activeTrace).slice(-8).map((event, index) => (
                             <div className="reasoning-event" key={`active-trace-${index}-${event.title}`}>
                               <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
-                              <strong>{event.title}</strong>
+                              <span className="reasoning-event-copy">
+                                <strong>{event.title}</strong>
+                                {event.detail ? <small>{event.detail}</small> : null}
+                              </span>
                               {event.tool ? <code>{event.tool}</code> : null}
-                              {event.detail ? <small>{event.detail}</small> : null}
                             </div>
                           ))}
                         </div>
@@ -1878,55 +1919,121 @@ export function App() {
         {activeView === 'config' ? renderConfigRoutes() : null}
         {activeView === 'telegram' ? (
           <section className="telegram-layout">
-            <div className="panel settings-panel">
-              <div className="section-heading">
-                <strong>Telegram Remote Access</strong>
-                <span>{telegram?.polling ? 'polling allowlisted users' : 'token, enablement, and allowed user required'}</span>
+            <div className={`telegram-overview telegram-overview--${telegramState}`}>
+              <div className="telegram-overview-main">
+                <p className="eyebrow">Remote channel</p>
+                <div className="telegram-title-row">
+                  <h2>Telegram Remote Access</h2>
+                  <span className={`telegram-state telegram-state--${telegramState}`}>{telegramStateLabel}</span>
+                </div>
+                <p>{telegramPolling ? 'Polling allowlisted users.' : 'Secure Telegram control path for approved local actions.'}</p>
               </div>
-              <div className="status-grid">
-                <span>Token env</span><strong>{telegram?.bot_token_env ?? '-'}</strong>
-                <span>Token loaded</span><strong>{telegram?.bot_token_available ? 'yes' : 'no'}</strong>
-                <span>Allowed users</span><strong>{telegram?.allowed_user_ids.length ?? 0}</strong>
-                <span>Polling</span><strong>{telegram?.polling ? 'running' : 'stopped'}</strong>
-                {telegram?.polling_error ? <><span>Error</span><strong>{telegram.polling_error}</strong></> : null}
-              </div>
-              <div className="row-actions">
-                <button className={telegram?.enabled ? 'button button-danger' : 'button'} type="button" onClick={() => void runAction(() => (telegram?.enabled ? api.disableTelegram() : api.enableTelegram()), telegram?.enabled ? 'Telegram disabled.' : 'Telegram enabled.')}>
-                  {telegram?.enabled ? 'Disable' : 'Enable'}
+              <div className="telegram-overview-actions">
+                <button
+                  className={telegramEnabled ? 'button button-danger' : 'button'}
+                  type="button"
+                  onClick={() => void runAction(() => (telegramEnabled ? api.disableTelegram() : api.enableTelegram()), telegramEnabled ? 'Telegram disabled.' : 'Telegram enabled.')}
+                  disabled={busy}
+                >
+                  {telegramEnabled ? 'Disable' : 'Enable'}
                 </button>
-                <button className="button button-secondary" type="button" onClick={() => void toggleTelegramPolling()} disabled={!telegram?.ready}>
-                  {telegram?.polling ? 'Stop Polling' : 'Start Polling'}
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => void toggleTelegramPolling()}
+                  disabled={busy || !telegramReady}
+                >
+                  {telegramPolling ? 'Stop Polling' : 'Start Polling'}
                 </button>
               </div>
             </div>
-            <div className="two-column">
-              <div className="panel command-panel">
-                <div className="section-heading"><strong>Token</strong><span>Stored in process memory</span></div>
+
+            <div className="telegram-status-grid">
+              <div className={telegramEnabled ? 'telegram-status-card telegram-status-card--ok' : 'telegram-status-card'}>
+                <span>Interface</span>
+                <strong>{telegramEnabled ? 'Enabled' : 'Disabled'}</strong>
+              </div>
+              <div className={telegramTokenLoaded ? 'telegram-status-card telegram-status-card--ok' : 'telegram-status-card telegram-status-card--warn'}>
+                <span>Token</span>
+                <strong>{telegramTokenLoaded ? 'Loaded' : 'Missing'}</strong>
+              </div>
+              <div className={telegramAllowedCount > 0 ? 'telegram-status-card telegram-status-card--ok' : 'telegram-status-card telegram-status-card--warn'}>
+                <span>Allowed Users</span>
+                <strong>{telegramAllowedCount}</strong>
+              </div>
+              <div className={telegramPolling ? 'telegram-status-card telegram-status-card--ok' : 'telegram-status-card'}>
+                <span>Polling</span>
+                <strong>{telegramPolling ? 'Running' : 'Stopped'}</strong>
+              </div>
+            </div>
+
+            {telegram?.polling_error ? (
+              <div className="telegram-error">
+                <strong>Polling error</strong>
+                <span>{telegram.polling_error}</span>
+              </div>
+            ) : null}
+
+            {telegramMissingSteps.length ? (
+              <div className="telegram-checklist">
+                {telegramMissingSteps.map((step, index) => (
+                  <span key={step}><b>{index + 1}</b>{step}</span>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="telegram-panels">
+              <section className="panel telegram-panel">
+                <div className="section-heading">
+                  <strong>Bot Token</strong>
+                  <span>{telegram?.bot_token_env ?? 'DMDAGENT_TELEGRAM_BOT_TOKEN'}</span>
+                </div>
                 <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void saveTelegramTokenEnv() }}>
                   <input value={telegramTokenEnv} onChange={(event) => setTelegramTokenEnv(event.target.value)} placeholder="DMDAGENT_TELEGRAM_BOT_TOKEN" />
-                  <button className="button button-secondary" type="submit">Save Env</button>
+                  <button className="button button-secondary" type="submit" disabled={busy}>Save Env</button>
                 </form>
                 <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void loadTelegramToken() }}>
                   <input type="password" value={telegramToken} onChange={(event) => setTelegramToken(event.target.value)} placeholder="BotFather token" />
-                  <button className="button" type="submit">Load Token</button>
+                  <button className="button" type="submit" disabled={busy || !telegramToken.trim()}>Load Token</button>
                 </form>
-              </div>
-              <div className="panel command-panel">
-                <div className="section-heading"><strong>Allowed Users</strong><span>Use /id in Telegram to discover the ID</span></div>
+              </section>
+
+              <section className="panel telegram-panel">
+                <div className="section-heading">
+                  <strong>Allowed Users</strong>
+                  <span>{telegramAllowedCount} active</span>
+                </div>
                 <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void allowTelegramUser() }}>
                   <input value={telegramUserId} onChange={(event) => setTelegramUserId(event.target.value)} placeholder="123456789" inputMode="numeric" />
-                  <button className="button" type="submit">Allow User</button>
+                  <button className="button" type="submit" disabled={busy || !telegramUserId.trim()}>Allow User</button>
                 </form>
-                <div className="table-list table-list--compact">
-                  {telegram?.allowed_user_ids.length ? null : <p className="empty">No allowed Telegram users.</p>}
+                <div className="telegram-user-list">
+                  {telegramAllowedCount ? null : <p className="empty">No allowed Telegram users.</p>}
                   {telegram?.allowed_user_ids.map((userId) => (
-                    <article className="command-row" key={userId}>
-                      <code>{userId}</code>
-                      <button className="button button-danger" type="button" onClick={() => void runAction(() => api.removeTelegramUser(userId), `Removed Telegram user: ${userId}`)}>Remove</button>
+                    <article className="telegram-user-row" key={userId}>
+                      <span>
+                        <strong>{userId}</strong>
+                        <small>Allowlisted user</small>
+                      </span>
+                      <button className="button button-danger" type="button" disabled={busy} onClick={() => void runAction(() => api.removeTelegramUser(userId), `Removed Telegram user: ${userId}`)}>Remove</button>
                     </article>
                   ))}
                 </div>
-              </div>
+              </section>
+
+              <section className="panel telegram-panel telegram-panel--commands">
+                <div className="section-heading">
+                  <strong>Bot Commands</strong>
+                  <span>Production commands</span>
+                </div>
+                <div className="telegram-command-list">
+                  <div><code>/id</code><span>Return your Telegram user ID</span></div>
+                  <div><code>/help</code><span>Show command surface</span></div>
+                  <div><code>/approvals</code><span>List pending approvals</span></div>
+                  <div><code>/approve 7</code><span>Approve a queued action</span></div>
+                  <div><code>/deny 7</code><span>Deny a queued action</span></div>
+                </div>
+              </section>
             </div>
           </section>
         ) : null}
