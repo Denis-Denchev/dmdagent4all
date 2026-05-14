@@ -2706,6 +2706,84 @@ and this is the knowlage
             self.assertEqual(response.status, "ok")
             self.assertEqual(response.message, "You like green tea.")
 
+    def test_multi_memory_read_plan_is_synthesized_into_final_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = MemoryManager(root / "memory")
+            manager.write(
+                "business/profile.md",
+                "Denis runs an AI automation business.",
+                metadata={"type": "business"},
+            )
+            manager.write(
+                "business/services.md",
+                "Services: local AI agents, automation, Proxmox homelab operations.",
+                metadata={"type": "business"},
+            )
+            core = _build_core(
+                root,
+                AnsweringPlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="memory.read",
+                                args={"path": "business/profile.md"},
+                                reason="Read business profile.",
+                            ),
+                            ToolRequest(
+                                tool="memory.read",
+                                args={"path": "business/services.md"},
+                                reason="Read business services.",
+                            ),
+                        )
+                    ),
+                    "Start with a focused AI automation offer and package it for small businesses.",
+                ),
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Can you help me with a business plan?")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("focused AI automation offer", response.message)
+            self.assertNotIn("Tool executed", response.message)
+            self.assertNotIn("Denis runs", response.message)
+            self.assertEqual(response.data, {"planner": "llm"})
+
+    def test_multi_memory_read_synthesis_failure_does_not_dump_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = MemoryManager(root / "memory")
+            manager.write(
+                "business/private.md",
+                "Private business context that should not be dumped raw.",
+                metadata={"type": "business"},
+            )
+            core = _build_core(
+                root,
+                AnsweringPlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="memory.read",
+                                args={"path": "business/private.md"},
+                                reason="Read business context.",
+                            ),
+                        )
+                    ),
+                    "",
+                ),
+                config={"llm": {"provider": "ollama", "response_language": "auto"}},
+            )
+
+            response = core.handle_text("Give me business advice from my memory.")
+
+            self.assertEqual(response.status, "ok")
+            self.assertIn("business/private.md", response.message)
+            self.assertNotIn("Tool executed", response.message)
+            self.assertNotIn("Private business context", response.message)
+            self.assertNotIn("content", json.dumps(response.data or {}))
+
     def test_memory_read_synthesis_failure_does_not_dump_file_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

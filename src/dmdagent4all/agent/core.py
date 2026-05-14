@@ -69,6 +69,18 @@ LOCAL_DEV_AUTO_APPROVED_TOOLS = frozenset(
     }
 )
 
+CONTEXT_GATHERING_SYNTHESIS_TOOLS = frozenset(
+    {
+        "developer.context",
+        "files.list",
+        "files.read",
+        "memory.list",
+        "memory.read",
+        "system.list_enabled_tools",
+        "workspace.status",
+    }
+)
+
 
 @dataclass(frozen=True)
 class AgentResponse:
@@ -836,12 +848,20 @@ class AgentCore:
                     },
                 )
         if response.status != "ok" or not continuations:
-            return self._shape_tool_response(user_message, first_request, response)
+            shaped = self._shape_tool_response(user_message, first_request, response)
+            if self._should_synthesize_tool_response(user_message, first_request, response):
+                return self._synthesize_tool_response(
+                    user_message,
+                    response,
+                    conversation_context=conversation_context,
+                )
+            return shaped
         return self._execute_continuation_steps(
             user_message,
             first_request=first_request,
             first_response=response,
             steps=tuple(continuations),
+            conversation_context=conversation_context,
         )
 
     def _handle_memory_search_decision(
@@ -1070,8 +1090,10 @@ class AgentCore:
         first_response: AgentResponse,
         steps: tuple[ToolRequest | UnsupportedAction, ...],
         initial_chain_state: dict[str, Any] | None = None,
+        conversation_context: str = "",
     ) -> AgentResponse:
         messages: list[str] = []
+        executed_steps: list[ToolRequest] = [first_request]
         data: dict[str, Any] = {
             "tool": "multi_step",
             "first_tool": first_request.tool,
@@ -1081,6 +1103,14 @@ class AgentCore:
         shaped_first = self._shape_tool_response(user_message, first_request, first_response)
         if shaped_first.message:
             messages.append(shaped_first.message)
+        data["steps"].append(
+            {
+                "tool": first_request.tool,
+                "args": _redact_step_args_for_response(first_request.args),
+                "status": shaped_first.status,
+                "data": shaped_first.data or {},
+            }
+        )
         previous_response = first_response
         chain_state: dict[str, Any] = dict(initial_chain_state or {})
         _update_chain_state(chain_state, first_request, first_response)
@@ -1120,6 +1150,7 @@ class AgentCore:
             response = self.handle_tool_request(_request_with_original_message(runnable_step, user_message))
             shaped = self._shape_tool_response(user_message, runnable_step, response)
             messages.append(shaped.message)
+            executed_steps.append(runnable_step)
             data["steps"].append(
                 {
                     "tool": runnable_step.tool,
@@ -1153,11 +1184,22 @@ class AgentCore:
                 )
             previous_response = response
             _update_chain_state(chain_state, runnable_step, response)
-        return AgentResponse(
+        final_response = AgentResponse(
             status="ok",
             message="\n\n".join(message for message in messages if message),
             data=data,
         )
+        if self._should_synthesize_tool_plan_response(
+            user_message,
+            tuple(executed_steps),
+            final_response,
+        ):
+            return self._synthesize_tool_response(
+                user_message,
+                final_response,
+                conversation_context=conversation_context,
+            )
+        return final_response
 
     def _shape_tool_response(
         self,
@@ -1170,6 +1212,10 @@ class AgentCore:
         data = response.data or {}
         if request.tool == "terminal.run":
             return _terminal_user_response(user_message, request, data)
+        if request.tool == "memory.list":
+            return _memory_list_user_response(user_message, data)
+        if request.tool == "memory.read":
+            return _memory_read_user_response(user_message, data)
         if request.tool == "files.list":
             path = str(data.get("path") or request.args.get("path") or "")
             count = int(data.get("count") or 0)
@@ -1333,6 +1379,25 @@ class AgentCore:
             )
         return None
 
+    def _should_synthesize_tool_plan_response(
+        self,
+        user_message: str,
+        requests: tuple[ToolRequest, ...],
+        response: AgentResponse,
+    ) -> bool:
+        if self.planner is None or not hasattr(self.planner, "answer") or response.status != "ok":
+            return False
+        if not requests:
+            return False
+        if not all(request.tool in CONTEXT_GATHERING_SYNTHESIS_TOOLS for request in requests):
+            return False
+        if not any(request.tool in {"memory.list", "memory.read", "developer.context"} for request in requests):
+            return False
+        normalized = _normalize_for_match(user_message)
+        if _explicit_raw_memory_request(normalized):
+            return False
+        return True
+
     def _should_synthesize_tool_response(
         self,
         user_message: str,
@@ -1346,25 +1411,7 @@ class AgentCore:
         if request.tool not in {"memory.list", "memory.read"}:
             return False
         normalized = _normalize_for_match(user_message)
-        explicit_file_request = any(
-            phrase in normalized
-            for phrase in {
-                "list memory",
-                "show memory",
-                "show memory files",
-                "memory files",
-                "local memory files",
-                "show raw memory",
-                "print the memory file",
-                "raw memory file",
-                "покажи файловете",
-                "списък с памет",
-                "покажи суровия memory файл",
-                "суровия memory файл",
-                "принтирай memory файла",
-            }
-        )
-        return not explicit_file_request
+        return not _explicit_raw_memory_request(normalized)
 
     def _synthesize_tool_response(
         self,
@@ -5501,6 +5548,49 @@ def _tool_success_message(request: ToolRequest) -> str:
 def _safe_tool_synthesis_fallback(response: AgentResponse, user_message: str) -> AgentResponse:
     data = response.data or {}
     bulgarian = _looks_bulgarian(user_message)
+    if isinstance(data, dict) and data.get("tool") == "multi_step":
+        steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+        paths: list[str] = []
+        tools: list[str] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            tool = str(step.get("tool") or "").strip()
+            if tool:
+                tools.append(tool)
+            step_data = step.get("data")
+            if not isinstance(step_data, dict):
+                continue
+            path = str(step_data.get("path") or step_data.get("relative_path") or "").strip()
+            if path:
+                paths.append(path)
+        if paths:
+            preview = ", ".join(paths[:4])
+            if len(paths) > 4:
+                preview = f"{preview}, +{len(paths) - 4} more"
+            message = (
+                f"Прочетох {len(paths)} context файла ({preview}), но не успях да ги синтезирам в кратък отговор. "
+                "Няма да изливам суровото memory съдържание в чата."
+                if bulgarian
+                else f"I read {len(paths)} context file(s) ({preview}), but could not synthesize a concise answer. "
+                "I will not dump raw memory content into chat."
+            )
+        else:
+            message = (
+                "Изпълних context стъпките, но не успях да ги синтезирам в кратък отговор."
+                if bulgarian
+                else "I ran the context steps, but could not synthesize a concise answer."
+            )
+        return AgentResponse(
+            status=response.status,
+            message=message,
+            data={
+                "planner": "deterministic",
+                "source": "multi_step_context",
+                "tools": tools,
+                "paths": paths,
+            },
+        )
     path = data.get("path") if isinstance(data, dict) else None
     if isinstance(path, str) and path:
         if bulgarian:
@@ -5532,6 +5622,63 @@ def _safe_tool_synthesis_fallback(response: AgentResponse, user_message: str) ->
             data={"planner": "deterministic", "source": "memory.list", "file_count": count},
         )
     return response
+
+
+def _explicit_raw_memory_request(normalized_text: str) -> bool:
+    return any(
+        phrase in normalized_text
+        for phrase in {
+            "list memory",
+            "show memory",
+            "show memory files",
+            "memory files",
+            "local memory files",
+            "show raw memory",
+            "print the memory file",
+            "raw memory file",
+            "покажи файловете",
+            "списък с памет",
+            "покажи суровия memory файл",
+            "суровия memory файл",
+            "принтирай memory файла",
+        }
+    )
+
+
+def _memory_list_user_response(user_message: str, data: dict[str, Any]) -> AgentResponse:
+    files = data.get("files") if isinstance(data.get("files"), list) else []
+    lines = [str(path) for path in files]
+    if not lines:
+        message = (
+            "Няма записани memory файлове."
+            if _looks_bulgarian(user_message)
+            else "No memory files are saved."
+        )
+    else:
+        intro = (
+            f"Memory файлове ({len(lines)}):"
+            if _looks_bulgarian(user_message)
+            else f"Memory files ({len(lines)}):"
+        )
+        message = "\n".join([intro, *[f"- {path}" for path in lines]])
+    return AgentResponse(
+        status="ok",
+        message=message,
+        data={"tool": "memory.list", "files": files, "count": len(files)},
+    )
+
+
+def _memory_read_user_response(user_message: str, data: dict[str, Any]) -> AgentResponse:
+    path = str(data.get("path") or "")
+    content = str(data.get("content") or "")
+    truncated = bool(data.get("truncated", False))
+    suffix = "\n\n[truncated]" if truncated else ""
+    prefix = f"Прочетох memory файла `{path}`:" if _looks_bulgarian(user_message) else f"Read memory file `{path}`:"
+    return AgentResponse(
+        status="ok",
+        message=f"{prefix}\n\n{content}{suffix}".strip(),
+        data={"tool": "memory.read", "path": path, "truncated": truncated},
+    )
 
 
 def _browser_scrape_user_response(user_message: str, data: dict[str, Any]) -> AgentResponse:
