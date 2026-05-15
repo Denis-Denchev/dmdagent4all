@@ -3075,6 +3075,97 @@ and this is the knowlage
             draft = json.loads(draft_path.read_text(encoding="utf-8"))
             self.assertEqual(draft["body"], "Проекта работи и е онлайн.")
 
+    def test_planner_does_not_route_outlook_recipient_domain_to_outlook_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            enabled_tools = frozenset(
+                {
+                    "gmail.create_draft",
+                    "gmail.send_draft",
+                    "outlook.create_draft",
+                    "outlook.send_draft",
+                }
+            )
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="outlook.create_draft",
+                                args={
+                                    "to": "denis.denchev@outlook.com",
+                                    "subject": "Агентът може да пише",
+                                    "body": "Агента вече може да пише и съобщения.",
+                                },
+                                reason="Planner incorrectly selected Outlook from recipient domain.",
+                            ),
+                            ToolRequest(
+                                tool="outlook.send_draft",
+                                args={"draft_id_from_previous_step": True},
+                                reason="Send after approval.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {
+                        "gmail": {"enabled": True},
+                        "outlook": {"enabled": True},
+                        "max_body_chars": 20000,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=enabled_tools,
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send", "outlook.compose", "outlook.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text("сега прати същия имейл и на denis.denchev@outlook.com")
+
+            approval = audit.list_approvals(status="pending")[0]
+            draft_id = str(approval["args"]["draft_id"])
+            draft_path = root / "email-drafts" / "gmail" / f"{draft_id}.json"
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(approval["tool"], "gmail.send_draft")
+            self.assertTrue(draft_path.exists())
+            self.assertFalse((root / "email-drafts" / "outlook" / f"{draft_id}.json").exists())
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+            self.assertEqual(draft["to"], ["denis.denchev@outlook.com"])
+
+    def test_latest_email_who_question_routes_before_planner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "outlook": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.read_thread", "outlook.read_thread"}),
+                    granted_permissions=frozenset({"gmail.readonly", "outlook.readonly"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            response = core.handle_text("пробвай да ми кажеш кой е последно получения имейл към мен")
+
+            self.assertEqual(response.status, "not_configured")
+            self.assertIn("Gmail", response.message)
+            self.assertNotIn("Outlook", response.message)
+
     def test_destructive_sql_is_blocked_before_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -346,6 +346,18 @@ class AgentCore:
                     message=f"Invalid tool request JSON: {exc}",
                 )
 
+        email_action = _email_action_from_text(stripped, self.runtime_context.config)
+        if isinstance(email_action, EmailSendIntent):
+            return self._handle_email_send_intent(stripped, email_action)
+        if isinstance(email_action, ToolRequest):
+            return self._run_user_tool_request(
+                stripped,
+                email_action,
+                conversation_context=conversation_context,
+            )
+        if isinstance(email_action, AgentResponse) and email_action.status == "not_configured":
+            return email_action
+
         if self.planner is not None:
             return self._handle_with_planner(
                 stripped,
@@ -753,7 +765,11 @@ class AgentCore:
         conversation_context: str,
     ) -> AgentResponse:
         if plan.tool_request is not None:
-            request = _normalize_planner_tool_request(plan.tool_request, stripped)
+            request = _normalize_planner_tool_request(
+                plan.tool_request,
+                stripped,
+                self.runtime_context.config,
+            )
             log_local_dev_autonomy(
                 "planner_selected_tool",
                 config=self.runtime_context.config,
@@ -812,7 +828,7 @@ class AgentCore:
                 data={"planner": "llm", "decision": "empty_tool_plan"},
             )
         normalized_requests = tuple(
-            _normalize_planner_tool_request(request, user_message)
+            _normalize_planner_tool_request(request, user_message, self.runtime_context.config)
             for request in requests
         )
         log_local_dev_autonomy(
@@ -2105,7 +2121,22 @@ def _looks_email_send_request(normalized: str) -> bool:
 
 
 def _looks_email_read_latest_request(normalized: str) -> bool:
-    has_read = any(marker in normalized for marker in {"read", "open", "прочети", "прочет", "отвори", "покажи"})
+    has_read = any(
+        marker in normalized
+        for marker in {
+            "read",
+            "open",
+            "tell",
+            "show",
+            "прочети",
+            "прочет",
+            "отвори",
+            "покажи",
+            "кажи",
+            "кажеш",
+            "кой е",
+        }
+    )
     has_latest = any(marker in normalized for marker in {"latest", "last", "newest", "послед", "нов", "получен"})
     return has_read and has_latest
 
@@ -5069,8 +5100,15 @@ def _enabled_tools_from_config(
     return frozenset(enabled)
 
 
-def _normalize_planner_tool_request(request: ToolRequest, user_message: str) -> ToolRequest:
+def _normalize_planner_tool_request(
+    request: ToolRequest,
+    user_message: str,
+    config: dict[str, Any] | None = None,
+) -> ToolRequest:
     args = dict(request.args)
+    tool = request.tool
+    if config is not None:
+        tool = _normalize_planner_email_tool_provider(tool, user_message, config)
     if request.tool in {"browser.open", "browser.scrape_markdown", "browser.extract_text"}:
         url = args.get("url")
         if isinstance(url, str):
@@ -5080,7 +5118,21 @@ def _normalize_planner_tool_request(request: ToolRequest, user_message: str) -> 
             args.setdefault("format", "clean_markdown")
     if request.tool == "files.write" and args.get("content_from_previous_step") is True:
         args.setdefault("overwrite", True)
-    return ToolRequest(tool=request.tool, args=args, reason=request.reason)
+    return ToolRequest(tool=tool, args=args, reason=request.reason)
+
+
+def _normalize_planner_email_tool_provider(
+    tool: str,
+    user_message: str,
+    config: dict[str, Any],
+) -> str:
+    if not tool.startswith(("gmail.", "outlook.")) or "." not in tool:
+        return tool
+    action = tool.split(".", 1)[1]
+    provider = _email_provider_from_text(user_message, config)
+    if provider is None:
+        return tool
+    return f"{provider}.{action}"
 
 
 def _resolve_previous_step_content(
