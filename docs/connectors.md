@@ -16,6 +16,9 @@ the same variables through the shell/Docker environment.
 
 Loading credentials from the dashboard also enables the selected provider and
 its email tools. Sending still requires approval before SMTP delivery.
+Use **Test Gmail Connection** or **Test Outlook Connection** after loading
+credentials. The test logs into IMAP, opens the configured mailbox, then logs
+into SMTP without sending a message.
 
 Gmail env vars:
 

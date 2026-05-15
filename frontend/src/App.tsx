@@ -832,6 +832,25 @@ export function App() {
     }
   }
 
+  async function testEmailConnection(provider: 'gmail' | 'outlook') {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const response = await api.testEmailConnection(provider)
+      const data = dataObject(response.data)
+      const imap = dataObject(data.imap)
+      const smtp = dataObject(data.smtp)
+      const imapStatus = imap.ok === true ? 'IMAP ok' : 'IMAP failed'
+      const smtpStatus = smtp.ok === true ? 'SMTP ok' : 'SMTP failed'
+      setNotice(`${response.message} ${imapStatus}; ${smtpStatus}.`)
+      await refreshAll()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Email connection test failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function loadGmailOAuthClientSecret() {
     const clientSecret = gmailOAuthClientSecret.trim()
     if (!clientSecret) {
@@ -1248,6 +1267,7 @@ export function App() {
                     <div className="row-actions">
                       <button className="button button-secondary" type="button" onClick={() => void loadGmailOAuthClientSecret()} disabled={busy || !gmailOAuthClientSecret.trim()}>Load Client Secret</button>
                       <button className="button" type="button" onClick={() => void startGmailOAuth()} disabled={busy}>Start Google OAuth</button>
+                      <button className="button button-secondary" type="button" onClick={() => void testEmailConnection('gmail')} disabled={busy}>Test Gmail Connection</button>
                       <button className="button button-danger" type="button" onClick={() => void disconnectGmailOAuth()} disabled={busy || !configuration?.email.gmail.oauth_refresh_token_loaded}>Disconnect OAuth</button>
                     </div>
                   </>
@@ -1264,6 +1284,7 @@ export function App() {
                         <input value={gmailCredentials.fromAddress} onChange={(event) => setGmailCredentials({ ...gmailCredentials, fromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
                       </label>
                       <button className="button" type="button" onClick={() => void loadEmailCredentials('gmail')} disabled={busy}>Load Gmail Credentials</button>
+                      <button className="button button-secondary" type="button" onClick={() => void testEmailConnection('gmail')} disabled={busy}>Test Gmail Connection</button>
                     </div>
                     <span className="field-note">Use a Google app password. The secret is loaded into the running API process and is not written to config.yaml.</span>
                   </>
@@ -1296,6 +1317,7 @@ export function App() {
                     <input value={outlookCredentials.fromAddress} onChange={(event) => setOutlookCredentials({ ...outlookCredentials, fromAddress: event.target.value })} placeholder="optional" autoComplete="email" />
                   </label>
                   <button className="button" type="button" onClick={() => void loadEmailCredentials('outlook')} disabled={busy}>Load Outlook Credentials</button>
+                  <button className="button button-secondary" type="button" onClick={() => void testEmailConnection('outlook')} disabled={busy}>Test Outlook Connection</button>
                 </div>
                 <span className="field-note">Microsoft may require SMTP AUTH or an app password. The secret is kept only in the running API process.</span>
                 <details className="advanced-mail-settings">

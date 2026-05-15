@@ -63,6 +63,7 @@ from dmdagent4all.sandbox import TerminalPolicy, active_terminal_processes, emer
 from dmdagent4all.agent.runtime_state import invalidate_runtime_state_cache
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdagent4all.tools.email_connector import test_email_connection
 from dmdagent4all.tools.storage import downloads_root_from_config
 from dmdagent4all.tools.reminders import (
     due_reminders,
@@ -241,6 +242,10 @@ class EmailCredentialsRequest(BaseModel):
     username: str
     app_password: str
     from_address: str | None = None
+
+
+class EmailTestRequest(BaseModel):
+    provider: str
 
 
 class GmailOAuthStartRequest(BaseModel):
@@ -585,6 +590,25 @@ def create_app() -> FastAPI:
 
         config = update_config(update, paths.config)
         return _load_email_credentials(config, request)
+
+    @app.post("/v1/email/test")
+    def email_connection_test(request: EmailTestRequest) -> dict[str, Any]:
+        provider = request.provider.strip().lower()
+        if provider not in EMAIL_PROVIDER_DEFAULTS:
+            raise HTTPException(status_code=400, detail="provider must be gmail or outlook.")
+        config = load_config(paths.config)
+        context = ToolRuntimeContext(
+            memory_root=paths.memory,
+            workspace_root=paths.workspace,
+            config=config,
+            config_path=paths.config,
+        )
+        result = test_email_connection(provider, context)
+        return {
+            "status": "ok" if result.get("status") == "ok" else "error",
+            "message": str(result.get("message") or "Email connection test finished."),
+            "data": result,
+        }
 
     @app.post("/v1/email/oauth/google/client-secret")
     def gmail_oauth_client_secret(request: GmailOAuthSecretRequest) -> dict[str, Any]:

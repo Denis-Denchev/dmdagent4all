@@ -98,6 +98,44 @@ def make_email_handler(provider: str, action: str) -> Handler:
     return handler
 
 
+def test_email_connection(provider: str, context: ToolRuntimeContext) -> dict[str, Any]:
+    if provider not in PROVIDER_DEFAULTS:
+        raise ValueError("provider must be gmail or outlook.")
+    try:
+        settings = _settings(provider, context)
+    except Exception as exc:
+        return {
+            "provider": provider,
+            "status": "authentication_failed",
+            "configured": False,
+            "imap": {"ok": False, "detail": "Not tested because credentials could not be loaded."},
+            "smtp": {"ok": False, "detail": "Not tested because credentials could not be loaded."},
+            "message": _connection_error_message(provider, str(exc)),
+            "detail": redact_text(str(exc)),
+        }
+    if settings is None:
+        return _not_configured(provider, context)
+
+    imap_result = _test_imap(settings)
+    smtp_result = _test_smtp(settings)
+    ok = bool(imap_result["ok"] and smtp_result["ok"])
+    failed_detail = _first_failed_detail(imap_result, smtp_result)
+    return {
+        "provider": provider,
+        "status": "ok" if ok else "connection_failed",
+        "configured": True,
+        "auth_method": settings.auth_method,
+        "mailbox": settings.mailbox,
+        "imap": imap_result,
+        "smtp": smtp_result,
+        "message": (
+            f"{provider.title()} IMAP and SMTP are working."
+            if ok
+            else _connection_error_message(provider, failed_detail)
+        ),
+    }
+
+
 def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | None:
     defaults = PROVIDER_DEFAULTS[provider]
     email_config = context.config.get("email", {})
@@ -176,8 +214,10 @@ def _not_configured(provider: str, context: ToolRuntimeContext) -> dict[str, Any
             "status": "connector_not_configured",
             "connector": provider,
             "message": (
-                "Gmail OAuth2 is not fully configured. Add the Google client ID/client secret, "
-                "complete the authorization flow, and make sure a refresh token is stored."
+                "Gmail OAuth2 is not fully configured. For the simplest setup, switch Gmail "
+                "Authentication to App password, then load your Gmail address and Google app password. "
+                "If you keep OAuth2, add the Google client ID/client secret, complete authorization, "
+                "and make sure a refresh token is stored."
             ),
             "required": ["oauth_client_id", "oauth_client_secret", "oauth_refresh_token", "oauth_email"],
         }
@@ -427,6 +467,81 @@ def _smtp_login(client: smtplib.SMTP, settings: EmailSettings) -> None:
 
 def _xoauth2_string(settings: EmailSettings) -> bytes:
     return f"user={settings.username}\x01auth=Bearer {settings.oauth_access_token}\x01\x01".encode("utf-8")
+
+
+def _test_imap(settings: EmailSettings) -> dict[str, Any]:
+    try:
+        with _imap(settings) as client:
+            _select(client, settings.mailbox)
+    except imaplib.IMAP4.error as exc:
+        return {"ok": False, "stage": "imap_login_or_select", "detail": _email_error_detail(exc)}
+    except OSError as exc:
+        return {"ok": False, "stage": "imap_connect", "detail": _email_error_detail(exc)}
+    except Exception as exc:
+        return {"ok": False, "stage": "imap", "detail": _email_error_detail(exc)}
+    return {
+        "ok": True,
+        "stage": "imap_login_and_select",
+        "detail": f"Connected to {settings.imap_host}:{settings.imap_port} and opened {settings.mailbox}.",
+    }
+
+
+def _test_smtp(settings: EmailSettings) -> dict[str, Any]:
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as client:
+            client.starttls()
+            _smtp_login(client, settings)
+    except smtplib.SMTPAuthenticationError as exc:
+        return {
+            "ok": False,
+            "stage": "smtp_login",
+            "detail": _email_error_detail(exc),
+            "smtp_code": getattr(exc, "smtp_code", None),
+        }
+    except smtplib.SMTPException as exc:
+        return {"ok": False, "stage": "smtp", "detail": _email_error_detail(exc)}
+    except OSError as exc:
+        return {"ok": False, "stage": "smtp_connect", "detail": _email_error_detail(exc)}
+    except Exception as exc:
+        return {"ok": False, "stage": "smtp", "detail": _email_error_detail(exc)}
+    return {
+        "ok": True,
+        "stage": "smtp_login",
+        "detail": f"Connected to {settings.smtp_host}:{settings.smtp_port} and authenticated.",
+    }
+
+
+def _email_error_detail(exc: BaseException) -> str:
+    return redact_text(str(exc) or exc.__class__.__name__)
+
+
+def _first_failed_detail(*results: dict[str, Any]) -> str:
+    for result in results:
+        if result.get("ok") is False:
+            return str(result.get("detail") or "")
+    return ""
+
+
+def _connection_error_message(provider: str, detail: str) -> str:
+    normalized = detail.casefold()
+    if provider == "gmail":
+        if any(marker in normalized for marker in {"invalid credentials", "application-specific password", "534", "535"}):
+            return (
+                "Gmail authentication failed. Use a Google app password, not your normal Google password, "
+                "and make sure IMAP is enabled in Gmail settings."
+            )
+        return (
+            "Gmail connection failed. Check that Gmail is set to App password mode, IMAP is enabled, "
+            "and the app password is loaded in the running API process."
+        )
+    if provider == "outlook":
+        if any(marker in normalized for marker in {"basic authentication", "5.7.139", "535"}):
+            return (
+                "Outlook authentication failed. This account or tenant may block IMAP/SMTP basic auth; "
+                "Microsoft Graph OAuth is needed for that mailbox."
+            )
+        return "Outlook connection failed. Check IMAP/SMTP settings and whether the mailbox allows app-password access."
+    return "Email connection failed."
 
 
 def _select(client: imaplib.IMAP4_SSL, mailbox: str) -> None:

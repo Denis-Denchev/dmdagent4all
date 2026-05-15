@@ -44,7 +44,7 @@ from dmdagent4all.server import (
 )
 from dmdagent4all.email_oauth import GMAIL_OAUTH_SCOPE, google_authorization_url
 from dmdagent4all.tools import build_builtin_registry
-from dmdagent4all.tools.email_connector import _settings
+from dmdagent4all.tools.email_connector import _settings, test_email_connection
 from dmdagent4all.tools.base import ToolRuntimeContext
 from dmdagent4all.tools.reminders import (
     create_reminder,
@@ -312,12 +312,18 @@ class DashboardControlsTest(unittest.TestCase):
                 config={},
             )
             registry = build_builtin_registry()
+            base = (datetime.now().astimezone() + timedelta(days=7)).replace(
+                hour=10,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
             created = registry.execute(
                 "calendar.create_event",
                 {
                     "title": "Busy",
-                    "start": "2026-05-04T10:00:00-07:00",
-                    "end": "2026-05-04T11:00:00-07:00",
+                    "start": base.isoformat(),
+                    "end": (base + timedelta(hours=1)).isoformat(),
                 },
                 context,
             )
@@ -331,8 +337,8 @@ class DashboardControlsTest(unittest.TestCase):
             slots = registry.execute(
                 "calendar.find_free_slots",
                 {
-                    "start": "2026-05-04T09:00:00-07:00",
-                    "end": "2026-05-04T12:00:00-07:00",
+                    "start": base.replace(hour=9).isoformat(),
+                    "end": base.replace(hour=12).isoformat(),
                     "duration_minutes": 30,
                 },
                 context,
@@ -514,6 +520,54 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertEqual(result["provider"], "gmail")
         self.assertEqual(result["thread_id"], "99")
         self.assertEqual(result["messages"][0]["subject"], "Invoice 123")
+
+    def test_email_connection_test_reports_imap_and_smtp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@gmail.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                    with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                        result = test_email_connection("gmail", context)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["imap"]["ok"])
+        self.assertTrue(result["smtp"]["ok"])
+        self.assertEqual(result["auth_method"], "app_password")
+
+    def test_email_connection_test_returns_actionable_outlook_auth_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["outlook"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            env = {
+                "DMDAGENT_OUTLOOK_USERNAME": "sender@outlook.com",
+                "DMDAGENT_OUTLOOK_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                    with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
+                        result = test_email_connection("outlook", context)
+
+        self.assertEqual(result["status"], "connection_failed")
+        self.assertTrue(result["imap"]["ok"])
+        self.assertFalse(result["smtp"]["ok"])
+        self.assertIn("Microsoft Graph OAuth", result["message"])
 
     def test_memory_write_can_create_auto_short_term_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

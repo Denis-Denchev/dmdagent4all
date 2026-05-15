@@ -501,6 +501,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ provider, username, app_password, from_address: from_address || null }),
     }),
+  testEmailConnection: (provider: 'gmail' | 'outlook') =>
+    request<AgentResponse>('/v1/email/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    }),
   startGmailOAuth: (settings: {
     client_id: string
     client_secret?: string
