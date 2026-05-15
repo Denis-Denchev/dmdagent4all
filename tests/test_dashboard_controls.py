@@ -395,6 +395,39 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertEqual(sent["to"], ["recipient@example.com"])
         self.assertEqual(FakeSMTP.sent_messages[0]["To"], "recipient@example.com")
 
+    def test_email_draft_sanitizes_multiline_subject_before_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            registry = build_builtin_registry()
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                draft = registry.execute(
+                    "gmail.create_draft",
+                    {
+                        "to": "recipient@example.com",
+                        "subject": "Line one\nLine two",
+                        "body": "Hello from draft",
+                    },
+                    context,
+                )
+                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                    FakeSMTP.sent_messages.clear()
+                    sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
+
+        self.assertTrue(sent["sent"])
+        self.assertEqual(draft["subject"], "Line one Line two")
+        self.assertEqual(FakeSMTP.sent_messages[0]["Subject"], "Line one Line two")
+
     def test_gmail_oauth_send_uses_xoauth2_instead_of_password_login(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -663,7 +663,7 @@ def _draft_from_args(args: dict[str, Any], settings: EmailSettings) -> dict[str,
     to = _address_list(args.get("to"))
     if not to:
         raise ValueError("create_draft requires to.")
-    subject = str(args.get("subject") or "").strip()
+    subject = _sanitize_header_value(str(args.get("subject") or ""))
     body = str(args.get("body") or "").strip()
     if not subject:
         raise ValueError("create_draft requires subject.")
@@ -707,21 +707,25 @@ def _draft_path(context: ToolRuntimeContext, provider: str, draft_id: str) -> Pa
 
 def _email_message_from_draft(draft: dict[str, Any]) -> EmailMessage:
     message = EmailMessage()
-    message["From"] = str(draft["from"])
+    message["From"] = _sanitize_header_value(str(draft["from"]))
     message["To"] = ", ".join(_string_list(draft.get("to")))
     cc = _string_list(draft.get("cc"))
     bcc = _string_list(draft.get("bcc"))
     if cc:
-        message["Cc"] = ", ".join(cc)
+        message["Cc"] = _sanitize_header_value(", ".join(cc))
     if bcc:
-        message["Bcc"] = ", ".join(bcc)
-    message["Subject"] = str(draft.get("subject") or "")
+        message["Bcc"] = _sanitize_header_value(", ".join(bcc))
+    message["Subject"] = _sanitize_header_value(str(draft.get("subject") or ""))
     if draft.get("in_reply_to"):
         message["In-Reply-To"] = str(draft["in_reply_to"])
     if draft.get("references"):
         message["References"] = str(draft["references"])
     message.set_content(str(draft.get("body") or ""))
     return message
+
+
+def _sanitize_header_value(value: str) -> str:
+    return " ".join(value.split())
 
 
 def _address_list(value: Any) -> list[str]:

@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from dmdagent4all.agent import AgentCore
@@ -74,6 +75,30 @@ class ChatOnlyPlanner:
     def chat(self, **kwargs) -> str:
         self.chat_calls.append(kwargs)
         return self.answer
+
+
+class FakeSMTP:
+    sent_messages: list[Any] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+    def __enter__(self) -> "FakeSMTP":
+        return self
+
+    def __exit__(self, *args: Any) -> bool:
+        del args
+        return False
+
+    def starttls(self) -> None:
+        return None
+
+    def login(self, username: str, password: str) -> None:
+        self.username = username
+        self.password = password
+
+    def send_message(self, message: Any) -> None:
+        self.sent_messages.append(message)
 
 
 class ContextAnsweringPlanner:
@@ -3073,7 +3098,161 @@ and this is the knowlage
             draft_path = root / "email-drafts" / "gmail" / f"{draft_id}.json"
             self.assertTrue(draft_path.exists())
             draft = json.loads(draft_path.read_text(encoding="utf-8"))
-            self.assertEqual(draft["body"], "Проекта работи и е онлайн.")
+            self.assertEqual(draft["body"], "Проектът работи и е онлайн.")
+
+    def test_send_draft_followup_uses_latest_local_email_draft_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="gmail.send_draft",
+                            args={},
+                            reason="Send the draft the user is referring to.",
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                draft_response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="gmail.create_draft",
+                        args={
+                            "to": "denis.denchev@outlook.com",
+                            "subject": "Проектът е готов за маркетинг отдела",
+                            "body": "Здравейте,\n\nПроектът е готов за маркетинг отдела.\n\nС уважение",
+                        },
+                        reason="Create draft for follow-up send test.",
+                    )
+                )
+                response = core.handle_text("изпрати го")
+
+            approval = audit.list_approvals(status="pending")[0]
+
+            self.assertEqual(draft_response.status, "ok")
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(approval["tool"], "gmail.send_draft")
+            self.assertEqual(approval["args"]["draft_id"], draft_response.data["draft_id"])
+
+    def test_send_draft_without_id_uses_latest_draft_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                draft_response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="gmail.create_draft",
+                        args={
+                            "to": "denis.denchev@outlook.com",
+                            "subject": "Проектът е готов",
+                            "body": "Проектът е готов.",
+                        },
+                        reason="Create Gmail draft.",
+                    )
+                )
+                response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="outlook.send_draft",
+                        args={},
+                        reason="Planner selected the wrong provider for a draft send.",
+                    )
+                )
+
+            approval = audit.list_approvals(status="pending")[0]
+
+            self.assertEqual(draft_response.status, "ok")
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(approval["tool"], "gmail.send_draft")
+            self.assertEqual(approval["args"]["draft_id"], draft_response.data["draft_id"])
+
+    def test_approved_send_draft_backfills_missing_draft_id_from_latest_local_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                None,
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                draft_response = core.handle_tool_request(
+                    ToolRequest(
+                        tool="gmail.create_draft",
+                        args={
+                            "to": "denis.denchev@outlook.com",
+                            "subject": "Проектът е готов за маркетинг отдела",
+                            "body": "Здравейте,\n\nПроектът е готов за маркетинг отдела.\n\nС уважение",
+                        },
+                        reason="Create draft for approval backfill test.",
+                    )
+                )
+                approval_id = audit.record_approval(
+                    tool="gmail.send_draft",
+                    risk=4,
+                    args={},
+                    request_reason="User message: изпрати го\nPlanner reason: Send latest draft.",
+                    decision_reason="Tool manifest requires approval.",
+                )
+                FakeSMTP.sent_messages.clear()
+                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                    response = core.approve_and_execute(approval_id)
+
+            self.assertEqual(response.status, "ok")
+            self.assertEqual((response.data or {}).get("draft_id"), draft_response.data["draft_id"])
+            self.assertEqual(audit.get_approval(approval_id)["status"], "executed")
+            self.assertEqual(len(FakeSMTP.sent_messages), 1)
+            self.assertEqual(FakeSMTP.sent_messages[0]["Subject"], "Проектът е готов за маркетинг отдела")
 
     def test_planner_does_not_route_outlook_recipient_domain_to_outlook_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3142,6 +3321,193 @@ and this is the knowlage
             self.assertFalse((root / "email-drafts" / "outlook" / f"{draft_id}.json").exists())
             draft = json.loads(draft_path.read_text(encoding="utf-8"))
             self.assertEqual(draft["to"], ["denis.denchev@outlook.com"])
+
+    def test_business_tone_email_defers_to_planner_but_uses_configured_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            planner_body = (
+                "Здравейте,\n\n"
+                "Информирам Ви, че проектът е готов и вече е качен в Git. "
+                "Оставам на разположение при нужда от допълнителна информация.\n\n"
+                "Поздрави,\nДенис"
+            )
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_plan=(
+                            ToolRequest(
+                                tool="outlook.create_draft",
+                                args={
+                                    "to": "denis.denchev@outlook.com",
+                                    "subject": "Проектът е готов и качен в Git",
+                                    "body": planner_body,
+                                },
+                                reason="Compose the requested business email.",
+                            ),
+                            ToolRequest(
+                                tool="outlook.send_draft",
+                                args={"draft_id_from_previous_step": True},
+                                reason="Send after approval.",
+                            ),
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {
+                        "gmail": {"enabled": True},
+                        "outlook": {"enabled": True},
+                        "max_body_chars": 20000,
+                    },
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset(
+                        {"gmail.create_draft", "gmail.send_draft", "outlook.create_draft", "outlook.send_draft"}
+                    ),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send", "outlook.compose", "outlook.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "прати мейл на denis.denchev@outlook.com в който искам с бизнес уважителен тон "
+                    "да му кажеш че проекта е готов и качен в гит, той знае за какво става въпрос"
+                )
+
+            approval = audit.list_approvals(status="pending")[0]
+            draft_id = str(approval["args"]["draft_id"])
+            draft_path = root / "email-drafts" / "gmail" / f"{draft_id}.json"
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(approval["tool"], "gmail.send_draft")
+            self.assertEqual(draft["subject"], "Проектът е готов и качен в Git")
+            self.assertEqual(draft["body"], planner_body)
+
+    def test_business_tone_email_has_professional_deterministic_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                FailingPlanner(PlannerError("planner unavailable")),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "прати мейл на denis.denchev@outlook.com в който искам с бизнес уважителен тон "
+                    "да му кажеш че проекта е готов и качен в гит, той знае за какво става въпрос"
+                )
+
+            approval = audit.list_approvals(status="pending")[0]
+            draft_id = str(approval["args"]["draft_id"])
+            draft = json.loads((root / "email-drafts" / "gmail" / f"{draft_id}.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(approval["tool"], "gmail.send_draft")
+            self.assertEqual(draft["subject"], "Проектът е готов и качен в Git")
+            self.assertIn("Здравейте", draft["body"])
+            self.assertIn("проектът е готов и качен в Git", draft["body"])
+            self.assertIn("С уважение", draft["body"])
+            self.assertNotIn("той знае", draft["body"])
+
+    def test_business_tone_email_for_marketing_has_single_line_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                FailingPlanner(PlannerError("planner unavailable")),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "искам да пратиш мейл на : denis.denchev@outlook.com .\n\n"
+                    "искам в мейла да кажеш че проекта е готов и всичко е перефектно "
+                    "кажи го с бизнес тон и кажи че е готов за маркетинг отдела"
+                )
+
+            approval = audit.list_approvals(status="pending")[0]
+            draft_id = str(approval["args"]["draft_id"])
+            draft = json.loads((root / "email-drafts" / "gmail" / f"{draft_id}.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(draft["subject"], "Проектът е готов за маркетинг отдела")
+            self.assertNotRegex(draft["subject"], r"[\r\n]")
+            self.assertIn("маркетинг отдела", draft["body"])
+
+    def test_email_subject_is_generated_from_message_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                FailingPlanner(PlannerError("planner unavailable")),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "прати мейл на person@example.com и кажи че срещата се мести за 15:00 утре"
+                )
+
+            approval = audit.list_approvals(status="pending")[0]
+            draft_id = str(approval["args"]["draft_id"])
+            draft = json.loads((root / "email-drafts" / "gmail" / f"{draft_id}.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(draft["subject"], "Промяна на срещата")
+            self.assertNotIn("Здравейте", draft["subject"])
+            self.assertNotRegex(draft["subject"], r"[\r\n]")
 
     def test_latest_email_who_question_routes_before_planner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -348,7 +348,8 @@ class AgentCore:
 
         email_action = _email_action_from_text(stripped, self.runtime_context.config)
         if isinstance(email_action, EmailSendIntent):
-            return self._handle_email_send_intent(stripped, email_action)
+            if not self._should_defer_email_send_to_planner(stripped):
+                return self._handle_email_send_intent(stripped, email_action)
         if isinstance(email_action, ToolRequest):
             return self._run_user_tool_request(
                 stripped,
@@ -844,6 +845,7 @@ class AgentCore:
             metadata={"tools": [request.tool for request in normalized_requests]},
         )
         first, *continuations = normalized_requests
+        first = _prepare_tool_request_for_execution(first, self.runtime_context)
         first_request = _request_with_original_message(first, user_message)
         response = self.handle_tool_request(first_request)
         if response.status == "approval_required":
@@ -879,6 +881,11 @@ class AgentCore:
             steps=tuple(continuations),
             conversation_context=conversation_context,
         )
+
+    def _should_defer_email_send_to_planner(self, user_message: str) -> bool:
+        if self.planner is None:
+            return False
+        return _email_send_needs_llm_composition(user_message)
 
     def _handle_memory_search_decision(
         self,
@@ -984,6 +991,7 @@ class AgentCore:
         *,
         conversation_context: str,
     ) -> AgentResponse:
+        request = _prepare_tool_request_for_execution(request, self.runtime_context)
         request = _request_with_original_message(request, user_message)
         log_local_dev_autonomy(
             "selected_tool",
@@ -1072,6 +1080,7 @@ class AgentCore:
         first, *continuations = plan
         if isinstance(first, UnsupportedAction):
             return _unsupported_action_response(user_message, first)
+        first = _prepare_tool_request_for_execution(first, self.runtime_context)
         first_request = _request_with_original_message(first, user_message)
         response = self.handle_tool_request(first_request)
         if response.status == "approval_required":
@@ -1149,6 +1158,7 @@ class AgentCore:
                     message="\n\n".join([*messages, str(exc)]).strip(),
                     data=data,
                 )
+            runnable_step = _prepare_tool_request_for_execution(runnable_step, self.runtime_context)
             log_local_dev_autonomy(
                 "chain_step",
                 config=self.runtime_context.config,
@@ -1658,6 +1668,7 @@ class AgentCore:
         return response
 
     def handle_tool_request(self, request: ToolRequest) -> AgentResponse:
+        request = _prepare_tool_request_for_execution(request, self.runtime_context)
         self._trace_event(
             "policy",
             _tool_action_title(request.tool, phase="validate"),
@@ -1845,6 +1856,7 @@ class AgentCore:
             args=dict(approval["args"]),
             reason=str(approval.get("request_reason") or "Approved by user."),
         )
+        request = _prepare_tool_request_for_execution(request, self.runtime_context)
         if _emergency_stop_active(self.runtime_context.config):
             return AgentResponse(
                 status="denied",
@@ -2120,6 +2132,27 @@ def _looks_email_send_request(normalized: str) -> bool:
     )
 
 
+def _email_send_needs_llm_composition(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "business tone",
+            "professional tone",
+            "formal tone",
+            "respectful tone",
+            "бизнес",
+            "уважител",
+            "професионал",
+            "официал",
+            "делови",
+            "тон",
+            "формулирай",
+            "напиши го",
+        }
+    )
+
+
 def _looks_email_read_latest_request(normalized: str) -> bool:
     has_read = any(
         marker in normalized
@@ -2170,6 +2203,7 @@ def _email_send_intent_from_text(text: str, provider: str) -> EmailSendIntent | 
                 else "I have the recipient, but I need the email body."
             ),
         )
+    body = _maybe_business_email_body(text, body)
     subject = _email_subject_from_text(text, body)
     return EmailSendIntent(provider=provider, to=recipient, subject=subject, body=body)
 
@@ -2181,6 +2215,7 @@ def _first_email_address(text: str) -> str | None:
 
 def _email_body_from_text(text: str) -> str:
     patterns = [
+        r"(?:да\s+му\s+кажеш|да\s+кажеш|кажеш)\s+(?:че\s+)?(?P<body>.+)$",
         r"(?:имейлът|имейла|мейлът|мейла|съдържанието)\s+(?:е|да бъде|да е)\s+(?P<body>.+)$",
         r"(?:body|message|email)\s+(?:is|=|:)\s+(?P<body>.+)$",
         r"(?:кажи му|кажи|напиши)\s+(?:че\s+)?(?P<body>.+)$",
@@ -2198,6 +2233,15 @@ def _email_body_from_text(text: str) -> str:
 
 def _clean_email_body(body: str) -> str:
     cleaned = body.strip().strip(" \"'")
+    cleaned = re.sub(r",?\s*той\s+знае\b.*$", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(
+        r"\s+кажи\s+го\s+с\s+[^.?!,]*?\s+тон\s+и\s+кажи\s+че\s+",
+        " и ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+кажи\s+го\s+с\s+[^.?!,]*?\s+тон\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+и\s+кажи\s+че\s+", " и ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(
         r"^(?:а\s+)?(?:имейлът|имейла|мейлът|мейла)?\s*(?:е\s+)?(?:да\s+)?(?:му\s+)?(?:кажа|кажеш|кажем)\s+че\s+",
         "",
@@ -2205,6 +2249,9 @@ def _clean_email_body(body: str) -> str:
         flags=re.IGNORECASE,
     )
     cleaned = re.sub(r"^(?:че|that)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\bгит\b", "Git", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^проекта\b", "проектът", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bперефектно\b", "перфектно", cleaned, flags=re.IGNORECASE)
     if not cleaned:
         return ""
     if _looks_bulgarian(cleaned):
@@ -2216,23 +2263,137 @@ def _clean_email_body(body: str) -> str:
     return cleaned
 
 
+def _maybe_business_email_body(text: str, body: str) -> str:
+    if not _looks_bulgarian(text) or not _email_send_needs_llm_composition(text):
+        return body
+    core = re.sub(r"\s+", " ", body.strip()).rstrip(".")
+    if not core:
+        return body
+    return (
+        "Здравейте,\n\n"
+        f"Информирам Ви, че {_lowercase_first(core)}.\n\n"
+        "Оставам на разположение при нужда от допълнителна информация.\n\n"
+        "С уважение"
+    )
+
+
 def _email_subject_from_text(text: str, body: str) -> str:
+    default = "Съобщение" if _looks_bulgarian(text) or _looks_bulgarian(body) else "Message"
+    explicit = _explicit_email_subject_from_text(text)
+    if explicit:
+        return _sanitize_email_subject(explicit, default)
+    generated = _generated_email_subject_from_content(text, body)
+    if generated:
+        return _sanitize_email_subject(generated, default)
+    return _email_subject_fallback(body, default)
+
+
+def _explicit_email_subject_from_text(text: str) -> str:
     subject_match = re.search(
         r"(?:subject|тема(?:та)?)\s*(?:is|е|:|=)\s*(?P<subject>[^.;\n]+)",
         text,
         flags=re.IGNORECASE,
     )
-    if subject_match and not re.search(r"сам\s+избери|choose", subject_match.group("subject"), flags=re.IGNORECASE):
-        return subject_match.group("subject").strip(" \"'")
-    if _looks_bulgarian(text):
-        if "проект" in _normalize_for_match(body) and "онлайн" in _normalize_for_match(body):
-            return "Проектът работи и е онлайн"
-        return body[:60].rstrip(".!?") or "Съобщение"
-    return body[:60].rstrip(".!?") or "Message"
+    if not subject_match:
+        return ""
+    subject = subject_match.group("subject")
+    if re.search(r"сам\s+избери|choose", subject, flags=re.IGNORECASE):
+        return ""
+    return subject
+
+
+def _generated_email_subject_from_content(text: str, body: str) -> str:
+    source = _collapse_spaces(f"{text} {body}")
+    normalized = _normalize_for_match(source)
+    if _looks_bulgarian(source):
+        if "проект" in normalized:
+            if "маркетинг" in normalized:
+                return "Проектът е готов за маркетинг отдела"
+            if "git" in normalized:
+                return "Проектът е готов и качен в Git"
+            if "онлайн" in normalized:
+                return "Проектът работи и е онлайн"
+            if any(marker in normalized for marker in {"готов", "завършен", "перфект"}):
+                return "Проектът е готов"
+        if "маркетинг" in normalized:
+            return "Готово за маркетинг отдела"
+        if "срещ" in normalized:
+            if any(marker in normalized for marker in {"мести", "премести", "промен", "нов час"}):
+                return "Промяна на срещата"
+            return "Относно срещата"
+        if "фактур" in normalized:
+            return "Относно фактурата"
+        if "оферт" in normalized:
+            return "Относно офертата"
+        if "договор" in normalized:
+            return "Относно договора"
+        if "напомн" in normalized:
+            return "Напомняне"
+        if "благодар" in normalized:
+            return "Благодарност"
+        return ""
+    if "project" in normalized:
+        if "marketing" in normalized:
+            return "Project ready for marketing"
+        if "git" in normalized:
+            return "Project ready in Git"
+        if any(marker in normalized for marker in {"ready", "finished", "complete", "completed"}):
+            return "Project ready"
+    if "meeting" in normalized:
+        if any(marker in normalized for marker in {"reschedule", "moved", "new time", "change"}):
+            return "Meeting update"
+        return "About the meeting"
+    if "invoice" in normalized:
+        return "Invoice update"
+    if "proposal" in normalized or "offer" in normalized:
+        return "Proposal update"
+    if "contract" in normalized:
+        return "Contract update"
+    if "reminder" in normalized:
+        return "Reminder"
+    if "thank" in normalized:
+        return "Thank you"
+    return ""
+
+
+def _email_subject_fallback(body: str, default: str) -> str:
+    compact = _subject_fallback_source(body)
+    if not compact:
+        return default
+    return _sanitize_email_subject(compact, default)
+
+
+def _subject_fallback_source(body: str) -> str:
+    compact = _collapse_spaces(body)
+    compact = re.sub(r"^здравейте,?\s*", "", compact, flags=re.IGNORECASE)
+    compact = re.sub(r"^информирам\s+ви,\s+че\s+", "", compact, flags=re.IGNORECASE)
+    compact = re.sub(r"^пиша\s+ви,\s+за\s+да\s+", "", compact, flags=re.IGNORECASE)
+    compact = re.split(r"\b(?:оставам на разположение|с уважение|поздрави)\b", compact, flags=re.IGNORECASE)[0]
+    return compact.strip(" ,.;:!?")
+
+
+def _sanitize_email_subject(subject: str, default: str, *, max_chars: int = 78) -> str:
+    compact = _collapse_spaces(subject).strip(" \"'`.,;:-")
+    if not compact:
+        return default
+    if len(compact) <= max_chars:
+        return compact
+    truncated = compact[:max_chars].rstrip(" ,.;:-")
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0].rstrip(" ,.;:-")
+    return truncated or default
+
+
+def _collapse_spaces(text: str) -> str:
+    return " ".join(str(text).split())
 
 
 def _capitalize_first(text: str) -> str:
     return text[:1].upper() + text[1:]
+
+
+def _lowercase_first(text: str) -> str:
+    return text[:1].lower() + text[1:]
 
 
 def _route_without_llm(text: str) -> ToolRequest | None:
@@ -5133,6 +5294,67 @@ def _normalize_planner_email_tool_provider(
     if provider is None:
         return tool
     return f"{provider}.{action}"
+
+
+def _prepare_tool_request_for_execution(
+    request: ToolRequest,
+    runtime_context: ToolRuntimeContext,
+) -> ToolRequest:
+    if not _is_email_send_draft_tool(request.tool):
+        return request
+    args = dict(request.args)
+    if str(args.get("draft_id") or "").strip():
+        return request
+    requested_provider = request.tool.split(".", 1)[0]
+    provider, draft_id = _latest_local_email_draft(runtime_context, requested_provider)
+    if not draft_id:
+        provider, draft_id = _latest_local_email_draft(runtime_context)
+    if not draft_id:
+        return request
+    args["draft_id"] = draft_id
+    tool = request.tool if provider == requested_provider else f"{provider}.send_draft"
+    return ToolRequest(tool=tool, args=args, reason=request.reason)
+
+
+def _is_email_send_draft_tool(tool: str) -> bool:
+    return tool in {"gmail.send_draft", "outlook.send_draft"}
+
+
+def _latest_local_email_draft(
+    runtime_context: ToolRuntimeContext,
+    provider: str = "",
+) -> tuple[str, str]:
+    providers = (provider.casefold(),) if provider else ("gmail", "outlook")
+    candidates: list[tuple[str, float, str, str]] = []
+    for provider_name in providers:
+        draft_root = runtime_context.memory_root.parent / "email-drafts" / provider_name
+        if not draft_root.is_dir():
+            continue
+        for path in draft_root.glob("*.json"):
+            try:
+                draft = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(draft, dict):
+                continue
+            draft_provider = str(draft.get("provider") or provider_name).casefold()
+            if draft_provider != provider_name:
+                continue
+            if str(draft.get("status") or "draft").casefold() != "draft":
+                continue
+            draft_id = str(draft.get("draft_id") or path.stem).strip()
+            if not draft_id:
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((str(draft.get("created_at") or ""), mtime, provider_name, draft_id))
+    if not candidates:
+        return "", ""
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    latest = candidates[0]
+    return latest[2], latest[3]
 
 
 def _resolve_previous_step_content(
