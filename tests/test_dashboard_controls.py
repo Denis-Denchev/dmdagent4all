@@ -231,6 +231,43 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertTrue(result["data"]["credentials_loaded"])
         self.assertNotIn("app-password", str(result))
 
+    def test_email_credentials_loader_normalizes_app_password_copy_paste_whitespace(self) -> None:
+        config = deepcopy(DEFAULT_CONFIG)
+        config["email"]["gmail"]["username_env"] = "DMDAGENT_TEST_GMAIL_USER"
+        config["email"]["gmail"]["password_env"] = "DMDAGENT_TEST_GMAIL_PASSWORD"
+        config["email"]["gmail"]["from_env"] = "DMDAGENT_TEST_GMAIL_FROM"
+        for key in (
+            "DMDAGENT_TEST_GMAIL_USER",
+            "DMDAGENT_TEST_GMAIL_PASSWORD",
+            "DMDAGENT_TEST_GMAIL_FROM",
+        ):
+            os.environ.pop(key, None)
+
+        try:
+            result = _load_email_credentials(
+                config,
+                EmailCredentialsRequest(
+                    provider="gmail",
+                    username="\u00a0sender@example.com\u00a0",
+                    app_password="abcd\u00a0efgh ijkl\tmnop\n",
+                    from_address="",
+                ),
+            )
+        finally:
+            env_values = {
+                key: os.environ.pop(key, None)
+                for key in (
+                    "DMDAGENT_TEST_GMAIL_USER",
+                    "DMDAGENT_TEST_GMAIL_PASSWORD",
+                    "DMDAGENT_TEST_GMAIL_FROM",
+                )
+            }
+
+        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_USER"], "sender@example.com")
+        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_PASSWORD"], "abcdefghijklmnop")
+        self.assertTrue(result["data"]["credentials_loaded"])
+        self.assertNotIn("abcdefghijklmnop", str(result))
+
     def test_gmail_oauth_configuration_does_not_expose_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = _FakePaths(Path(tmp))
@@ -394,6 +431,71 @@ class DashboardControlsTest(unittest.TestCase):
         self.assertTrue(sent["sent"])
         self.assertEqual(sent["to"], ["recipient@example.com"])
         self.assertEqual(FakeSMTP.sent_messages[0]["To"], "recipient@example.com")
+
+    def test_email_send_normalizes_env_credentials_before_smtp_login(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            registry = build_builtin_registry()
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "\u00a0sender@example.com\u00a0",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "abcd\u00a0efgh ijkl\tmnop",
+            }
+            with mock.patch.dict(os.environ, env):
+                draft = registry.execute(
+                    "gmail.create_draft",
+                    {
+                        "to": "recipient@example.com",
+                        "subject": "Test subject",
+                        "body": "Hello from draft",
+                    },
+                    context,
+                )
+                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", RecordingSMTP):
+                    RecordingSMTP.login_credentials.clear()
+                    sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
+
+        self.assertTrue(sent["sent"])
+        self.assertEqual(RecordingSMTP.login_credentials, [("sender@example.com", "abcdefghijklmnop")])
+
+    def test_email_send_returns_actionable_error_for_smtp_unicode_encoding_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = deepcopy(DEFAULT_CONFIG)
+            config["email"]["gmail"]["enabled"] = True
+            context = ToolRuntimeContext(
+                memory_root=root / "memory",
+                workspace_root=root / "workspace",
+                config=config,
+            )
+            registry = build_builtin_registry()
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env):
+                draft = registry.execute(
+                    "gmail.create_draft",
+                    {
+                        "to": "recipient@example.com",
+                        "subject": "Test subject",
+                        "body": "Hello from draft",
+                    },
+                    context,
+                )
+                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", UnicodeEncodingSMTP):
+                    result = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
+
+        self.assertEqual(result["status"], "authentication_failed")
+        self.assertFalse(result["sent"])
+        self.assertIn("non-ASCII", result["message"])
+        self.assertNotIn("app-password", str(result))
 
     def test_email_draft_sanitizes_multiline_subject_before_send(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -800,6 +902,20 @@ class FakeSMTP:
 
     def send_message(self, message) -> None:
         self.sent_messages.append(message)
+
+
+class RecordingSMTP(FakeSMTP):
+    login_credentials: list[tuple[str, str]] = []
+
+    def login(self, username: str, password: str) -> None:
+        self.login_credentials.append((username, password))
+        super().login(username, password)
+
+
+class UnicodeEncodingSMTP(FakeSMTP):
+    def login(self, username: str, password: str) -> None:
+        del username, password
+        raise UnicodeEncodeError("ascii", "abcd\u00a0efgh", 4, 5, "ordinal not in range(128)")
 
 
 class FailingAuthSMTP(FakeSMTP):

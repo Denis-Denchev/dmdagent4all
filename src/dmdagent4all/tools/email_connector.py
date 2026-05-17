@@ -151,7 +151,7 @@ def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | Non
     if auth_method == "oauth2":
         if provider != "gmail":
             return None
-        username = str(provider_config.get("oauth_email") or "").strip()
+        username = _normalize_email_login_value(str(provider_config.get("oauth_email") or ""))
         client_id = str(provider_config.get("oauth_client_id") or "").strip()
         client_secret = load_email_secret(provider, "oauth_client_secret") or ""
         refresh_token = load_email_secret(provider, "oauth_refresh_token") or ""
@@ -171,7 +171,7 @@ def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | Non
             smtp_port=int(provider_config.get("smtp_port") or defaults["smtp_port"]),
             username=username,
             password="",
-            from_addr=str(provider_config.get("oauth_from_address") or "").strip() or username,
+            from_addr=_sanitize_header_value(str(provider_config.get("oauth_from_address") or "")) or username,
             auth_method="oauth2",
             oauth_access_token=access_token,
             mailbox=str(provider_config.get("mailbox") or defaults["mailbox"]),
@@ -182,9 +182,9 @@ def _settings(provider: str, context: ToolRuntimeContext) -> EmailSettings | Non
     username_env = str(provider_config.get("username_env") or defaults["username_env"])
     password_env = str(provider_config.get("password_env") or defaults["password_env"])
     from_env = str(provider_config.get("from_env") or defaults["from_env"])
-    username = os.environ.get(username_env, "").strip()
-    password = os.environ.get(password_env, "")
-    from_addr = os.environ.get(from_env, "").strip() or username
+    username = _normalize_email_login_value(os.environ.get(username_env, ""))
+    password = _normalize_app_password(os.environ.get(password_env, ""))
+    from_addr = _sanitize_header_value(os.environ.get(from_env, "")) or username
     if not username or not password:
         return None
 
@@ -366,6 +366,8 @@ def _send_draft(args: dict[str, Any], context: ToolRuntimeContext, settings: Ema
             "message": f"{settings.provider.title()} SMTP failed before sending. Draft remains local.",
             "detail": redact_text(str(exc)),
         }
+    except UnicodeEncodeError as exc:
+        return _smtp_credential_encoding_failed(settings, draft_id, exc)
     draft["status"] = "sent"
     draft["sent_at"] = _now()
     draft_path.write_text(json.dumps(draft, indent=2, sort_keys=True), encoding="utf-8")
@@ -401,6 +403,25 @@ def _smtp_authentication_failed(
         "message": message,
         "smtp_code": getattr(exc, "smtp_code", None),
         "smtp_error": redact_text(str(getattr(exc, "smtp_error", b""))),
+    }
+
+
+def _smtp_credential_encoding_failed(
+    settings: EmailSettings,
+    draft_id: str,
+    exc: UnicodeEncodeError,
+) -> dict[str, Any]:
+    return {
+        "provider": settings.provider,
+        "draft_id": draft_id,
+        "status": "authentication_failed",
+        "sent": False,
+        "message": (
+            f"{settings.provider.title()} SMTP authentication failed before sending because the "
+            "username or app password contains a non-ASCII character. Re-load the credentials; "
+            "Google app passwords should be pasted as the 16-character token without spaces."
+        ),
+        "detail": redact_text(str(exc)),
     }
 
 
@@ -500,6 +521,16 @@ def _test_smtp(settings: EmailSettings) -> dict[str, Any]:
         }
     except smtplib.SMTPException as exc:
         return {"ok": False, "stage": "smtp", "detail": _email_error_detail(exc)}
+    except UnicodeEncodeError as exc:
+        return {
+            "ok": False,
+            "stage": "smtp_login",
+            "detail": (
+                f"{settings.provider.title()} username or app password contains a non-ASCII character. "
+                "Re-load the credentials; app passwords should not include spaces copied from the display."
+            ),
+            "encoding_error": redact_text(str(exc)),
+        }
     except OSError as exc:
         return {"ok": False, "stage": "smtp_connect", "detail": _email_error_detail(exc)}
     except Exception as exc:
@@ -525,6 +556,11 @@ def _first_failed_detail(*results: dict[str, Any]) -> str:
 def _connection_error_message(provider: str, detail: str) -> str:
     normalized = detail.casefold()
     if provider == "gmail":
+        if "non-ascii" in normalized:
+            return (
+                "Gmail authentication failed because the loaded username or app password contains a non-ASCII "
+                "character. Re-load the Gmail credentials and paste the app password as the 16-character token."
+            )
         if any(marker in normalized for marker in {"invalid credentials", "application-specific password", "534", "535"}):
             return (
                 "Gmail authentication failed. Use a Google app password, not your normal Google password, "
@@ -726,6 +762,14 @@ def _email_message_from_draft(draft: dict[str, Any]) -> EmailMessage:
 
 def _sanitize_header_value(value: str) -> str:
     return " ".join(value.split())
+
+
+def _normalize_email_login_value(value: str) -> str:
+    return "".join(str(value or "").split())
+
+
+def _normalize_app_password(value: str) -> str:
+    return "".join(str(value or "").split())
 
 
 def _address_list(value: Any) -> list[str]:

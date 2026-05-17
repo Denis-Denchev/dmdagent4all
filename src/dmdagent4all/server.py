@@ -63,7 +63,11 @@ from dmdagent4all.sandbox import TerminalPolicy, active_terminal_processes, emer
 from dmdagent4all.agent.runtime_state import invalidate_runtime_state_cache
 from dmdagent4all.tools import build_builtin_registry
 from dmdagent4all.tools.base import ToolRuntimeContext
-from dmdagent4all.tools.email_connector import test_email_connection
+from dmdagent4all.tools.email_connector import (
+    _normalize_app_password,
+    _normalize_email_login_value,
+    test_email_connection,
+)
 from dmdagent4all.tools.storage import downloads_root_from_config
 from dmdagent4all.tools.reminders import (
     due_reminders,
@@ -1726,8 +1730,8 @@ def _load_email_credentials(config: dict[str, Any], request: EmailCredentialsReq
     provider = request.provider.strip().lower()
     if provider not in EMAIL_PROVIDER_DEFAULTS:
         raise HTTPException(status_code=400, detail="provider must be gmail or outlook.")
-    username = request.username.strip()
-    app_password = request.app_password.strip()
+    username = _normalize_email_login_value(request.username)
+    app_password = _normalize_app_password(request.app_password)
     if not username:
         raise HTTPException(status_code=400, detail="Email username is required.")
     if not app_password:
