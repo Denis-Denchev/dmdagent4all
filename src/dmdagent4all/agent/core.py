@@ -771,6 +771,12 @@ class AgentCore:
                 stripped,
                 self.runtime_context.config,
             )
+            if _is_email_create_draft_tool(request.tool) and _looks_email_send_request(_normalize_for_match(stripped)):
+                return self._handle_email_create_then_send_request(
+                    stripped,
+                    request,
+                    conversation_context=conversation_context,
+                )
             log_local_dev_autonomy(
                 "planner_selected_tool",
                 config=self.runtime_context.config,
@@ -832,6 +838,16 @@ class AgentCore:
             _normalize_planner_tool_request(request, user_message, self.runtime_context.config)
             for request in requests
         )
+        if (
+            len(normalized_requests) == 1
+            and _is_email_create_draft_tool(normalized_requests[0].tool)
+            and _looks_email_send_request(_normalize_for_match(user_message))
+        ):
+            return self._handle_email_create_then_send_request(
+                user_message,
+                normalized_requests[0],
+                conversation_context=conversation_context,
+            )
         log_local_dev_autonomy(
             "chain_start",
             config=self.runtime_context.config,
@@ -1045,25 +1061,67 @@ class AgentCore:
                 reason="User asked to send this email. Sending requires explicit approval.",
             ),
             user_message,
+            )
+        send_response = self.handle_tool_request(send_request)
+        if send_response.status == "approval_required":
+            return _email_send_approval_response(
+                user_message,
+                draft=_local_email_draft(self.runtime_context, intent.provider, draft_id)
+                or {
+                    "draft_id": draft_id,
+                    "to": [intent.to],
+                    "subject": intent.subject,
+                    "body": intent.body,
+                },
+                send_response=send_response,
+            )
+        return self._shape_tool_response(user_message, send_request, send_response)
+
+    def _handle_email_create_then_send_request(
+        self,
+        user_message: str,
+        create_request: ToolRequest,
+        *,
+        conversation_context: str,
+    ) -> AgentResponse:
+        del conversation_context
+        create_request = _prepare_tool_request_for_execution(create_request, self.runtime_context)
+        create_request = _request_with_original_message(create_request, user_message)
+        draft_response = self.handle_tool_request(create_request)
+        if draft_response.status != "ok":
+            return self._shape_tool_response(user_message, create_request, draft_response)
+        provider = create_request.tool.split(".", 1)[0]
+        draft_id = str((draft_response.data or {}).get("draft_id") or "").strip()
+        if not draft_id:
+            return AgentResponse(
+                status="error",
+                message=(
+                    "Създаването на чернова не върна draft_id."
+                    if _looks_bulgarian(user_message)
+                    else "Draft creation did not return a draft_id."
+                ),
+                data=draft_response.data,
+            )
+        send_request = _request_with_original_message(
+            ToolRequest(
+                tool=f"{provider}.send_draft",
+                args={"draft_id": draft_id},
+                reason="User asked to send this generated email. Sending requires explicit approval.",
+            ),
+            user_message,
         )
         send_response = self.handle_tool_request(send_request)
         if send_response.status == "approval_required":
-            message = (
-                f"Създадох чернова `{draft_id}` до {intent.to} с тема \"{intent.subject}\". "
-                "Нужно е approval, за да изпратя имейла."
-                if _looks_bulgarian(user_message)
-                else f"Created draft `{draft_id}` to {intent.to} with subject \"{intent.subject}\". "
-                "Approval is required before I send it."
-            )
-            return AgentResponse(
-                status="approval_required",
-                message=message,
-                data={
-                    **(send_response.data or {}),
+            return _email_send_approval_response(
+                user_message,
+                draft=_local_email_draft(self.runtime_context, provider, draft_id)
+                or {
                     "draft_id": draft_id,
-                    "to": intent.to,
-                    "subject": intent.subject,
+                    "to": (draft_response.data or {}).get("to", []),
+                    "subject": (draft_response.data or {}).get("subject", ""),
+                    "body": str(create_request.args.get("body") or ""),
                 },
+                send_response=send_response,
             )
         return self._shape_tool_response(user_message, send_request, send_response)
 
@@ -2116,14 +2174,21 @@ def _looks_email_send_request(normalized: str) -> bool:
             "send mail",
             "email to",
             "mail to",
+            "send it to",
             "прати имейл",
             "пратиш имейл",
             "прати мейл",
             "пратиш мейл",
+            "пратиш на",
+            "да го пратиш",
+            "го пратиш",
             "изпрати имейл",
             "изпратиш имейл",
             "изпрати мейл",
             "изпратиш мейл",
+            "изпратиш на",
+            "да го изпратиш",
+            "го изпратиш",
             "прати email",
             "пратиш email",
             "изпрати email",
@@ -2137,6 +2202,14 @@ def _email_send_needs_llm_composition(text: str) -> bool:
     return any(
         marker in normalized
         for marker in {
+            "generate email",
+            "compose email",
+            "write email",
+            "генерирай",
+            "генерираш",
+            "състави",
+            "напиши мейл",
+            "напиши имейл",
             "business tone",
             "professional tone",
             "formal tone",
@@ -2215,6 +2288,7 @@ def _first_email_address(text: str) -> str | None:
 
 def _email_body_from_text(text: str) -> str:
     patterns = [
+        r"(?:искам\s+)?(?:в|във)\s+(?:имейла|имейлът|мейла|мейлът)\s+(?:искам\s+)?(?:да\s+)?(?:пише|напише|има|оповестим|уведомим|кажем)\s+(?P<body>.+)$",
         r"(?:да\s+му\s+кажеш|да\s+кажеш|кажеш)\s+(?:че\s+)?(?P<body>.+)$",
         r"(?:имейлът|имейла|мейлът|мейла|съдържанието)\s+(?:е|да бъде|да е)\s+(?P<body>.+)$",
         r"(?:body|message|email)\s+(?:is|=|:)\s+(?P<body>.+)$",
@@ -2233,6 +2307,25 @@ def _email_body_from_text(text: str) -> str:
 
 def _clean_email_body(body: str) -> str:
     cleaned = body.strip().strip(" \"'")
+    add_personal_note = bool(
+        re.search(
+            r"(?:и\s+)?добави\s+нещо\s+от\s+себе\s+си\b|add\s+something\s+(?:from\s+yourself|of\s+your\s+own)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    )
+    cleaned = re.sub(
+        r"\s*(?:и\s+)?добави\s+нещо\s+от\s+себе\s+си\b.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip(" ,.;:-")
+    cleaned = re.sub(
+        r"\s*(?:and\s+)?add\s+something\s+(?:from\s+yourself|of\s+your\s+own)\b.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip(" ,.;:-")
     cleaned = re.sub(r",?\s*той\s+знае\b.*$", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(
         r"\s+кажи\s+го\s+с\s+[^.?!,]*?\s+тон\s+и\s+кажи\s+че\s+",
@@ -2258,6 +2351,15 @@ def _clean_email_body(body: str) -> str:
         cleaned = _capitalize_first(cleaned)
     else:
         cleaned = cleaned[0].upper() + cleaned[1:]
+    if add_personal_note:
+        if cleaned[-1] not in ".!?":
+            cleaned += "."
+        note = (
+            "Добавям и кратка бележка: изпратено е през локалния ми агент."
+            if _looks_bulgarian(cleaned)
+            else "Sent through a local assistant."
+        )
+        return f"{cleaned} {note}"
     if cleaned[-1] not in ".!?":
         cleaned += "."
     return cleaned
@@ -2286,6 +2388,64 @@ def _email_subject_from_text(text: str, body: str) -> str:
     if generated:
         return _sanitize_email_subject(generated, default)
     return _email_subject_fallback(body, default)
+
+
+def _is_email_create_draft_tool(tool: str) -> bool:
+    return tool in {"gmail.create_draft", "outlook.create_draft"}
+
+
+def _local_email_draft(runtime_context: ToolRuntimeContext, provider: str, draft_id: str) -> dict[str, Any]:
+    safe_id = "".join(ch for ch in draft_id if ch.isalnum() or ch in {"-", "_"})
+    if not safe_id:
+        return {}
+    path = runtime_context.memory_root.parent / "email-drafts" / provider / f"{safe_id}.json"
+    try:
+        draft = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return draft if isinstance(draft, dict) else {}
+
+
+def _email_send_approval_response(
+    user_message: str,
+    *,
+    draft: dict[str, Any],
+    send_response: AgentResponse,
+) -> AgentResponse:
+    draft_id = str(draft.get("draft_id") or (send_response.data or {}).get("draft_id") or "").strip()
+    to_values = draft.get("to") if isinstance(draft.get("to"), list) else []
+    to = ", ".join(str(item) for item in to_values) or str(draft.get("to") or "")
+    subject = str(draft.get("subject") or "").strip()
+    body = str(draft.get("body") or "").strip()
+    body_preview = body if len(body) <= 1800 else f"{body[:1800].rstrip()}\n[truncated]"
+    if _looks_bulgarian(user_message):
+        message = (
+            f"Подготвих имейла и го записах като локална чернова `{draft_id}`.\n\n"
+            f"До: {to}\n"
+            f"Тема: {subject or '-'}\n\n"
+            f"Съдържание:\n{body_preview or '-'}\n\n"
+            "Ако изглежда добре, натисни Approve, за да го изпратя."
+        )
+    else:
+        message = (
+            f"Prepared the email as local draft `{draft_id}`.\n\n"
+            f"To: {to}\n"
+            f"Subject: {subject or '-'}\n\n"
+            f"Body:\n{body_preview or '-'}\n\n"
+            "If it looks good, approve it and I will send it."
+        )
+    return AgentResponse(
+        status="approval_required",
+        message=message,
+        data={
+            **(send_response.data or {}),
+            "draft_id": draft_id,
+            "to": to,
+            "to_list": to_values or ([to] if to else []),
+            "subject": subject,
+            "body_preview": body_preview,
+        },
+    )
 
 
 def _explicit_email_subject_from_text(text: str) -> str:

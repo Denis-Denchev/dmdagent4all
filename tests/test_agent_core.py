@@ -3100,6 +3100,99 @@ and this is the knowlage
             draft = json.loads(draft_path.read_text(encoding="utf-8"))
             self.assertEqual(draft["body"], "Проектът работи и е онлайн.")
 
+    def test_bulgarian_email_body_marker_extracts_requested_body_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                ExplodingPlanner(),
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "искам да ползваш моят gmail и да пратиш имейл на: denis.denchev@outlook.com "
+                    "в мейла искам да пише hello world first mail from a bot и добави нещо от себе си."
+                )
+
+            self.assertEqual(response.status, "approval_required")
+            draft_id = str((response.data or {}).get("draft_id"))
+            draft_path = root / "email-drafts" / "gmail" / f"{draft_id}.json"
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(draft["to"], ["denis.denchev@outlook.com"])
+            self.assertEqual(
+                draft["body"],
+                "Hello world first mail from a bot. Sent through a local assistant.",
+            )
+            self.assertIn("Съдържание:", response.message)
+            self.assertIn("Hello world first mail from a bot", response.message)
+            self.assertIn("Approve", response.message)
+            self.assertNotIn("в мейла искам", draft["body"])
+
+    def test_planner_create_draft_for_explicit_send_continues_to_send_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            env = {
+                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
+                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+            }
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="gmail.create_draft",
+                            args={
+                                "to": "denis.denchev@outlook.com",
+                                "subject": "Production Deploy",
+                                "body": (
+                                    "Здравей Денис,\n\n"
+                                    "Кодът е пуснат в продукционна среда и системата вече е онлайн."
+                                ),
+                            },
+                            reason="Generate the requested email.",
+                        )
+                    )
+                ),
+                audit=audit,
+                config={
+                    "llm": {"provider": "ollama", "response_language": "auto"},
+                    "email": {"gmail": {"enabled": True}, "max_body_chars": 20000},
+                },
+                permission_context=PermissionContext(
+                    enabled_tools=frozenset({"gmail.create_draft", "gmail.send_draft"}),
+                    granted_permissions=frozenset({"gmail.compose", "gmail.send"}),
+                    approval_risk_threshold=3,
+                ),
+            )
+
+            with mock.patch.dict(os.environ, env):
+                response = core.handle_text(
+                    "искам да генерираш мейл и да го пратиш на denis.denchev@outlook.com"
+                )
+
+            approvals = audit.list_approvals(status="pending")
+
+            self.assertEqual(response.status, "approval_required")
+            self.assertEqual(approvals[0]["tool"], "gmail.send_draft")
+            self.assertEqual((response.data or {}).get("tool"), "gmail.send_draft")
+            self.assertIn("Production Deploy", response.message)
+            self.assertIn("Кодът е пуснат", response.message)
+
     def test_send_draft_followup_uses_latest_local_email_draft_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
