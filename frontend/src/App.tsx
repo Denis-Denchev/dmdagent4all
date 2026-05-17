@@ -23,7 +23,19 @@ import {
   type WorkspaceFileContent,
   type WorkspaceFilesResponse,
 } from './api'
-import { AppRoutes, SidebarNav, type SidebarNavItem } from './components/layout'
+import {
+  ActivityFeed,
+  AgentCorePanel,
+  AppShell,
+  ApprovalCard,
+  ChatMessage as ChatMessageCard,
+  Sidebar,
+  StatusBadge,
+  ToolCard,
+  ToolTrace,
+  TopStatusBar,
+} from './components/cockpit'
+import { AppRoutes, type SidebarNavItem } from './components/layout'
 import {
   ConfigHub,
   ConfigSectionPage,
@@ -41,7 +53,7 @@ type DashboardRoute = {
   configSection: ConfigSection | null
 }
 
-type ChatMessage = {
+type ChatMessageRecord = {
   id: string
   role: 'user' | 'agent' | 'system'
   text: string
@@ -363,7 +375,7 @@ export function App() {
   const [deepseekKey, setDeepSeekKey] = useState('')
   const [deepseekModels, setDeepSeekModels] = useState<string[]>([])
   const [deepseekSelectedModel, setDeepSeekSelectedModel] = useState('')
-  const [messages, setMessages] = useState<ChatMessage[]>([
+  const [messages, setMessages] = useState<ChatMessageRecord[]>([
     {
       id: 'welcome',
       role: 'system',
@@ -407,6 +419,36 @@ export function App() {
               ? 'tour-logs'
               : undefined,
   }))
+  const toolDeck = useMemo(() => {
+    const catalog = [
+      { title: 'Browser', match: ['browser.'], description: 'Guarded page reads, scraping, forms, and isolated browser actions.' },
+      { title: 'Gmail', match: ['gmail'], description: 'Local IMAP/SMTP Gmail drafts, reads, and approval-gated sends.' },
+      { title: 'Calendar', match: ['calendar.'], description: 'Calendar reads, free/busy checks, and event operations.' },
+      { title: 'Terminal', match: ['terminal'], description: 'Workspace-scoped command execution with allowlist and approvals.' },
+      { title: 'Memory', match: ['memory.'], description: 'Local long-term context stored in Markdown files.' },
+      { title: 'Filesystem', match: ['files.'], description: 'Workspace file read, write, create, and guarded delete tools.' },
+      { title: 'Telegram', match: ['telegram'], description: 'Remote command channel for allowlisted Telegram users.' },
+      { title: 'Web Search', match: ['web.', 'search', 'browser.scrape'], description: 'Network research and readable page extraction surface.' },
+      { title: 'Code', match: ['developer.', 'code'], description: 'Repository context, code inspection, and developer workflow support.' },
+    ]
+    return catalog.map((item) => {
+      const matches = tools.filter((tool) => item.match.some((needle) => tool.name.toLowerCase().includes(needle)))
+      const explicitEnabled =
+        item.title === 'Terminal'
+          ? Boolean(terminal?.enabled)
+          : item.title === 'Telegram'
+            ? Boolean(telegram?.enabled)
+            : false
+      const enabledMatches = matches.filter((tool) => tool.enabled)
+      return {
+        ...item,
+        enabled: explicitEnabled || enabledMatches.length > 0,
+        status: matches.length ? `${enabledMatches.length}/${matches.length} enabled` : explicitEnabled ? 'Interface enabled' : 'Unavailable',
+        risk: matches.length ? Math.max(...matches.map((tool) => tool.risk)) : null,
+        approvalRequired: matches.some((tool) => tool.approval_required),
+      }
+    })
+  }, [telegram?.enabled, terminal?.enabled, tools])
 
   const openaiModelOptions = useMemo(() => {
     const options = new Set(openaiModels)
@@ -1050,21 +1092,21 @@ export function App() {
         title: 'General',
         description: 'App identity, user name, language, and startup defaults',
         status: String(configuration?.setup.agent_name ?? 'DMD Agent'),
-        group: 'Core setup',
+        group: 'Core Setup',
       },
       {
         key: 'models',
         title: 'Models',
         description: 'Planner behavior, prompt stack, token limits, and model-facing instructions',
         status: String(status?.llm.provider ?? 'loading'),
-        group: 'Core setup',
+        group: 'Models',
       },
       {
         key: 'tools',
         title: 'Tools',
         description: 'Browser scrape limits, email sign-in, and connector configuration',
         status: `${gmailStatus} / ${outlookStatus}`,
-        group: 'Core setup',
+        group: 'Tools',
       },
       {
         key: 'workspace',
@@ -1072,7 +1114,7 @@ export function App() {
         description: 'Downloads, current workspace, terminal policy, and command allowlist',
         status: terminal?.ready ? 'ready' : 'not ready',
         tone: terminal?.ready ? 'normal' : 'warning',
-        group: 'Core setup',
+        group: 'Workspace',
       },
       {
         key: 'security',
@@ -1080,14 +1122,14 @@ export function App() {
         description: 'Approvals, cloud context, emergency stop, and guarded execution policy',
         status: `risk ${configuration?.permissions.approval_required_at_risk ?? 3}+`,
         tone: 'warning',
-        group: 'Safety and system',
+        group: 'Security',
       },
       {
         key: 'advanced',
         title: 'System',
         description: 'Memory, Telegram, system paths, doctor summary, and connector readiness',
         status: `${doctor?.summary.warn ?? 0} warnings`,
-        group: 'Safety and system',
+        group: 'System',
       },
     ]
 
@@ -1547,82 +1589,38 @@ export function App() {
   ].filter(Boolean)
 
   return (
-    <div className={[
-      'app-shell',
-      railCollapsed ? 'app-shell--rail-collapsed' : '',
-      autonomyEnabled ? 'app-shell--autonomy' : '',
-    ].filter(Boolean).join(' ')}>
-      <aside className="command-rail">
-        <button
-          className="rail-toggle"
-          type="button"
-          onClick={() => setRailCollapsed(!railCollapsed)}
-          aria-label={railCollapsed ? 'Expand navigation' : 'Collapse navigation'}
-          aria-expanded={!railCollapsed}
-        >
-          <span />
-          <span />
-          <span />
-        </button>
-        <div className="brand" data-tour="tour-help">
-          <div className="brand-mark">DMD</div>
-          <div className="brand-copy">
-            <strong>DMD Agent</strong>
-            <span>local command deck</span>
-          </div>
-        </div>
-
-        <SidebarNav
-          items={navItems}
-          activeKey={activeView}
-          onNavigate={(key) => navigateTo(key as View)}
-        />
-
-        <div className="rail-status">
-          <span>Runtime</span>
-          <strong>{status?.llm.provider ?? 'loading'} / {status?.llm.model ?? '-'}</strong>
-          <span>Enabled tools</span>
-          <strong>{enabledToolCount}</strong>
-          <span>Mode</span>
-          <strong>{autonomyEnabled ? 'DANGER' : 'SAFE'}</strong>
-          <span>Pending approvals</span>
-          <strong>{pendingCount}</strong>
-        </div>
-      </aside>
+    <AppShell collapsed={railCollapsed} autonomy={autonomyEnabled}>
+      <Sidebar
+        collapsed={railCollapsed}
+        items={navItems}
+        activeKey={activeView}
+        provider={status?.llm.provider}
+        model={status?.llm.model}
+        version={status?.version}
+        enabledToolCount={enabledToolCount}
+        pendingCount={pendingCount}
+        autonomyEnabled={autonomyEnabled}
+        emergencyActive={Boolean(emergency?.active)}
+        onToggle={() => setRailCollapsed(!railCollapsed)}
+        onNavigate={(key) => navigateTo(key as View)}
+      />
 
       <main className="workspace">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">Local-first agent cockpit</p>
-            <h1>{activeLabel}</h1>
-          </div>
-          <div className="topbar-actions">
-            <button
-              className={autonomyEnabled ? 'autonomy-toggle autonomy-toggle--active' : 'autonomy-toggle'}
-              type="button"
-              onClick={() => void toggleAutonomyMode()}
-              disabled={busy || autonomy?.toggle_locked_by_env}
-              title={autonomy?.toggle_locked_by_env ? 'LOCAL_DEV_AUTONOMY env var is forcing autonomy mode.' : 'Switch runtime orchestration mode'}
-            >
-              <span className="autonomy-dot" />
-              <span>{autonomyEnabled ? 'Danger Mode' : 'Standard Safe Mode'}</span>
-            </button>
-            {emergency?.active ? (
-              <button className="button" type="button" onClick={() => void emergencyReset()}>
-                Reset Emergency
-              </button>
-            ) : null}
-            <button className="button button-danger" type="button" onClick={() => void emergencyStop()} data-tour="tour-emergency">
-              Emergency Stop
-            </button>
-            <button className="button button-secondary" type="button" onClick={() => setTourOpen(true)}>
-              Start Tour
-            </button>
-            <button className="button button-secondary" type="button" onClick={() => void refreshAll()}>
-              Refresh
-            </button>
-          </div>
-        </header>
+        <TopStatusBar
+          activeLabel={activeLabel}
+          status={status}
+          autonomyEnabled={autonomyEnabled}
+          toggleLocked={Boolean(autonomy?.toggle_locked_by_env)}
+          pendingCount={pendingCount}
+          enabledToolCount={enabledToolCount}
+          emergencyActive={Boolean(emergency?.active)}
+          busy={busy}
+          onToggleAutonomy={() => void toggleAutonomyMode()}
+          onEmergencyStop={() => void emergencyStop()}
+          onEmergencyReset={() => void emergencyReset()}
+          onStartTour={() => setTourOpen(true)}
+          onRefresh={() => void refreshAll()}
+        />
 
         {notice ? <div className="notice">{notice}</div> : null}
         {emergency?.active ? (
@@ -1637,74 +1635,18 @@ export function App() {
             <div className="chat-main panel">
               <div className="chat-log" ref={chatLogRef}>
                 {messages.map((message) => (
-                  <article key={message.id} className={`message message--${message.role}`}>
-                    <div className="message-avatar">{message.role === 'user' ? 'YOU' : message.role === 'system' ? 'SYS' : 'AI'}</div>
-                    <div className="message-body">
-                      <p>{message.text}</p>
-                      {visibleTrace(traceFromResponse(message.response)).length > 0 ? (
-                        <details className="reasoning-panel">
-                          <summary>
-                            <span className="reasoning-summary-main">
-                              <span className="reasoning-dot" />
-                              <span>Reasoning</span>
-                            </span>
-                            <span>{visibleTrace(traceFromResponse(message.response)).length} steps</span>
-                          </summary>
-                          <div className="reasoning-events">
-                            {visibleTrace(traceFromResponse(message.response)).map((event, index) => (
-                              <div className="reasoning-event" key={`${message.id}-trace-${index}`}>
-                                <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
-                                <span className="reasoning-event-copy">
-                                  <strong>{event.title}</strong>
-                                  {event.detail ? <small>{event.detail}</small> : null}
-                                </span>
-                                {event.tool ? <code>{event.tool}</code> : null}
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      ) : null}
-                      {approvalIdFromResponse(message.response) !== null ? (
-                        <div className="approval-inline">
-                          <span>Approval required for {String(dataObject(message.response?.data).tool ?? 'tool')}</span>
-                          <div className="row-actions">
-                            <button className="button" type="button" onClick={() => void approveRequest(approvalIdFromResponse(message.response) ?? 0)}>
-                              Approve
-                            </button>
-                            <button className="button button-danger" type="button" onClick={() => void denyRequest(approvalIdFromResponse(message.response) ?? 0)}>
-                              Deny
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  </article>
+                  <ChatMessageCard
+                    key={message.id}
+                    message={message}
+                    onApprove={(approvalId) => void approveRequest(approvalId)}
+                    onDeny={(approvalId) => void denyRequest(approvalId)}
+                  />
                 ))}
                 {busy && visibleTrace(activeTrace).length > 0 ? (
                   <article className="message message--agent message--runtime">
                     <div className="message-avatar">RUN</div>
                     <div className="message-body">
-                      <div className="reasoning-panel reasoning-panel--live">
-                        <div className="reasoning-live-header">
-                          <span className="reasoning-summary-main">
-                            <span className="reasoning-dot reasoning-dot--live" />
-                            <strong>{latestTraceTitle(activeTrace)}</strong>
-                          </span>
-                          <span>{visibleTrace(activeTrace).length} steps</span>
-                        </div>
-                        <div className="reasoning-events">
-                          {visibleTrace(activeTrace).slice(-8).map((event, index) => (
-                            <div className="reasoning-event" key={`active-trace-${index}-${event.title}`}>
-                              <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
-                              <span className="reasoning-event-copy">
-                                <strong>{event.title}</strong>
-                                {event.detail ? <small>{event.detail}</small> : null}
-                              </span>
-                              {event.tool ? <code>{event.tool}</code> : null}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                      <ToolTrace events={activeTrace} live />
                     </div>
                   </article>
                 ) : null}
@@ -1717,6 +1659,12 @@ export function App() {
                   void sendChat()
                 }}
               >
+                <div className="composer-tools" aria-label="Quick command tools">
+                  <button className="composer-icon" type="button" title="Attach context">AT</button>
+                  <button className="composer-icon" type="button" title="Tool request">TL</button>
+                  <button className="composer-icon" type="button" title="Code task">CD</button>
+                  <button className="composer-icon" type="button" title="Command mode">CMD</button>
+                </div>
                 <textarea
                   value={chatInput}
                   onChange={(event) => setChatInput(event.target.value)}
@@ -1729,23 +1677,31 @@ export function App() {
                 </button>
               </form>
             </div>
-            <aside className="panel chat-side" data-tour="tour-approvals">
-              <div className="section-heading">
-                <strong>Pending Approvals</strong>
-                <span>{pendingCount} waiting</span>
-              </div>
-              {approvals.length === 0 ? <p className="empty">No pending approvals.</p> : null}
-              {approvals.map((approval) => (
-                <article className="approval-card" key={approval.id}>
-                  <strong>#{approval.id} {approval.tool}</strong>
-                  <span>Risk {approval.risk ?? '-'} - {approval.reason ?? approval.decision_reason ?? 'Needs approval'}</span>
-                  <code>{JSON.stringify(approval.args)}</code>
-                  <div className="row-actions">
-                    <button className="button" type="button" onClick={() => void approveRequest(approval.id)}>Approve</button>
-                    <button className="button button-danger" type="button" onClick={() => void denyRequest(approval.id)}>Deny</button>
-                  </div>
-                </article>
-              ))}
+            <aside className="chat-side" data-tour="tour-approvals">
+              <AgentCorePanel
+                status={status}
+                autonomyEnabled={autonomyEnabled}
+                emergencyActive={Boolean(emergency?.active)}
+                enabledToolCount={enabledToolCount}
+                pendingCount={pendingCount}
+                memoryCount={memoryFiles.length}
+              />
+              <section className="panel pending-preview">
+                <div className="section-heading">
+                  <strong>Pending Approvals</strong>
+                  <span>{pendingCount} waiting</span>
+                </div>
+                {approvals.length === 0 ? <p className="empty">No pending approvals.</p> : null}
+                {approvals.slice(0, 3).map((approval) => (
+                  <ApprovalCard
+                    key={approval.id}
+                    approval={approval}
+                    onApprove={(approvalId) => void approveRequest(approvalId)}
+                    onDeny={(approvalId) => void denyRequest(approvalId)}
+                  />
+                ))}
+              </section>
+              <ActivityFeed events={audit} />
             </aside>
           </section>
         ) : null}
@@ -1763,17 +1719,13 @@ export function App() {
               {approvals.length === 0 ? <p className="empty">No pending approvals.</p> : null}
               <div className="approval-list">
                 {approvals.map((approval) => (
-                  <article className="approval-card approval-card--wide" key={approval.id}>
-                    <div>
-                      <strong>#{approval.id} {approval.tool}</strong>
-                      <span>Risk {approval.risk ?? '-'} - {approval.reason ?? approval.decision_reason ?? 'Needs approval'}</span>
-                    </div>
-                    <code>{JSON.stringify(approval.args)}</code>
-                    <div className="row-actions">
-                      <button className="button" type="button" onClick={() => void approveRequest(approval.id)}>Approve</button>
-                      <button className="button button-danger" type="button" onClick={() => void denyRequest(approval.id)}>Deny</button>
-                    </div>
-                  </article>
+                  <ApprovalCard
+                    key={approval.id}
+                    approval={approval}
+                    wide
+                    onApprove={(approvalId) => void approveRequest(approvalId)}
+                    onDeny={(approvalId) => void denyRequest(approvalId)}
+                  />
                 ))}
               </div>
             </div>
@@ -1847,6 +1799,10 @@ export function App() {
                 <div><span>Model</span><strong>{status?.llm.model ?? '-'}</strong></div>
                 <div><span>Planner</span><strong>{status?.llm.planner_model ?? status?.llm.model ?? '-'}</strong></div>
                 <div><span>Language</span><strong>{status?.llm.response_language ?? 'auto'}</strong></div>
+                <div><span>Provider</span><strong>{status?.llm.provider ?? '-'}</strong></div>
+                <div><span>Planner tokens</span><strong>{configuration?.llm.planner_max_tokens ?? '-'}</strong></div>
+                <div><span>Temperature</span><strong>{configuration?.llm.planner_temperature ?? '-'}</strong></div>
+                <div><span>Key env</span><strong>{status?.llm.api_key_env ?? '-'}</strong></div>
               </div>
             </div>
 
@@ -1858,7 +1814,10 @@ export function App() {
               <div className="models-grid">
                 {models.map((mode) => (
                   <article className="model-card" key={mode.key}>
-                    <strong>{mode.label}</strong>
+                    <div className="model-card-head">
+                      <strong>{mode.label}</strong>
+                      <StatusBadge tone={status?.llm.mode === mode.key ? 'success' : 'muted'}>{status?.llm.mode === mode.key ? 'Active' : 'Available'}</StatusBadge>
+                    </div>
                     <code>{mode.default_model}</code>
                     <span>{mode.description}</span>
                     <button className="button button-secondary" type="button" onClick={() => void runAction(() => api.setModelMode(mode.key), `${mode.label} selected.`)}>
@@ -2088,17 +2047,33 @@ export function App() {
 
         {activeView === 'tools' ? (
           <section className="tools-console">
+            <div className="tool-deck-grid">
+              {toolDeck.map((tool) => (
+                <ToolCard
+                  key={tool.title}
+                  title={tool.title}
+                  description={tool.description}
+                  status={tool.status}
+                  risk={tool.risk}
+                  enabled={tool.enabled}
+                  approvalRequired={tool.approvalRequired}
+                />
+              ))}
+            </div>
             <div className="panel command-panel">
-              <div className="section-heading"><strong>Tools</strong><span>{enabledToolCount} enabled</span></div>
+              <div className="section-heading"><strong>Tool Execution Surface</strong><span>{enabledToolCount} enabled</span></div>
               <div className="tools-grid">
                 {tools.map((tool) => (
-                  <article className="tool-card" key={tool.name}>
-                    <div><strong>{tool.name}</strong><span>{tool.description}</span></div>
-                    <div className="tool-meta"><span>Risk {tool.risk}</span><span>{tool.approval_required ? 'Approval' : 'No approval'}</span></div>
-                    <button className={tool.enabled ? 'toggle toggle-on' : 'toggle'} type="button" onClick={() => void runAction(() => api.setTool(tool.name, !tool.enabled), `${tool.name} ${tool.enabled ? 'disabled' : 'enabled'}.`)} aria-pressed={tool.enabled}>
-                      {tool.enabled ? 'Enabled' : 'Disabled'}
-                    </button>
-                  </article>
+                  <ToolCard
+                    key={tool.name}
+                    title={tool.name}
+                    description={tool.description}
+                    status={tool.enabled ? 'Enabled' : 'Disabled'}
+                    risk={tool.risk}
+                    enabled={tool.enabled}
+                    approvalRequired={tool.approval_required}
+                    onToggle={() => void runAction(() => api.setTool(tool.name, !tool.enabled), `${tool.name} ${tool.enabled ? 'disabled' : 'enabled'}.`)}
+                  />
                 ))}
               </div>
             </div>
@@ -2199,6 +2174,6 @@ export function App() {
           </div>
         </div>
       ) : null}
-    </div>
+    </AppShell>
   )
 }

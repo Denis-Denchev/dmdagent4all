@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { StatusBadge } from './cockpit'
 
 export type ConfigHubEntry = {
   key: string
@@ -19,6 +20,21 @@ type ConfigSectionPageProps = {
   description: string
   onBack: () => void
   children: ReactNode
+}
+
+function configIcon(key: string) {
+  const icons: Record<string, string> = {
+    general: 'ID',
+    models: 'MD',
+    tools: 'TL',
+    workspace: 'WS',
+    security: 'SC',
+    memory: 'MY',
+    telegram: 'TG',
+    emergency: 'EM',
+    advanced: 'SY',
+  }
+  return icons[key] ?? 'CF'
 }
 
 export function ConfigHub({ entries, onOpen }: ConfigHubProps) {
@@ -49,10 +65,11 @@ export function ConfigHub({ entries, onOpen }: ConfigHubProps) {
             {group.entries.map((entry) => (
               <button
                 key={entry.key}
-                className="settings-index-row"
+                className={`settings-index-row settings-index-row--${entry.tone ?? 'normal'}`}
                 type="button"
                 onClick={() => onOpen(entry.key)}
               >
+                <span className="settings-index-icon">{configIcon(entry.key)}</span>
                 <span className="settings-index-main">
                   <strong>{entry.title}</strong>
                   <small>{entry.description}</small>
@@ -127,14 +144,4 @@ export function SettingRow({
 
 export function DangerZone({ children }: { children: ReactNode }) {
   return <section className="danger-zone">{children}</section>
-}
-
-export function StatusBadge({
-  children,
-  tone = 'normal',
-}: {
-  children: ReactNode
-  tone?: 'normal' | 'warning' | 'danger'
-}) {
-  return <span className={`status-badge status-badge--${tone}`}>{children}</span>
 }
