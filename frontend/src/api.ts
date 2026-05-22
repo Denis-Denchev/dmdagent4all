@@ -433,11 +433,13 @@ export const api = {
     message: string,
     session_id = 'dashboard',
     onEvent: (event: ChatStreamEvent) => void,
+    signal?: AbortSignal,
   ) => {
     const response = await fetch('/v1/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, session_id }),
+      signal,
     })
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`)

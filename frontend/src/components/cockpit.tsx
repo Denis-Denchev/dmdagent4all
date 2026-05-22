@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { AgentResponse, AgentTraceEvent, Approval, AuditEvent, Status } from '../api'
+import { approvalIdFromResponse, dataObject, formatDate, traceFromResponse, visibleTrace } from '../utils'
 
 type Tone = 'normal' | 'warning' | 'danger' | 'success' | 'muted'
 
@@ -20,38 +21,12 @@ export type ChatMessageModel = {
   response?: AgentResponse
 }
 
-function dataObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-}
-
-function formatDate(value: string | undefined) {
-  if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
-}
-
 function shortJson(value: unknown) {
   try {
     return JSON.stringify(value)
   } catch {
     return String(value)
   }
-}
-
-function visibleTrace(events: AgentTraceEvent[]): AgentTraceEvent[] {
-  return events.filter((event) => dataObject(event.metadata).visibility !== 'debug')
-}
-
-function traceFromResponse(response?: AgentResponse): AgentTraceEvent[] {
-  const trace = dataObject(response?.data).trace
-  return Array.isArray(trace) ? (trace as AgentTraceEvent[]) : []
-}
-
-function approvalIdFromResponse(response?: AgentResponse) {
-  if (response?.status !== 'approval_required') return null
-  const approvalId = dataObject(response?.data).approval_id
-  return typeof approvalId === 'number' ? approvalId : null
 }
 
 function riskTone(risk: number | null | undefined): Tone {
@@ -347,7 +322,7 @@ export function ToolTrace({ events, live = false }: { events: AgentTraceEvent[];
       </summary>
       <div className="reasoning-events">
         {visible.slice(live ? -8 : 0).map((event, index) => (
-          <div className="reasoning-event" key={`${event.title}-${event.status}-${index}`}>
+          <div className="reasoning-event" key={`${event.at ?? index}-${event.kind}-${event.title}`}>
             <span className={`reasoning-status reasoning-status--${event.status}`}>{event.status}</span>
             <span className="reasoning-event-copy">
               <strong>{event.title}</strong>
@@ -626,8 +601,8 @@ export function ActivityFeed({ events, limit = 6 }: { events: AuditEvent[]; limi
       </div>
       {recent.length === 0 ? <p className="empty">No recorded activity.</p> : null}
       <div className="activity-list">
-        {recent.map((event, index) => (
-          <article className="activity-row" key={`${event.created_at}-${index}`}>
+        {recent.map((event) => (
+          <article className="activity-row" key={`${event.created_at}-${event.event_type}-${event.tool ?? ''}`}>
             <span className={event.result_status === 'error' ? 'status-led status-led--danger' : 'status-led'} />
             <div className="activity-row-copy">
               <strong>{event.event_type}</strong>

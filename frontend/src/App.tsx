@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type AgentTraceEvent,
   type AgentConfiguration,
@@ -36,6 +36,7 @@ import {
   TopStatusBar,
 } from './components/cockpit'
 import { AppRoutes, type SidebarNavItem } from './components/layout'
+import { approvalIdFromResponse, dataObject, formatBytes, formatDate, formatUsd, traceFromResponse, visibleTrace } from './utils'
 import {
   ConfigHub,
   ConfigSectionPage,
@@ -215,41 +216,6 @@ const tourSteps: TourStep[] = [
   },
 ]
 
-function formatUsd(value: number | null | undefined, digits = 2) {
-  return value === null || value === undefined ? '-' : `$${value.toFixed(digits)}`
-}
-
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
-}
-
-function formatDate(value: string) {
-  if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
-}
-
-function dataObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-}
-
-function approvalIdFromResponse(response?: AgentResponse) {
-  if (response?.status !== 'approval_required') return null
-  const approvalId = dataObject(response?.data).approval_id
-  return typeof approvalId === 'number' ? approvalId : null
-}
-
-function traceFromResponse(response?: AgentResponse): AgentTraceEvent[] {
-  const trace = dataObject(response?.data).trace
-  return Array.isArray(trace) ? (trace as AgentTraceEvent[]) : []
-}
-
-function visibleTrace(events: AgentTraceEvent[]): AgentTraceEvent[] {
-  return events.filter((event) => dataObject(event.metadata).visibility !== 'debug')
-}
 
 function latestTraceTitle(events: AgentTraceEvent[]): string {
   const visible = visibleTrace(events)
@@ -389,7 +355,7 @@ export function App() {
   const [tourStep, setTourStep] = useState(0)
   const [tourRect, setTourRect] = useState<TourRect | null>(null)
 
-  function navigateTo(view: View, section: ConfigSection | null = null, options: { replace?: boolean } = {}) {
+  const navigateTo = useCallback((view: View, section: ConfigSection | null = null, options: { replace?: boolean } = {}) => {
     const nextPath = pathForRoute(view, section)
     setActiveViewState(view)
     setConfigSection(view === 'config' ? section : null)
@@ -397,7 +363,7 @@ export function App() {
       const method = options.replace ? 'replaceState' : 'pushState'
       window.history[method]({}, '', nextPath)
     }
-  }
+  }, [])
 
   const pendingCount = approvals.length
   const enabledToolCount = useMemo(() => tools.filter((tool) => tool.enabled).length, [tools])
@@ -527,24 +493,24 @@ export function App() {
 
   async function refreshAll() {
     const [
-      statusResult,
-      toolsResult,
-      permissionsResult,
-      connectorsResult,
-      terminalResult,
-      autonomyResult,
-      telegramResult,
-      openaiResult,
-      deepseekResult,
-      approvalsResult,
-      auditResult,
-      doctorResult,
-      emergencyResult,
-      configurationResult,
-      memoryResult,
-      workspaceFilesResult,
-      modelsResult,
-    ] = await Promise.all([
+      statusR,
+      toolsR,
+      permissionsR,
+      connectorsR,
+      terminalR,
+      autonomyR,
+      telegramR,
+      openaiR,
+      deepseekR,
+      approvalsR,
+      auditR,
+      doctorR,
+      emergencyR,
+      configurationR,
+      memoryR,
+      workspaceFilesR,
+      modelsR,
+    ] = await Promise.allSettled([
       api.status(),
       api.tools(),
       api.permissions(),
@@ -563,89 +529,161 @@ export function App() {
       api.workspaceFiles(),
       api.models(),
     ])
-    setStatus(statusResult)
-    setTools(toolsResult)
-    setPermissions(permissionsResult.available)
-    setConnectors(connectorsResult)
-    setTerminal(terminalResult)
-    setAutonomy(autonomyResult)
-    setTelegram(telegramResult)
-    setOpenAI(openaiResult)
-    setDeepSeek(deepseekResult)
-    setApprovals(approvalsResult)
-    setAudit(auditResult)
-    setDoctor(doctorResult)
-    setEmergency(emergencyResult)
-    setConfiguration(configurationResult)
-    setMemoryFiles(memoryResult.files)
-    setWorkspaceFiles(workspaceFilesResult)
-    setModels(modelsResult.modes)
-    setCustomModel(modelsResult.current.model)
-    setTerminalWorkspaceRoot(terminalResult.workspace_root)
-    setTerminalTimeout(String(terminalResult.timeout_seconds))
-    setTerminalMaxOutput(String(terminalResult.max_output_chars))
-    setTerminalAutoApprove(terminalResult.auto_approve_allowlisted)
-    setTelegramTokenEnv(telegramResult.bot_token_env)
-    setOpenAISelectedModel(openaiResult.provider === 'openai' ? openaiResult.model : openaiSelectedModel)
-    setOpenAILimitDraft(openaiResult.usage.limit_usd === null ? '' : String(openaiResult.usage.limit_usd))
-    setDeepSeekSelectedModel(
-      deepseekResult.provider === 'deepseek'
-        ? deepseekResult.model
-        : deepseekResult.default_models[0] ?? 'deepseek-v4-flash',
-    )
-    setConfigDraft({
-      downloadsRoot: String(configurationResult.storage.downloads_root ?? ''),
-      agentName: String(configurationResult.setup.agent_name ?? 'DMD Agent'),
-      userName: String(configurationResult.setup.user_name ?? ''),
-      preferredLanguage: String(configurationResult.setup.preferred_language ?? 'auto'),
-      responseLanguage: String(configurationResult.llm.response_language ?? 'auto'),
-      plannerMaxTokens: String(configurationResult.llm.planner_max_tokens ?? 192),
-      plannerTemperature: String(configurationResult.llm.planner_temperature ?? 0),
-      plannerThink: Boolean(configurationResult.llm.planner_think),
-      chatSystemPrompt: configurationResult.system_prompts.chat.effective,
-      plannerSystemPrompt: configurationResult.system_prompts.planner.effective,
-      answerSystemPrompt: configurationResult.system_prompts.answer.effective,
-      sendChatHistoryToCloud: Boolean(configurationResult.privacy.send_chat_history_to_cloud),
-      browserTimeout: String(configurationResult.browser.timeout_seconds ?? 15),
-      browserMaxResponseBytes: String(configurationResult.browser.max_response_bytes ?? 1000000),
-      browserMaxTextChars: String(configurationResult.browser.max_text_chars ?? 12000),
-      approvalRisk: String(configurationResult.permissions.approval_required_at_risk ?? 3),
-      emailMaxBodyChars: String(configurationResult.email.max_body_chars ?? 20000),
-      gmailEnabled: Boolean(configurationResult.email.gmail.enabled),
-      gmailAuthMethod: configurationResult.email.gmail.auth_method,
-      gmailImapHost: configurationResult.email.gmail.imap_host,
-      gmailImapPort: String(configurationResult.email.gmail.imap_port),
-      gmailSmtpHost: configurationResult.email.gmail.smtp_host,
-      gmailSmtpPort: String(configurationResult.email.gmail.smtp_port),
-      gmailUsernameEnv: configurationResult.email.gmail.username_env,
-      gmailPasswordEnv: configurationResult.email.gmail.password_env,
-      gmailFromEnv: configurationResult.email.gmail.from_env,
-      gmailOauthClientId: configurationResult.email.gmail.oauth_client_id,
-      gmailOauthRedirectUri: configurationResult.email.gmail.oauth_redirect_uri,
-      gmailOauthEmail: configurationResult.email.gmail.oauth_email,
-      gmailOauthFromAddress: configurationResult.email.gmail.oauth_from_address,
-      gmailMailbox: configurationResult.email.gmail.mailbox,
-      gmailArchiveMailbox: configurationResult.email.gmail.archive_mailbox,
-      outlookEnabled: Boolean(configurationResult.email.outlook.enabled),
-      outlookImapHost: configurationResult.email.outlook.imap_host,
-      outlookImapPort: String(configurationResult.email.outlook.imap_port),
-      outlookSmtpHost: configurationResult.email.outlook.smtp_host,
-      outlookSmtpPort: String(configurationResult.email.outlook.smtp_port),
-      outlookUsernameEnv: configurationResult.email.outlook.username_env,
-      outlookPasswordEnv: configurationResult.email.outlook.password_env,
-      outlookFromEnv: configurationResult.email.outlook.from_env,
-      outlookMailbox: configurationResult.email.outlook.mailbox,
-      outlookArchiveMailbox: configurationResult.email.outlook.archive_mailbox,
-    })
+
+    if (statusR.status === 'fulfilled') setStatus(statusR.value)
+    if (toolsR.status === 'fulfilled') setTools(toolsR.value)
+    if (permissionsR.status === 'fulfilled') setPermissions(permissionsR.value.available)
+    if (connectorsR.status === 'fulfilled') setConnectors(connectorsR.value)
+    if (autonomyR.status === 'fulfilled') setAutonomy(autonomyR.value)
+    if (approvalsR.status === 'fulfilled') setApprovals(approvalsR.value)
+    if (auditR.status === 'fulfilled') setAudit(auditR.value)
+    if (doctorR.status === 'fulfilled') setDoctor(doctorR.value)
+    if (emergencyR.status === 'fulfilled') setEmergency(emergencyR.value)
+    if (memoryR.status === 'fulfilled') setMemoryFiles(memoryR.value.files)
+    if (workspaceFilesR.status === 'fulfilled') setWorkspaceFiles(workspaceFilesR.value)
+
+    if (terminalR.status === 'fulfilled') {
+      const t = terminalR.value
+      setTerminal(t)
+      setTerminalWorkspaceRoot(t.workspace_root)
+      setTerminalTimeout(String(t.timeout_seconds))
+      setTerminalMaxOutput(String(t.max_output_chars))
+      setTerminalAutoApprove(t.auto_approve_allowlisted)
+    }
+
+    if (telegramR.status === 'fulfilled') {
+      setTelegram(telegramR.value)
+      setTelegramTokenEnv(telegramR.value.bot_token_env)
+    }
+
+    if (openaiR.status === 'fulfilled') {
+      const o = openaiR.value
+      setOpenAI(o)
+      setOpenAISelectedModel(o.provider === 'openai' ? o.model : openaiSelectedModel)
+      setOpenAILimitDraft(o.usage.limit_usd === null ? '' : String(o.usage.limit_usd))
+    }
+
+    if (deepseekR.status === 'fulfilled') {
+      const d = deepseekR.value
+      setDeepSeek(d)
+      setDeepSeekSelectedModel(
+        d.provider === 'deepseek' ? d.model : d.default_models[0] ?? 'deepseek-v4-flash',
+      )
+    }
+
+    if (modelsR.status === 'fulfilled') {
+      setModels(modelsR.value.modes)
+      setCustomModel(modelsR.value.current.model)
+    }
+
+    if (configurationR.status === 'fulfilled') {
+      const c = configurationR.value
+      setConfiguration(c)
+      setConfigDraft({
+        downloadsRoot: String(c.storage.downloads_root ?? ''),
+        agentName: String(c.setup.agent_name ?? 'DMD Agent'),
+        userName: String(c.setup.user_name ?? ''),
+        preferredLanguage: String(c.setup.preferred_language ?? 'auto'),
+        responseLanguage: String(c.llm.response_language ?? 'auto'),
+        plannerMaxTokens: String(c.llm.planner_max_tokens ?? 192),
+        plannerTemperature: String(c.llm.planner_temperature ?? 0),
+        plannerThink: Boolean(c.llm.planner_think),
+        chatSystemPrompt: c.system_prompts.chat.effective,
+        plannerSystemPrompt: c.system_prompts.planner.effective,
+        answerSystemPrompt: c.system_prompts.answer.effective,
+        sendChatHistoryToCloud: Boolean(c.privacy.send_chat_history_to_cloud),
+        browserTimeout: String(c.browser.timeout_seconds ?? 15),
+        browserMaxResponseBytes: String(c.browser.max_response_bytes ?? 1000000),
+        browserMaxTextChars: String(c.browser.max_text_chars ?? 12000),
+        approvalRisk: String(c.permissions.approval_required_at_risk ?? 3),
+        emailMaxBodyChars: String(c.email.max_body_chars ?? 20000),
+        gmailEnabled: Boolean(c.email.gmail.enabled),
+        gmailAuthMethod: c.email.gmail.auth_method,
+        gmailImapHost: c.email.gmail.imap_host,
+        gmailImapPort: String(c.email.gmail.imap_port),
+        gmailSmtpHost: c.email.gmail.smtp_host,
+        gmailSmtpPort: String(c.email.gmail.smtp_port),
+        gmailUsernameEnv: c.email.gmail.username_env,
+        gmailPasswordEnv: c.email.gmail.password_env,
+        gmailFromEnv: c.email.gmail.from_env,
+        gmailOauthClientId: c.email.gmail.oauth_client_id,
+        gmailOauthRedirectUri: c.email.gmail.oauth_redirect_uri,
+        gmailOauthEmail: c.email.gmail.oauth_email,
+        gmailOauthFromAddress: c.email.gmail.oauth_from_address,
+        gmailMailbox: c.email.gmail.mailbox,
+        gmailArchiveMailbox: c.email.gmail.archive_mailbox,
+        outlookEnabled: Boolean(c.email.outlook.enabled),
+        outlookImapHost: c.email.outlook.imap_host,
+        outlookImapPort: String(c.email.outlook.imap_port),
+        outlookSmtpHost: c.email.outlook.smtp_host,
+        outlookSmtpPort: String(c.email.outlook.smtp_port),
+        outlookUsernameEnv: c.email.outlook.username_env,
+        outlookPasswordEnv: c.email.outlook.password_env,
+        outlookFromEnv: c.email.outlook.from_env,
+        outlookMailbox: c.email.outlook.mailbox,
+        outlookArchiveMailbox: c.email.outlook.archive_mailbox,
+      })
+    }
   }
 
-  async function runAction(action: () => Promise<unknown>, message?: string) {
+  async function refreshTools() {
+    const result = await api.tools()
+    setTools(result)
+  }
+
+  async function refreshPermissions() {
+    const result = await api.permissions()
+    setPermissions(result.available)
+  }
+
+  async function refreshTerminal() {
+    const result = await api.terminal()
+    setTerminal(result)
+    setTerminalWorkspaceRoot(result.workspace_root)
+    setTerminalTimeout(String(result.timeout_seconds))
+    setTerminalMaxOutput(String(result.max_output_chars))
+    setTerminalAutoApprove(result.auto_approve_allowlisted)
+  }
+
+  async function refreshTelegram() {
+    const result = await api.telegram()
+    setTelegram(result)
+    setTelegramTokenEnv(result.bot_token_env)
+  }
+
+  async function refreshOpenAI() {
+    const result = await api.openai()
+    setOpenAI(result)
+    setOpenAISelectedModel(result.provider === 'openai' ? result.model : openaiSelectedModel)
+    setOpenAILimitDraft(result.usage.limit_usd === null ? '' : String(result.usage.limit_usd))
+  }
+
+  async function refreshDeepSeek() {
+    const result = await api.deepseek()
+    setDeepSeek(result)
+    setDeepSeekSelectedModel(
+      result.provider === 'deepseek' ? result.model : result.default_models[0] ?? 'deepseek-v4-flash',
+    )
+  }
+
+  async function refreshModels() {
+    const result = await api.models()
+    setModels(result.modes)
+    setCustomModel(result.current.model)
+  }
+
+  async function refreshConfiguration() {
+    const c = await api.configuration()
+    setConfiguration(c)
+  }
+
+  async function runAction(action: () => Promise<unknown>, message?: string, refresh = refreshAll) {
     setBusy(true)
     setNotice(null)
     try {
       await action()
       if (message) setNotice(message)
-      await refreshAll()
+      await refresh()
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Request failed')
     } finally {
@@ -709,17 +747,19 @@ export function App() {
     setMessages((current) => [...current, { id: `${Date.now()}-user`, role: 'user', text: message }])
     setBusy(true)
     setActiveTrace([])
+    const controller = new AbortController()
     try {
       const response = autonomyEnabled
         ? await api.chatStream(message, 'dashboard', (event) => {
           if (event.type === 'trace') {
             setActiveTrace((current) => [...current, event.event])
           }
-        })
+        }, controller.signal)
         : await api.chat(message, 'dashboard')
       appendAgentResponse(response)
       await refreshAll()
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return
       setMessages((current) => [
         ...current,
         {
@@ -729,6 +769,7 @@ export function App() {
         },
       ])
     } finally {
+      controller.abort()
       setActiveTrace([])
       setBusy(false)
     }
@@ -780,13 +821,14 @@ export function App() {
           auto_approve_allowlisted: terminalAutoApprove,
         }),
       'Terminal settings updated.',
+      refreshTerminal,
     )
   }
 
   async function allowTerminalCommand() {
     const command = terminalCommand.trim()
     if (!command) return
-    await runAction(() => api.allowTerminalCommand(command), `Allowlisted: ${command}`)
+    await runAction(() => api.allowTerminalCommand(command), `Allowlisted: ${command}`, refreshTerminal)
     setTerminalCommand('')
   }
 
@@ -852,6 +894,7 @@ export function App() {
           },
         }),
       'Configuration saved.',
+      refreshConfiguration,
     )
   }
 
@@ -866,6 +909,7 @@ export function App() {
     await runAction(
       () => api.loadEmailCredentials(provider, username, appPassword, credentials.fromAddress.trim()),
       `${provider === 'gmail' ? 'Gmail' : 'Outlook'} credentials loaded.`,
+      refreshConfiguration,
     )
     if (provider === 'gmail') {
       setGmailCredentials((current) => ({ ...current, appPassword: '' }))
@@ -952,26 +996,26 @@ export function App() {
   }
 
   async function disconnectGmailOAuth() {
-    await runAction(() => api.disconnectGmailOAuth(), 'Gmail OAuth disconnected.')
+    await runAction(() => api.disconnectGmailOAuth(), 'Gmail OAuth disconnected.', refreshConfiguration)
   }
 
   async function allowTelegramUser() {
     const userId = Number(telegramUserId)
     if (!Number.isInteger(userId)) return
-    await runAction(() => api.allowTelegramUser(userId), `Telegram user allowed: ${userId}`)
+    await runAction(() => api.allowTelegramUser(userId), `Telegram user allowed: ${userId}`, refreshTelegram)
     setTelegramUserId('')
   }
 
   async function saveTelegramTokenEnv() {
     const value = telegramTokenEnv.trim()
     if (!value) return
-    await runAction(() => api.setTelegramTokenEnv(value), `Telegram token env set to ${value}.`)
+    await runAction(() => api.setTelegramTokenEnv(value), `Telegram token env set to ${value}.`, refreshTelegram)
   }
 
   async function loadTelegramToken() {
     const token = telegramToken.trim()
     if (!token) return
-    await runAction(() => api.loadTelegramToken(token), 'Telegram token loaded.')
+    await runAction(() => api.loadTelegramToken(token), 'Telegram token loaded.', refreshTelegram)
     setTelegramToken('')
   }
 
@@ -979,13 +1023,14 @@ export function App() {
     await runAction(
       () => (telegram?.polling ? api.stopTelegram() : api.startTelegram()),
       telegram?.polling ? 'Telegram polling stopped.' : 'Telegram polling started.',
+      refreshTelegram,
     )
   }
 
   async function loadOpenAIKey() {
     const key = openaiKey.trim()
     if (!key) return
-    await runAction(() => api.loadOpenAIKey(key), 'OpenAI API key loaded for this process.')
+    await runAction(() => api.loadOpenAIKey(key), 'OpenAI API key loaded for this process.', refreshOpenAI)
     setOpenAIKey('')
   }
 
@@ -1008,7 +1053,7 @@ export function App() {
   async function saveOpenAIModel() {
     const model = openaiSelectedModel.trim()
     if (!model) return
-    await runAction(() => api.setOpenAIModel(model), `OpenAI model set to ${model}.`)
+    await runAction(() => api.setOpenAIModel(model), `OpenAI model set to ${model}.`, refreshOpenAI)
   }
 
   async function saveOpenAILimit() {
@@ -1018,11 +1063,11 @@ export function App() {
       setNotice('OpenAI limit must be empty or a positive number.')
       return
     }
-    await runAction(() => api.setOpenAILimit(limit), 'OpenAI local spending limit updated.')
+    await runAction(() => api.setOpenAILimit(limit), 'OpenAI local spending limit updated.', refreshOpenAI)
   }
 
   async function resetOpenAIUsage() {
-    await runAction(() => api.resetOpenAIUsage(), 'OpenAI local usage counters reset.')
+    await runAction(() => api.resetOpenAIUsage(), 'OpenAI local usage counters reset.', refreshOpenAI)
   }
 
   async function emergencyStop() {
@@ -1042,7 +1087,7 @@ export function App() {
   async function loadDeepSeekKey() {
     const key = deepseekKey.trim()
     if (!key) return
-    await runAction(() => api.loadDeepSeekKey(key), 'DeepSeek API key loaded for this process.')
+    await runAction(() => api.loadDeepSeekKey(key), 'DeepSeek API key loaded for this process.', refreshDeepSeek)
     setDeepSeekKey('')
   }
 
@@ -1065,7 +1110,7 @@ export function App() {
   async function saveDeepSeekModel() {
     const model = deepseekSelectedModel.trim()
     if (!model) return
-    await runAction(() => api.setDeepSeekModel(model), `DeepSeek model set to ${model}.`)
+    await runAction(() => api.setDeepSeekModel(model), `DeepSeek model set to ${model}.`, refreshDeepSeek)
   }
 
   function finishTour() {
@@ -1437,7 +1482,7 @@ export function App() {
               </label>
             </div>
             <div className="row-actions">
-              <button className={terminal?.enabled ? 'button button-danger' : 'button'} type="button" onClick={() => void runAction(() => (terminal?.enabled ? api.disableTerminal() : api.enableTerminal()), terminal?.enabled ? 'Terminal disabled.' : 'Terminal enabled.')}>{terminal?.enabled ? 'Disable Terminal' : 'Enable Terminal'}</button>
+              <button className={terminal?.enabled ? 'button button-danger' : 'button'} type="button" onClick={() => void runAction(() => (terminal?.enabled ? api.disableTerminal() : api.enableTerminal()), terminal?.enabled ? 'Terminal disabled.' : 'Terminal enabled.', refreshTerminal)}>{terminal?.enabled ? 'Disable Terminal' : 'Enable Terminal'}</button>
               <button className="button button-secondary" type="button" onClick={() => void saveTerminalSettings()}>Save Terminal</button>
               <button className="button" type="button" onClick={() => void saveConfiguration()}>Save Storage</button>
             </div>
@@ -1454,7 +1499,7 @@ export function App() {
               {terminal?.allowed_commands.map((command) => (
                 <article className="command-row" key={command.join('\u0000')}>
                   <code>{command.join(' ')}</code>
-                  <button className="button button-danger" type="button" onClick={() => void runAction(() => api.removeTerminalCommand(command), `Removed: ${command.join(' ')}`)}>Remove</button>
+                  <button className="button button-danger" type="button" onClick={() => void runAction(() => api.removeTerminalCommand(command), `Removed: ${command.join(' ')}`, refreshTerminal)}>Remove</button>
                 </article>
               ))}
             </div>
@@ -1820,7 +1865,7 @@ export function App() {
                     </div>
                     <code>{mode.default_model}</code>
                     <span>{mode.description}</span>
-                    <button className="button button-secondary" type="button" onClick={() => void runAction(() => api.setModelMode(mode.key), `${mode.label} selected.`)}>
+                    <button className="button button-secondary" type="button" onClick={() => void runAction(() => api.setModelMode(mode.key), `${mode.label} selected.`, refreshModels)}>
                       Use Mode
                     </button>
                   </article>
@@ -1830,7 +1875,7 @@ export function App() {
                 className="inline-form"
                 onSubmit={(event) => {
                   event.preventDefault()
-                  void runAction(() => api.setModel(customModel), `Model set to ${customModel}.`)
+                  void runAction(() => api.setModel(customModel), `Model set to ${customModel}.`, refreshModels)
                 }}
               >
                 <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} />
@@ -1913,7 +1958,7 @@ export function App() {
                 <button
                   className={telegramEnabled ? 'button button-danger' : 'button'}
                   type="button"
-                  onClick={() => void runAction(() => (telegramEnabled ? api.disableTelegram() : api.enableTelegram()), telegramEnabled ? 'Telegram disabled.' : 'Telegram enabled.')}
+                  onClick={() => void runAction(() => (telegramEnabled ? api.disableTelegram() : api.enableTelegram()), telegramEnabled ? 'Telegram disabled.' : 'Telegram enabled.', refreshTelegram)}
                   disabled={busy}
                 >
                   {telegramEnabled ? 'Disable' : 'Enable'}
@@ -1996,7 +2041,7 @@ export function App() {
                         <strong>{userId}</strong>
                         <small>Allowlisted user</small>
                       </span>
-                      <button className="button button-danger" type="button" disabled={busy} onClick={() => void runAction(() => api.removeTelegramUser(userId), `Removed Telegram user: ${userId}`)}>Remove</button>
+                      <button className="button button-danger" type="button" disabled={busy} onClick={() => void runAction(() => api.removeTelegramUser(userId), `Removed Telegram user: ${userId}`, refreshTelegram)}>Remove</button>
                     </article>
                   ))}
                 </div>
@@ -2072,7 +2117,7 @@ export function App() {
                     risk={tool.risk}
                     enabled={tool.enabled}
                     approvalRequired={tool.approval_required}
-                    onToggle={() => void runAction(() => api.setTool(tool.name, !tool.enabled), `${tool.name} ${tool.enabled ? 'disabled' : 'enabled'}.`)}
+                    onToggle={() => void runAction(() => api.setTool(tool.name, !tool.enabled), `${tool.name} ${tool.enabled ? 'disabled' : 'enabled'}.`, refreshTools)}
                   />
                 ))}
               </div>
@@ -2083,7 +2128,7 @@ export function App() {
                 {permissions.map((permission) => (
                   <article className="permission-row" key={permission.name}>
                     <div><strong>{permission.name}</strong><span>{permission.tools.join(', ')}</span></div>
-                    <button className={permission.granted ? 'toggle toggle-on' : 'toggle'} type="button" onClick={() => void runAction(() => api.setPermission(permission.name, !permission.granted), `${permission.name} ${permission.granted ? 'revoked' : 'granted'}.`)} aria-pressed={permission.granted}>
+                    <button className={permission.granted ? 'toggle toggle-on' : 'toggle'} type="button" onClick={() => void runAction(() => api.setPermission(permission.name, !permission.granted), `${permission.name} ${permission.granted ? 'revoked' : 'granted'}.`, refreshPermissions)} aria-pressed={permission.granted}>
                       {permission.granted ? 'Granted' : 'Not Granted'}
                     </button>
                   </article>
