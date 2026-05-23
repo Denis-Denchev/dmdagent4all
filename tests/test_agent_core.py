@@ -1981,6 +1981,39 @@ class AgentCoreTest(unittest.TestCase):
             self.assertEqual(audit.get_approval(approval_id)["status"], "executed")
             self.assertTrue((root / "memory" / "facts" / "test.md").exists())
 
+    def test_ambient_memory_write_is_intercepted_to_scribe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit = AuditStore(root / "audit.db")
+            core = _build_core(
+                root,
+                FakePlanner(
+                    PlanResult(
+                        tool_request=ToolRequest(
+                            tool="memory.write",
+                            args={
+                                "path": "long-term/topics/project_house-build-project.md",
+                                "body": "- Location: село Горна Малина\n- Има налична земя",
+                                "title": "House build project",
+                                "metadata": {"type": "project"},
+                            },
+                            reason="Planner picked memory.write for an ambient fact.",
+                        )
+                    )
+                ),
+                audit,
+            )
+            response = core.handle_text("реших къде ще е къщата, в горна малина имам земя")
+            self.assertEqual(response.status, "ok")
+            self.assertIsInstance(response.data, dict)
+            self.assertEqual(response.data.get("decision"), "scribe_intercept")
+            self.assertEqual(audit.list_approvals(status="pending"), [])
+            written = root / "memory" / "long-term" / "topics" / "project_house-build-project.md"
+            self.assertTrue(written.exists())
+            content = written.read_text(encoding="utf-8")
+            self.assertIn("Горна Малина", content)
+            self.assertIn("source: autonomous_scribe", content)
+
     def test_explicit_remember_requires_real_memory_write_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

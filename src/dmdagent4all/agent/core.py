@@ -63,6 +63,7 @@ LOCAL_DEV_AUTO_APPROVED_TOOLS = frozenset(
         "files.write_many",
         "memory.list",
         "memory.read",
+        "memory.write",
         "project.scaffold_one_page_app",
         "system.list_enabled_tools",
         "workspace.status",
@@ -761,6 +762,56 @@ class AgentCore:
         )
         return plan
 
+    def _maybe_intercept_ambient_memory_write(
+        self,
+        user_message: str,
+        request: ToolRequest,
+    ) -> AgentResponse | None:
+        if request.tool != "memory.write":
+            return None
+        if _extract_memory_fact(user_message) is not None:
+            return None
+        if _has_explicit_memory_save_verb(user_message):
+            return None
+        body = str(request.args.get("body") or "").strip()
+        if not body:
+            return None
+        slug_source = (
+            str(request.args.get("title") or "").strip()
+            or _first_meaningful_line_safe(body)
+            or "ambient-note"
+        )
+        intent = MemoryWriteIntent(
+            slug=_slugify_for_memory(slug_source),
+            body=body,
+            confidence="high",
+            memory_type=_memory_type_from_metadata(request.args.get("metadata")),
+            description=slug_source[:120],
+            path=str(request.args.get("path") or "").strip(),
+        )
+        try:
+            manager = MemoryManager(self.runtime_context.memory_root)
+            self._apply_memory_write_intent(manager, intent)
+        except Exception as exc:
+            log_local_dev_autonomy(
+                "scribe_intercept_error",
+                config=self.runtime_context.config,
+                slug=intent.slug,
+                error_type=type(exc).__name__,
+                message=str(exc)[:200],
+            )
+            return None
+        log_local_dev_autonomy(
+            "scribe_intercept_applied",
+            config=self.runtime_context.config,
+            slug=intent.slug,
+        )
+        return AgentResponse(
+            status="ok",
+            message="ОК, запомних това." if _looks_bulgarian(user_message) else "Got it — saved that.",
+            data={"planner": "llm", "decision": "scribe_intercept", "slug": intent.slug},
+        )
+
     def _run_autonomous_memory_writes(
         self,
         plan: Any,
@@ -846,6 +897,9 @@ class AgentCore:
                 stripped,
                 self.runtime_context.config,
             )
+            scribe_intercept = self._maybe_intercept_ambient_memory_write(stripped, request)
+            if scribe_intercept is not None:
+                return scribe_intercept
             if _is_email_create_draft_tool(request.tool) and _looks_email_send_request(_normalize_for_match(stripped)):
                 return self._handle_email_create_then_send_request(
                     stripped,
@@ -5360,6 +5414,53 @@ def _profile_from_config(config: dict[str, Any]) -> dict[str, str]:
         "nickname": str(setup.get("nickname") or ""),
         "nickname_bg": str(setup.get("nickname_bg") or setup.get("nickname") or ""),
     }
+
+
+def _has_explicit_memory_save_verb(text: str) -> bool:
+    normalized = text.casefold().strip()
+    verbs = (
+        "remember",
+        "save this",
+        "save that",
+        "save it",
+        "save to memory",
+        "save to my memory",
+        "save in memory",
+        "write to memory",
+        "write that to memory",
+        "memorize",
+        "keep in mind",
+        "запомни",
+        "запази",
+        "запиши",
+        "помни",
+    )
+    return any(verb in normalized for verb in verbs)
+
+
+def _first_meaningful_line_safe(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("#-*").strip()
+        if stripped:
+            return stripped[:120]
+    return ""
+
+
+def _slugify_for_memory(value: str) -> str:
+    slug = re.sub(r"[^\w]+", "-", value.lower(), flags=re.UNICODE).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug[:80].strip("-") or "note"
+
+
+def _memory_type_from_metadata(metadata: Any) -> str:
+    if isinstance(metadata, dict):
+        for key in ("type", "memory_type"):
+            value = metadata.get(key)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"user", "feedback", "project", "reference"}:
+                    return normalized
+    return "project"
 
 
 def _llm_system_prompt(llm_config: dict[str, Any], key: str) -> str | None:
