@@ -18,6 +18,78 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(result.final_message, "Hello")
         self.assertIsNone(result.tool_request)
 
+    def test_memory_writes_block_in_action_protocol(self) -> None:
+        raw = (
+            "OBJECTIVE: Discuss the house\n"
+            "PLAN:\n"
+            "- Acknowledge\n"
+            "ACTIONS:\n"
+            "MEMORY_WRITES: ["
+            '{"slug":"house-build-project","type":"project","confidence":"high",'
+            '"description":"Wooden house in Gorna Malina",'
+            r'"body":"- Location: Gorna Malina\n- Material: wood"}'
+            "]\n"
+        )
+        result = parse_plan_response(raw)
+        self.assertEqual(len(result.memory_writes), 1)
+        intent = result.memory_writes[0]
+        self.assertEqual(intent.slug, "house-build-project")
+        self.assertEqual(intent.memory_type, "project")
+        self.assertEqual(intent.confidence, "high")
+        self.assertIn("Gorna Malina", intent.body)
+        self.assertNotIn("MEMORY_WRITES", result.final_message or "")
+
+    def test_memory_writes_in_json_payload(self) -> None:
+        raw = json.dumps(
+            {
+                "action": "answer",
+                "message": "OK",
+                "memory_writes": [
+                    {
+                        "slug": "coffee-preference",
+                        "type": "user",
+                        "confidence": "high",
+                        "description": "Coffee preference",
+                        "body": "- Likes ice coffee",
+                    }
+                ],
+            }
+        )
+        result = parse_plan_response(raw)
+        self.assertEqual(result.final_message, "OK")
+        self.assertEqual(len(result.memory_writes), 1)
+        intent = result.memory_writes[0]
+        self.assertEqual(intent.slug, "coffee-preference")
+        self.assertEqual(intent.memory_type, "user")
+        self.assertEqual(intent.body, "- Likes ice coffee")
+
+    def test_memory_writes_skipped_when_no_block(self) -> None:
+        result = parse_plan_response('{"type":"final","message":"Just chatting"}')
+        self.assertEqual(result.memory_writes, ())
+
+    def test_memory_writes_filters_invalid_entries(self) -> None:
+        raw = json.dumps(
+            {
+                "action": "answer",
+                "message": "OK",
+                "memory_writes": [
+                    {"slug": "", "body": "no slug"},
+                    {"slug": "valid", "body": ""},
+                    {
+                        "slug": "valid-slug",
+                        "type": "junk",
+                        "confidence": "weird",
+                        "body": "- Fact",
+                    },
+                ],
+            }
+        )
+        result = parse_plan_response(raw)
+        self.assertEqual(len(result.memory_writes), 1)
+        self.assertEqual(result.memory_writes[0].slug, "valid-slug")
+        self.assertEqual(result.memory_writes[0].memory_type, "project")
+        self.assertEqual(result.memory_writes[0].confidence, "medium")
+
     def test_parses_tool_request(self) -> None:
         result = parse_plan_response(
             '{"type":"tool_request","tool":"memory.list","args":{},"reason":"List memory"}'

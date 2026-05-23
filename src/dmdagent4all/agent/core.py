@@ -13,7 +13,7 @@ from typing import Any
 from dmdagent4all.audit import AuditEvent, AuditStore
 from dmdagent4all.agent.context import AgentContextProvider
 from dmdagent4all.agent.history import ChatHistory
-from dmdagent4all.agent.planner import LLMPlanner, PlannerError, is_low_relevance_plan
+from dmdagent4all.agent.planner import LLMPlanner, MemoryWriteIntent, PlannerError, is_low_relevance_plan
 from dmdagent4all.agent.router import ConversationRouter
 from dmdagent4all.autonomy import local_dev_autonomy_enabled, log_local_dev_autonomy
 from dmdagent4all.config import save_config
@@ -586,11 +586,13 @@ class AgentCore:
                 planner_error=PlannerError("Planner returned an unrelated response for an explicit tool request."),
             )
 
-        return self._execute_planner_decision(
+        response = self._execute_planner_decision(
             stripped,
             plan,
             conversation_context=conversation_context,
         )
+        self._run_autonomous_memory_writes(plan, stripped, response)
+        return response
 
     def _handle_with_autonomy_loop(
         self,
@@ -672,6 +674,7 @@ class AgentCore:
                     status=response.status,
                     metadata={"iteration": iteration + 1},
                 )
+                self._run_autonomous_memory_writes(plan, stripped, response)
                 return response
             observations.append(f"Previous action failed: {response.message[:500]}")
             self._trace_event(
@@ -757,6 +760,78 @@ class AgentCore:
             metadata=_planner_decision_summary(plan),
         )
         return plan
+
+    def _run_autonomous_memory_writes(
+        self,
+        plan: Any,
+        user_message: str,
+        response: AgentResponse,
+    ) -> None:
+        intents = getattr(plan, "memory_writes", ()) or ()
+        if not intents:
+            return
+        if response.status not in {"ok", "needs_input"}:
+            return
+        try:
+            manager = MemoryManager(self.runtime_context.memory_root)
+        except Exception:
+            return
+        for intent in intents:
+            if intent.confidence != "high":
+                continue
+            try:
+                self._apply_memory_write_intent(manager, intent)
+            except Exception as exc:
+                log_local_dev_autonomy(
+                    "autonomous_scribe_error",
+                    config=self.runtime_context.config,
+                    slug=intent.slug,
+                    error_type=type(exc).__name__,
+                    message=str(exc)[:200],
+                )
+                continue
+
+    def _apply_memory_write_intent(
+        self,
+        manager: MemoryManager,
+        intent: MemoryWriteIntent,
+    ) -> None:
+        path = intent.path.strip() or f"long-term/topics/{intent.memory_type}_{intent.slug}.md"
+        if not path.endswith(".md"):
+            path = f"{path}.md"
+        try:
+            existing_full = manager.read(path)
+            existing = _strip_frontmatter(existing_full).strip()
+        except FileNotFoundError:
+            existing = ""
+        new_body = intent.body.strip()
+        if not new_body:
+            return
+        if existing and new_body in existing:
+            return
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d")
+        if existing:
+            combined = f"{existing}\n\n## {timestamp}\n\n{new_body}".strip()
+        else:
+            heading = intent.description.strip() or intent.slug.replace("-", " ").title()
+            combined = f"# {heading}\n\n{new_body}".strip()
+        metadata = {
+            "name": intent.slug,
+            "description": (intent.description or intent.slug).replace("\n", " ")[:200],
+            "type": intent.memory_type,
+            "memory_scope": "long-term",
+            "source": "autonomous_scribe",
+            "confidence": intent.confidence,
+        }
+        manager.write(path, combined, metadata=metadata)
+        log_local_dev_autonomy(
+            "autonomous_scribe_write",
+            config=self.runtime_context.config,
+            slug=intent.slug,
+            path=path,
+            confidence=intent.confidence,
+            type=intent.memory_type,
+        )
 
     def _execute_planner_decision(
         self,

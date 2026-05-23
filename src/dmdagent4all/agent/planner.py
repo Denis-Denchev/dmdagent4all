@@ -66,6 +66,21 @@ For memory:
 - If the user asks about saved personal/project/service facts and the answer is not already obvious from provided memory context, use memory_search.
 - Do not use memory_search for explicit browser, file, terminal, email, reminder, or workspace actions.
 
+For autonomous memory growth (scribe mode):
+- After choosing your action, scan the current user message for new durable facts about the user, their projects, preferences, places, people, or context that should outlive this conversation.
+- If you find any, append a single MEMORY_WRITES block at the very end of your response (after ACTIONS, or as the only addition to a plain answer):
+
+MEMORY_WRITES: [{"slug":"house-build-project","type":"project","confidence":"high","description":"Denis-built wooden house in Gorna Malina","body":"- Location: село Горна Малина (~30km east of Sofia)\n- Material: wood\n- Mode: DIY (Denis builds himself)"}]
+
+Rules:
+- The block is a JSON array on a single line, starting with literal `MEMORY_WRITES:`.
+- Each item: slug (kebab-case), type (user|feedback|project|reference), confidence (high|medium|low), description (one short sentence), body (markdown — bullet points preferred).
+- Only include facts that appeared in THIS user turn and are not already in the memory context. Do not echo old facts.
+- Never write placeholders ("unknown", "TBD", "not set", "TBD"). If a field is unknown, omit it entirely.
+- confidence=high only if the user stated the fact explicitly. Use medium for reasonable inferences. Skip low.
+- If no new durable fact appeared this turn, omit the MEMORY_WRITES block entirely.
+- The MEMORY_WRITES block is a side-channel — your main reply must still be a normal answer or ACTIONS plan as usual.
+
 Use recent_conversation and memory context when they help. Answer in the user's language. Do not use emoji.
 The current user message is authoritative. Ignore unrelated prior tasks, examples, benchmark questions, and stale repair text.
 Use agent_context as the source of truth for identity, provider/model, tools, permissions, workspace, memory files, pending approvals, and recent tool results. Do not claim to be a provider/model that is not in agent_context.runtime.
@@ -161,6 +176,16 @@ _TOOL_INTENT_MARKERS = (
 
 
 @dataclass(frozen=True)
+class MemoryWriteIntent:
+    slug: str
+    body: str
+    confidence: str = "medium"
+    memory_type: str = "project"
+    description: str = ""
+    path: str = ""
+
+
+@dataclass(frozen=True)
 class PlanResult:
     tool_request: ToolRequest | None = None
     tool_plan: tuple[ToolRequest, ...] = ()
@@ -169,6 +194,7 @@ class PlanResult:
     memory_query: str | None = None
     objective: str = ""
     plan_summary: tuple[str, ...] = ()
+    memory_writes: tuple[MemoryWriteIntent, ...] = ()
     raw: str = ""
 
 
@@ -339,9 +365,12 @@ def parse_plan_response(raw: str) -> PlanResult:
     if action_block is not None:
         return action_block
 
+    block_writes = _parse_memory_writes_block(raw)
     payload = _load_json(raw)
     if payload is None:
-        return PlanResult(final_message=raw.strip(), raw=raw)
+        return PlanResult(final_message=raw.strip(), memory_writes=block_writes, raw=raw)
+    payload_writes = _memory_writes_from_payload(payload) if isinstance(payload, dict) else ()
+    writes = payload_writes or block_writes
     if isinstance(payload, list):
         steps = [
             request
@@ -351,33 +380,33 @@ def parse_plan_response(raw: str) -> PlanResult:
             if request is not None
         ]
         if steps:
-            return PlanResult(tool_plan=tuple(steps), raw=raw)
-        return PlanResult(final_message=raw.strip(), raw=raw)
+            return PlanResult(tool_plan=tuple(steps), memory_writes=writes, raw=raw)
+        return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
     if not isinstance(payload, dict):
-        return PlanResult(final_message=raw.strip(), raw=raw)
+        return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
     plan_type = _plan_action(payload)
     if plan_type in {"answer", "final"}:
         message = str(payload.get("message", "")).strip()
         if not message:
-            return PlanResult(final_message=raw.strip(), raw=raw)
-        return PlanResult(final_message=message, raw=raw)
+            return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
+        return PlanResult(final_message=message, memory_writes=writes, raw=raw)
 
     if plan_type == "ask_clarification":
         message = str(payload.get("message", "")).strip()
         if not message:
-            return PlanResult(final_message=raw.strip(), raw=raw)
-        return PlanResult(clarification_message=message, raw=raw)
+            return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
+        return PlanResult(clarification_message=message, memory_writes=writes, raw=raw)
 
     if plan_type == "memory_search":
         query = str(payload.get("query") or payload.get("message") or "").strip()
         if not query:
-            return PlanResult(final_message=raw.strip(), raw=raw)
-        return PlanResult(memory_query=query, raw=raw)
+            return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
+        return PlanResult(memory_query=query, memory_writes=writes, raw=raw)
 
     if plan_type == "multi_tool_plan":
         raw_steps = payload.get("steps", [])
         if not isinstance(raw_steps, list) or not raw_steps:
-            return PlanResult(final_message=raw.strip(), raw=raw)
+            return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
         steps: list[ToolRequest] = []
         for step in raw_steps:
             if not isinstance(step, dict):
@@ -386,19 +415,19 @@ def parse_plan_response(raw: str) -> PlanResult:
             if request is not None:
                 steps.append(request)
         if steps:
-            return PlanResult(tool_plan=tuple(steps), raw=raw)
-        return PlanResult(final_message=raw.strip(), raw=raw)
+            return PlanResult(tool_plan=tuple(steps), memory_writes=writes, raw=raw)
+        return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
 
     if plan_type in {"tool_request", "tool", "tool_call", "function_call"} or (
         isinstance(payload.get("tool"), str) and not plan_type
     ):
         request = _tool_request_from_payload_or_none(payload, default_reason=str(payload.get("reason", "")).strip())
         if request is not None:
-            return PlanResult(tool_request=request, raw=raw)
+            return PlanResult(tool_request=request, memory_writes=writes, raw=raw)
 
     if isinstance(payload.get("message"), str) and str(payload.get("message")).strip():
-        return PlanResult(final_message=str(payload.get("message")).strip(), raw=raw)
-    return PlanResult(final_message=raw.strip(), raw=raw)
+        return PlanResult(final_message=str(payload.get("message")).strip(), memory_writes=writes, raw=raw)
+    return PlanResult(final_message=raw.strip(), memory_writes=writes, raw=raw)
 
 
 def is_low_relevance_plan(result: PlanResult, user_message: str) -> bool:
@@ -466,21 +495,92 @@ def _parse_action_protocol(raw: str) -> PlanResult | None:
             requests.append(parsed)
     requests.extend(_requests_from_yaml_tool_blocks(stripped))
     requests = _dedupe_requests(requests)
+    writes = _parse_memory_writes_block(stripped)
     if not requests:
+        if writes:
+            return PlanResult(
+                final_message=_strip_memory_writes_block(stripped),
+                objective=objective,
+                plan_summary=summary,
+                memory_writes=writes,
+                raw=raw,
+            )
         return None
     if len(requests) == 1:
         return PlanResult(
             tool_request=requests[0],
             objective=objective,
             plan_summary=summary,
+            memory_writes=writes,
             raw=raw,
         )
     return PlanResult(
         tool_plan=tuple(requests),
         objective=objective,
         plan_summary=summary,
+        memory_writes=writes,
         raw=raw,
     )
+
+
+def _parse_memory_writes_block(raw: str) -> tuple[MemoryWriteIntent, ...]:
+    match = re.search(r"(?im)^\s*MEMORY_WRITES\s*:\s*(\[.*?\])\s*$", raw, flags=re.DOTALL)
+    if match is None:
+        return ()
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return _memory_writes_from_list(payload)
+
+
+def _strip_memory_writes_block(raw: str) -> str:
+    return re.sub(r"(?im)^\s*MEMORY_WRITES\s*:\s*\[.*?\]\s*$", "", raw, flags=re.DOTALL).strip()
+
+
+def _memory_writes_from_payload(payload: dict[str, Any]) -> tuple[MemoryWriteIntent, ...]:
+    items = payload.get("memory_writes")
+    if not isinstance(items, list):
+        return ()
+    return _memory_writes_from_list(items)
+
+
+def _memory_writes_from_list(items: list[Any]) -> tuple[MemoryWriteIntent, ...]:
+    result: list[MemoryWriteIntent] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("slug") or "").strip()
+        body = str(item.get("body") or "").strip()
+        if not slug or not body:
+            continue
+        confidence = str(item.get("confidence") or "medium").strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
+        memory_type = str(item.get("type") or item.get("memory_type") or "project").strip().lower()
+        if memory_type not in {"user", "feedback", "project", "reference"}:
+            memory_type = "project"
+        description = str(item.get("description") or "").strip()
+        path = str(item.get("path") or "").strip()
+        result.append(
+            MemoryWriteIntent(
+                slug=_slug_for_memory(slug),
+                body=body,
+                confidence=confidence,
+                memory_type=memory_type,
+                description=description,
+                path=path,
+            )
+        )
+    return tuple(result)
+
+
+def _slug_for_memory(value: str) -> str:
+    slug = re.sub(r"[^\w]+", "-", value.lower(), flags=re.UNICODE).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug[:80].strip("-") or "memory"
 
 
 def _request_from_action_line(line: str, *, following: str) -> ToolRequest | None:
