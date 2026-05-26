@@ -429,6 +429,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ message, session_id }),
     }),
+  chatCasual: (message: string, session_id = 'casual') =>
+    request<{
+      reply: string
+      memory_files_read: string[]
+      iterations: number
+      provider: string
+      model: string
+    }>('/v1/chat/casual', {
+      method: 'POST',
+      body: JSON.stringify({ message, session_id }),
+    }),
   chatStream: async (
     message: string,
     session_id = 'dashboard',

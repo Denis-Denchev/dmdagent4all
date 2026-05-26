@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dmdcore import __version__
+from dmdcore.agent.casual_chat import CasualChat
 from dmdcore.agent.planner import ANSWER_PROMPT, CHAT_PROMPT, SYSTEM_PROMPT
 from dmdcore.app_paths import AppPaths
 from dmdcore.audit import AuditEvent, AuditStore
@@ -287,6 +288,19 @@ def create_app() -> FastAPI:
     app = FastAPI(title="DMDCore", version="1.0.0")
     google_oauth_states: dict[str, datetime] = {}
     google_oauth_lock = threading.RLock()
+    casual_chat_cache: dict[str, CasualChat] = {}
+    casual_chat_lock = threading.RLock()
+
+    def _get_casual_chat(provider: Any, memory_root: Path) -> CasualChat:
+        key = f"{getattr(provider, 'provider_name', '?')}::{getattr(provider, 'model', '?')}"
+        with casual_chat_lock:
+            existing = casual_chat_cache.get(key)
+            if existing is not None:
+                return existing
+            casual_chat_cache.clear()
+            instance = CasualChat(provider=provider, memory_root=memory_root)
+            casual_chat_cache[key] = instance
+            return instance
 
     @app.on_event("startup")
     def start_background_services() -> None:
@@ -337,6 +351,29 @@ def create_app() -> FastAPI:
     @app.post("/v1/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
         return asdict(build_agent_core().handle_text(request.message, session_id=request.session_id or "dashboard"))
+
+    @app.post("/v1/chat/casual")
+    def chat_casual(request: ChatRequest) -> dict[str, Any]:
+        from dmdcore.runtime import _provider_from_config
+        config = load_config(paths.config)
+        provider = _provider_from_config(config)
+        if provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail="No LLM provider configured. Open Config -> Provider and set one before using Chat mode.",
+            )
+        chat_engine = _get_casual_chat(provider, paths.memory)
+        result = chat_engine.reply(
+            session_id=request.session_id or "dashboard",
+            message=request.message,
+        )
+        return {
+            "reply": result.reply,
+            "memory_files_read": result.memory_files_read,
+            "iterations": result.iterations,
+            "provider": getattr(provider, "provider_name", "?"),
+            "model": getattr(provider, "model", "?"),
+        }
 
     @app.post("/v1/chat/stream")
     def chat_stream(request: ChatRequest) -> StreamingResponse:

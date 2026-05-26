@@ -331,6 +331,13 @@ class AgentCore:
         context_answer = self._answer_agent_context_question(stripped)
         if context_answer is not None:
             return context_answer
+        casual_answer = _casual_non_action_response(stripped)
+        if casual_answer is not None:
+            return AgentResponse(
+                status="ok",
+                message=casual_answer,
+                data={"mode": "normal_chat", "planner": "deterministic"},
+            )
         if stripped.startswith("{"):
             try:
                 payload = json.loads(stripped)
@@ -1028,9 +1035,10 @@ class AgentCore:
         )
 
     def _should_defer_email_send_to_planner(self, user_message: str) -> bool:
+        del user_message
         if self.planner is None:
             return False
-        return _email_send_needs_llm_composition(user_message)
+        return True
 
     def _handle_memory_search_decision(
         self,
@@ -2326,35 +2334,6 @@ def _looks_email_send_request(normalized: str) -> bool:
     )
 
 
-def _email_send_needs_llm_composition(text: str) -> bool:
-    normalized = _normalize_for_match(text)
-    return any(
-        marker in normalized
-        for marker in {
-            "generate email",
-            "compose email",
-            "write email",
-            "генерирай",
-            "генерираш",
-            "състави",
-            "напиши мейл",
-            "напиши имейл",
-            "business tone",
-            "professional tone",
-            "formal tone",
-            "respectful tone",
-            "бизнес",
-            "уважител",
-            "професионал",
-            "официал",
-            "делови",
-            "тон",
-            "формулирай",
-            "напиши го",
-        }
-    )
-
-
 def _looks_email_read_latest_request(normalized: str) -> bool:
     has_read = any(
         marker in normalized
@@ -2405,7 +2384,7 @@ def _email_send_intent_from_text(text: str, provider: str) -> EmailSendIntent | 
                 else "I have the recipient, but I need the email body."
             ),
         )
-    body = _maybe_business_email_body(text, body)
+    body = _maybe_complete_email_body(text, body)
     subject = _email_subject_from_text(text, body)
     return EmailSendIntent(provider=provider, to=recipient, subject=subject, body=body)
 
@@ -2438,13 +2417,15 @@ def _clean_email_body(body: str) -> str:
     cleaned = body.strip().strip(" \"'")
     add_personal_note = bool(
         re.search(
-            r"(?:и\s+)?добави\s+нещо\s+от\s+себе\s+си\b|add\s+something\s+(?:from\s+yourself|of\s+your\s+own)",
+            r"(?:и\s+)?(?:ако\s+може\s+да\s+)?добави(?:ш)?\s+нещо\s+от\s+себе\s+си\b|"
+            r"add\s+something\s+(?:from\s+yourself|of\s+your\s+own)",
             cleaned,
             flags=re.IGNORECASE,
         )
     )
+    generated_by_assistant_note = _asks_to_note_email_generated_by_assistant(cleaned)
     cleaned = re.sub(
-        r"\s*(?:и\s+)?добави\s+нещо\s+от\s+себе\s+си\b.*$",
+        r"\s*(?:и\s+)?(?:ако\s+може\s+да\s+)?добави(?:ш)?\s+нещо\s+от\s+себе\s+си\b.*$",
         "",
         cleaned,
         flags=re.IGNORECASE,
@@ -2455,6 +2436,7 @@ def _clean_email_body(body: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     ).strip(" ,.;:-")
+    cleaned = _remove_generated_by_assistant_instruction(cleaned)
     cleaned = re.sub(r",?\s*той\s+знае\b.*$", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(
         r"\s+кажи\s+го\s+с\s+[^.?!,]*?\s+тон\s+и\s+кажи\s+че\s+",
@@ -2473,6 +2455,7 @@ def _clean_email_body(body: str) -> str:
     cleaned = re.sub(r"^(?:че|that)\s+", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"\bгит\b", "Git", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^проекта\b", "проектът", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^продукта\b", "продуктът", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bперефектно\b", "перфектно", cleaned, flags=re.IGNORECASE)
     if not cleaned:
         return ""
@@ -2480,31 +2463,113 @@ def _clean_email_body(body: str) -> str:
         cleaned = _capitalize_first(cleaned)
     else:
         cleaned = cleaned[0].upper() + cleaned[1:]
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    additions: list[str] = []
     if add_personal_note:
-        if cleaned[-1] not in ".!?":
-            cleaned += "."
-        note = (
-            "Добавям и кратка бележка: изпратено е през локалния ми агент."
+        additions.append(
+            "Ще се радвам да го тестваш и да споделиш обратна връзка, ако забележиш нещо за подобрение."
             if _looks_bulgarian(cleaned)
             else "Sent through a local assistant."
         )
-        return f"{cleaned} {note}"
-    if cleaned[-1] not in ".!?":
-        cleaned += "."
-    return cleaned
+    if generated_by_assistant_note:
+        additions.append(
+            "(Този имейл беше съставен от асистента DMD Core.)"
+            if _looks_bulgarian(cleaned)
+            else "(This email was drafted by the DMD Core assistant.)"
+        )
+    return " ".join([cleaned, *additions])
 
 
-def _maybe_business_email_body(text: str, body: str) -> str:
-    if not _looks_bulgarian(text) or not _email_send_needs_llm_composition(text):
+def _asks_to_note_email_generated_by_assistant(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:имейл(?:а|ът)?|мейл(?:а|ът)?|email|message)\s+"
+            r"(?:е|да\s+е|беше|is|was)?\s*"
+            r"(?:генериран|съставен|написан|generated|drafted|written)\s+"
+            r"(?:от|by)\s+"
+            r"(?:теб|вас|асистент(?:а|ът)?|ai|изкуствения\s+интелект|you|the\s+assistant|assistant)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _remove_generated_by_assistant_instruction(text: str) -> str:
+    cleaned = re.sub(
+        r"\s*,?\s*(?:също\s+)?(?:кажи|кажеш|напиши)?\s*(?:че\s+)?"
+        r"(?:имейл(?:а|ът)?|мейл(?:а|ът)?)\s+"
+        r"(?:е|да\s+е|беше)?\s*"
+        r"(?:генериран|съставен|написан)\s+от\s+"
+        r"(?:теб|вас|асистент(?:а|ът)?|ai|изкуствения\s+интелект)\b[.?!,;:\s]*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*,?\s*(?:also\s+)?(?:say|mention|state)?\s*(?:that\s+)?(?:the\s+)?"
+        r"(?:email|message)\s+(?:is|was|be)?\s*"
+        r"(?:generated|drafted|written)\s+by\s+"
+        r"(?:you|ai|the\s+assistant|assistant)\b[.?!,;:\s]*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip(" ,.;:-")
+
+
+def _maybe_complete_email_body(text: str, body: str) -> str:
+    if _looks_like_complete_email_body(body):
         return body
     core = re.sub(r"\s+", " ", body.strip()).rstrip(".")
     if not core:
         return body
+    if _looks_bulgarian(text) and _email_send_requests_formal_tone(text):
+        return (
+            "Здравейте,\n\n"
+            f"Информирам Ви, че {_lowercase_first(core)}.\n\n"
+            "Оставам на разположение при нужда от допълнителна информация.\n\n"
+            "С уважение"
+        )
+    if _looks_bulgarian(core):
+        return f"Здравейте,\n\n{core}.\n\nПоздрави"
     return (
-        "Здравейте,\n\n"
-        f"Информирам Ви, че {_lowercase_first(core)}.\n\n"
-        "Оставам на разположение при нужда от допълнителна информация.\n\n"
-        "С уважение"
+        "Hello,\n\n"
+        f"{core}.\n\n"
+        "Best regards"
+    )
+
+
+def _looks_like_complete_email_body(body: str) -> bool:
+    normalized = _normalize_for_match(body)
+    has_greeting = any(
+        marker in normalized
+        for marker in {"здравей", "здравейте", "hello", "hi ", "dear "}
+    )
+    has_closing = any(
+        marker in normalized
+        for marker in {"поздрави", "с уважение", "best regards", "regards", "sincerely"}
+    )
+    return "\n" in body and has_greeting and has_closing
+
+
+def _email_send_requests_formal_tone(text: str) -> bool:
+    normalized = _normalize_for_match(text)
+    return any(
+        marker in normalized
+        for marker in {
+            "business tone",
+            "professional tone",
+            "formal tone",
+            "respectful tone",
+            "бизнес",
+            "уважител",
+            "професионал",
+            "официал",
+            "делови",
+            "тон",
+            "формулирай",
+        }
     )
 
 
@@ -2516,7 +2581,22 @@ def _email_subject_from_text(text: str, body: str) -> str:
     generated = _generated_email_subject_from_content(text, body)
     if generated:
         return _sanitize_email_subject(generated, default)
-    return _email_subject_fallback(body, default)
+    fallback = _email_subject_fallback(body, default)
+    if _subject_body_overlap_too_high(fallback, body):
+        return default
+    return fallback
+
+
+def _subject_body_overlap_too_high(subject: str, body: str) -> bool:
+    subject_lower = subject.strip().casefold()
+    body_lower = body.strip().casefold()
+    if not subject_lower or not body_lower:
+        return False
+    if subject_lower not in body_lower and body_lower not in subject_lower:
+        return False
+    shorter = min(len(subject_lower), len(body_lower))
+    longer = max(len(subject_lower), len(body_lower))
+    return shorter / max(longer, 1) > 0.6
 
 
 def _is_email_create_draft_tool(tool: str) -> bool:
@@ -2604,6 +2684,11 @@ def _generated_email_subject_from_content(text: str, body: str) -> str:
                 return "Проектът работи и е онлайн"
             if any(marker in normalized for marker in {"готов", "завършен", "перфект"}):
                 return "Проектът е готов"
+        if "продукт" in normalized:
+            if "теств" in normalized and any(marker in normalized for marker in {"готов", "завършен"}):
+                return "Продуктът е готов за тестване"
+            if any(marker in normalized for marker in {"готов", "завършен"}):
+                return "Продуктът е готов"
         if "маркетинг" in normalized:
             return "Готово за маркетинг отдела"
         if "срещ" in normalized:
@@ -5152,6 +5237,30 @@ def _answer_without_llm(text: str, config: dict[str, Any]) -> str | None:
             "disabled until explicitly configured."
         )
     return None
+
+
+def _casual_non_action_response(text: str) -> str | None:
+    normalized = _normalize_for_match(text)
+    if normalized not in {
+        "ok",
+        "okay",
+        "got it",
+        "thanks",
+        "thank you",
+        "cool",
+        "оп",
+        "опа",
+        "упс",
+        "ок",
+        "окей",
+        "ясно",
+        "разбрах",
+        "добре",
+        "мерси",
+        "благодаря",
+    }:
+        return None
+    return "ОК." if _looks_bulgarian(text) else "OK."
 
 
 def _answer_llm_unavailable(text: str, config: dict[str, Any], exc: Exception) -> AgentResponse | None:

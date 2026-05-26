@@ -44,7 +44,7 @@ from dmdcore.server import (
 )
 from dmdcore.email_oauth import GMAIL_OAUTH_SCOPE, google_authorization_url
 from dmdcore.tools import build_builtin_registry
-from dmdcore.tools.email_connector import _settings, test_email_connection
+from dmdcore.tools.email_connector import _settings, test_email_connection as check_email_connection
 from dmdcore.tools.base import ToolRuntimeContext
 from dmdcore.tools.reminders import (
     create_reminder,
@@ -673,7 +673,7 @@ class DashboardControlsTest(unittest.TestCase):
             with mock.patch.dict(os.environ, env):
                 with mock.patch("dmdcore.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
                     with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FakeSMTP):
-                        result = test_email_connection("gmail", context)
+                        result = check_email_connection("gmail", context)
 
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["imap"]["ok"])
@@ -697,7 +697,7 @@ class DashboardControlsTest(unittest.TestCase):
             with mock.patch.dict(os.environ, env):
                 with mock.patch("dmdcore.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
                     with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
-                        result = test_email_connection("outlook", context)
+                        result = check_email_connection("outlook", context)
 
         self.assertEqual(result["status"], "connection_failed")
         self.assertTrue(result["imap"]["ok"])

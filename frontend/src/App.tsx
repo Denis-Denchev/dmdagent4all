@@ -46,7 +46,7 @@ import {
   type ConfigHubEntry,
 } from './components/settings'
 
-type View = 'chat' | 'downloads' | 'approvals' | 'models' | 'config' | 'telegram' | 'memory' | 'tools' | 'logs' | 'help'
+type View = 'chat' | 'talk' | 'downloads' | 'approvals' | 'models' | 'config' | 'telegram' | 'memory' | 'tools' | 'logs' | 'help'
 type ConfigSection = 'general' | 'models' | 'tools' | 'security' | 'workspace' | 'memory' | 'telegram' | 'emergency' | 'advanced'
 
 type DashboardRoute = {
@@ -128,7 +128,8 @@ type EmailCredentialsDraft = {
 }
 
 const views: Array<{ key: View; label: string; short: string; description: string }> = [
-  { key: 'chat', label: 'Chat', short: 'CH', description: 'Work with the agent' },
+  { key: 'chat', label: 'Agent', short: 'AG', description: 'Full agent: planner, tools, approvals' },
+  { key: 'talk', label: 'Chat', short: 'CT', description: 'Casual chat with memory (no tools)' },
   { key: 'downloads', label: 'Downloads', short: 'DL', description: 'Files from web work' },
   { key: 'approvals', label: 'Approvals', short: 'AP', description: 'Pending risky actions' },
   { key: 'models', label: 'Models', short: 'MD', description: 'Runtime and token controls' },
@@ -154,6 +155,7 @@ const configSectionLabels: Record<ConfigSection, string> = {
 
 const viewPaths: Record<View, string> = {
   chat: '/chat',
+  talk: '/talk',
   downloads: '/downloads',
   approvals: '/approvals',
   models: '/models',
@@ -350,6 +352,15 @@ export function App() {
   ])
   const [chatInput, setChatInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [talkMessages, setTalkMessages] = useState<Array<{ id: string; role: 'user' | 'assistant' | 'system'; text: string; memoryFiles?: string[] }>>([
+    {
+      id: 'talk-welcome',
+      role: 'system',
+      text: 'Casual chat. No tools, no actions — just talk. I can read your memory notes when relevant.',
+    },
+  ])
+  const [talkInput, setTalkInput] = useState('')
+  const [talkBusy, setTalkBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [tourOpen, setTourOpen] = useState(false)
   const [tourStep, setTourStep] = useState(0)
@@ -780,6 +791,45 @@ export function App() {
     event.preventDefault()
     if (!busy && chatInput.trim()) {
       void sendChat()
+    }
+  }
+
+  async function sendCasualChat() {
+    const message = talkInput.trim()
+    if (!message) return
+    setTalkInput('')
+    setTalkMessages((current) => [...current, { id: `${Date.now()}-u`, role: 'user', text: message }])
+    setTalkBusy(true)
+    try {
+      const result = await api.chatCasual(message, 'casual-dashboard')
+      setTalkMessages((current) => [
+        ...current,
+        {
+          id: `${Date.now()}-a`,
+          role: 'assistant',
+          text: result.reply || '(empty reply)',
+          memoryFiles: result.memory_files_read,
+        },
+      ])
+    } catch (error) {
+      setTalkMessages((current) => [
+        ...current,
+        {
+          id: `${Date.now()}-e`,
+          role: 'system',
+          text: error instanceof Error ? error.message : 'Request failed',
+        },
+      ])
+    } finally {
+      setTalkBusy(false)
+    }
+  }
+
+  function handleTalkKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== 'Enter' || event.shiftKey) return
+    event.preventDefault()
+    if (!talkBusy && talkInput.trim()) {
+      void sendCasualChat()
     }
   }
 
@@ -1748,6 +1798,53 @@ export function App() {
               </section>
               <ActivityFeed events={audit} />
             </aside>
+          </section>
+        ) : null}
+
+        {activeView === 'talk' ? (
+          <section className="chat-workspace casual-chat">
+            <div className="panel command-panel">
+              <div className="section-heading">
+                <strong>Chat</strong>
+                <span>Casual companion — no tools, no actions, just talk</span>
+              </div>
+              <p className="section-copy">
+                Same LLM provider as Agent mode, but stripped down: no planner, no permissions, no approvals. I read your markdown memory on demand when it helps.
+              </p>
+              <div className="message-stream">
+                {talkMessages.map((m) => (
+                  <div key={m.id} className={`chat-message chat-message-${m.role}`}>
+                    <div className="chat-message-body">{m.text}</div>
+                    {m.memoryFiles && m.memoryFiles.length > 0 ? (
+                      <div className="chat-message-meta">
+                        memory: {m.memoryFiles.join(', ')}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+                {talkBusy ? (
+                  <div className="chat-message chat-message-system">
+                    <div className="chat-message-body">...</div>
+                  </div>
+                ) : null}
+              </div>
+              <div className="chat-composer">
+                <textarea
+                  value={talkInput}
+                  onChange={(event) => setTalkInput(event.target.value)}
+                  onKeyDown={handleTalkKeyDown}
+                  placeholder="Talk to me. Enter to send, Shift+Enter for newline."
+                  disabled={talkBusy}
+                />
+                <button
+                  type="button"
+                  onClick={() => { void sendCasualChat() }}
+                  disabled={talkBusy || !talkInput.trim()}
+                >
+                  {talkBusy ? 'Thinking…' : 'Send'}
+                </button>
+              </div>
+            </div>
           </section>
         ) : null}
 
