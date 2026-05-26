@@ -352,7 +352,7 @@ class TelegramInterface:
             return AgentResponse(
                 status="ok",
                 message=(
-                    "DMD Agent 4 All Telegram interface is active.\n"
+                    "DMDCore Telegram interface is active.\n"
                     "Commands: /id, /help, /approvals, /approve <id>, /deny <id>.\n"
                     "Any other message is routed through the local agent and permission engine."
                 ),

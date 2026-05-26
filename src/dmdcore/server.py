@@ -284,7 +284,7 @@ def create_app() -> FastAPI:
     telegram_runtime = TelegramRuntime()
     reminder_runtime = ReminderRuntime(paths, telegram_runtime)
 
-    app = FastAPI(title="DMD Agent 4 All", version="1.0.0")
+    app = FastAPI(title="DMDCore", version="1.0.0")
     google_oauth_states: dict[str, datetime] = {}
     google_oauth_lock = threading.RLock()
 

@@ -1,7 +1,30 @@
-# DMD Agent 4 All
+# DMD Core
 
 Open-source, local-first AI control center for personal computers, developer
 workstations, Mac minis, and small private servers.
+
+## Quick Install (one line)
+
+**macOS / Linux** — open Terminal and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/install.sh | bash
+```
+
+**Windows** — open PowerShell (any version) and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/install.ps1 | iex
+```
+
+The installer auto-installs Python 3.13, Node.js LTS, Git, and Ollama if any
+are missing (via Homebrew on macOS, the native package manager on Linux,
+winget on Windows), clones the repo into `~/dmdcore`, runs the first-time
+setup wizard, and opens the dashboard in your browser.
+
+To skip the auto-launch or Ollama install, set `DMDCORE_SKIP_LAUNCH=1`
+or `DMDCORE_SKIP_OLLAMA=1` before the command.
+
 
 Current backend/package version: `1.0.0`.
 

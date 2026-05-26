@@ -1,3 +1,3 @@
-"""DMD Agent 4 All package."""
+"""DMDCore package."""
 
 __version__ = "1.0.0"

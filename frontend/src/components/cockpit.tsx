@@ -132,7 +132,7 @@ export function Sidebar({
         <div className="brand" data-tour="tour-help">
           <div className="brand-mark">D</div>
           <div className="brand-copy">
-            <strong>DMD Agent 4 All</strong>
+            <strong>DMDCore</strong>
             <em>v2.0</em>
           </div>
         </div>

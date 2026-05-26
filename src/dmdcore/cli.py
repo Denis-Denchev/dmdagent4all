@@ -4,7 +4,9 @@ import argparse
 import getpass
 import json
 import os
+import platform
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="dmdcore",
-        description="DMD Agent 4 All local control center.",
+        description="DMDCore local control center.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -283,7 +285,7 @@ def command_init() -> int:
     config_path = write_default_config(paths.config)
     MemoryManager(paths.memory).bootstrap()
     AuditStore(paths.audit_db)
-    print("DMD Agent 4 All local data initialized.")
+    print("DMDCore local data initialized.")
     print(f"Config: {config_path}")
     print(f"Memory: {paths.memory}")
     print(f"Workspace: {paths.workspace}")
@@ -298,7 +300,7 @@ def command_status() -> int:
     config = load_config(config_path)
     llm = config["llm"]
     api_key_env = llm.get("api_key_env")
-    _print_title("DMD Agent 4 All status")
+    _print_title("DMDCore status")
     _print_rows(
         ["Setting", "Value"],
         [
@@ -357,7 +359,7 @@ def command_start(
     AuditStore(paths.audit_db)
     config = load_config(config_path)
 
-    _print_title("DMD Agent 4 All")
+    _print_title("DMDCore")
     print("Starting local control center.")
     print(f"Model: {config.get('llm', {}).get('model', '-')}")
     if str(config.get("llm", {}).get("model", "")).strip().lower() == "dumb":
@@ -444,7 +446,7 @@ def command_wizard() -> int:
     ram_gb = detect_memory_gb()
     recommendation = recommend_for_memory(ram_gb)
 
-    print("DMD Agent 4 All install wizard")
+    print("DMDCore install wizard")
     print("")
     print("Language policy:")
     print("- Install wizard, terminal output, docs, and UI labels are English by default.")
@@ -2021,6 +2023,142 @@ def _ensure_ollama(config: dict[str, Any], *, verbose: bool) -> subprocess.Popen
     return process
 
 
+def _pid_listening_on_port(port: int) -> int | None:
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            if not parts[0].upper().startswith("TCP"):
+                continue
+            local = parts[1]
+            if not local.endswith(f":{port}"):
+                continue
+            if "LISTENING" not in parts:
+                continue
+            try:
+                return int(parts[-1])
+            except ValueError:
+                continue
+        return None
+    if shutil.which("lsof") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    out = result.stdout.strip()
+    if not out:
+        return None
+    try:
+        return int(out.splitlines()[0])
+    except ValueError:
+        return None
+
+
+def _process_cmdline(pid: int) -> str:
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return ""
+        return result.stdout.strip()
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return result.stdout.strip()
+
+
+def _is_dmdcore_process(cmdline: str) -> bool:
+    markers = ("dmdcore", "dmdagent4all", "dmdagent")
+    return any(marker in cmdline for marker in markers)
+
+
+def _kill_pid(pid: int) -> bool:
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            return False
+    else:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+            time.sleep(0.6)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                continue
+    time.sleep(0.4)
+    return _pid_listening_on_port_alive(pid)
+
+
+def _pid_listening_on_port_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return True
+    return False
+
+
+def _evict_stale_dmdcore_listener(port: int, label: str) -> bool:
+    pid = _pid_listening_on_port(port)
+    if pid is None:
+        return True
+    cmdline = _process_cmdline(pid)
+    if _is_dmdcore_process(cmdline):
+        print(f"{label}: stopping stale dmdcore process on port {port} (PID {pid})")
+        _kill_pid(pid)
+        time.sleep(0.5)
+        return _pid_listening_on_port(port) is None
+    print(f"{label}: port {port} is occupied by another process (PID {pid})")
+    print(f"  command: {cmdline or '(unknown)'}")
+    print(f"  Free the port (kill the process or pick another) and try again.")
+    return False
+
+
 def _ensure_api(
     *,
     host: str,
@@ -2028,9 +2166,12 @@ def _ensure_api(
     verbose: bool,
     start_telegram: bool = True,
 ) -> subprocess.Popen[Any] | None:
-    if _http_ok(f"http://{host}:{port}/health"):
+    health_info = _http_json(f"http://{host}:{port}/health")
+    if health_info and health_info.get("status") == "ok":
         print(f"API: already running on {host}:{port}")
         return None
+    if not _evict_stale_dmdcore_listener(port, "API"):
+        raise RuntimeError(f"API port {port} is in use by another program.")
     print(f"API: starting on {host}:{port}")
     env = os.environ if start_telegram else {**os.environ, "DMDCORE_NO_TELEGRAM": "1"}
     process = _start_process(
@@ -2061,10 +2202,20 @@ def _ensure_dashboard(
     api_url: str,
     verbose: bool,
 ) -> subprocess.Popen[Any] | None:
-    if _http_ok(f"http://{host}:{ui_port}/"):
-        print(f"Dashboard: already running on {host}:{ui_port}")
-        return None
     frontend_dir = _frontend_dir()
+    if _http_ok(f"http://{host}:{ui_port}/"):
+        pid = _pid_listening_on_port(ui_port)
+        cmdline = _process_cmdline(pid) if pid else ""
+        if pid is None or str(frontend_dir) in cmdline or _is_dmdcore_process(cmdline):
+            print(f"Dashboard: already running on {host}:{ui_port}")
+            return None
+        print(
+            f"Dashboard: stale listener on port {ui_port} (PID {pid}); replacing"
+        )
+        if not _evict_stale_dmdcore_listener(ui_port, "Dashboard"):
+            raise RuntimeError(f"Dashboard port {ui_port} is in use by another program.")
+    elif not _evict_stale_dmdcore_listener(ui_port, "Dashboard"):
+        raise RuntimeError(f"Dashboard port {ui_port} is in use by another program.")
     if not frontend_dir.exists():
         raise RuntimeError(f"Dashboard source not found: {frontend_dir}")
     if shutil.which("npm") is None:
