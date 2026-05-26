@@ -10,10 +10,10 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from dmdagent4all.config import DEFAULT_CONFIG
-from dmdagent4all.llm.openai_usage import DEFAULT_OPENAI_API_KEY_ENV
-from dmdagent4all.audit import AuditStore
-from dmdagent4all.server import (
+from dmdcore.config import DEFAULT_CONFIG
+from dmdcore.llm.openai_usage import DEFAULT_OPENAI_API_KEY_ENV
+from dmdcore.audit import AuditStore
+from dmdcore.server import (
     DEFAULT_DEEPSEEK_API_KEY_ENV,
     DEEPSEEK_BASE_URL,
     DEFAULT_DEEPSEEK_MODEL,
@@ -42,11 +42,11 @@ from dmdagent4all.server import (
     _update_agent_configuration,
     _validate_terminal_allowlist_command,
 )
-from dmdagent4all.email_oauth import GMAIL_OAUTH_SCOPE, google_authorization_url
-from dmdagent4all.tools import build_builtin_registry
-from dmdagent4all.tools.email_connector import _settings, test_email_connection
-from dmdagent4all.tools.base import ToolRuntimeContext
-from dmdagent4all.tools.reminders import (
+from dmdcore.email_oauth import GMAIL_OAUTH_SCOPE, google_authorization_url
+from dmdcore.tools import build_builtin_registry
+from dmdcore.tools.email_connector import _settings, test_email_connection
+from dmdcore.tools.base import ToolRuntimeContext
+from dmdcore.tools.reminders import (
     create_reminder,
     list_reminders,
     reminder_change_version,
@@ -74,11 +74,11 @@ class DashboardControlsTest(unittest.TestCase):
     def test_telegram_controls_keep_token_as_environment_reference(self) -> None:
         config = {**DEFAULT_CONFIG, "interfaces": {"telegram": {}}}
 
-        _set_telegram_token_env(config, "DMDAGENT_TEST_TOKEN")
+        _set_telegram_token_env(config, "DMDCORE_TEST_TOKEN")
         _set_telegram_user_allowed(config, 12345, True)
 
         status = _telegram_status(config)
-        self.assertEqual(status["bot_token_env"], "DMDAGENT_TEST_TOKEN")
+        self.assertEqual(status["bot_token_env"], "DMDCORE_TEST_TOKEN")
         self.assertEqual(status["allowed_user_ids"], [12345])
         with self.assertRaises(HTTPException):
             _set_telegram_token_env(config, "not valid")
@@ -172,9 +172,9 @@ class DashboardControlsTest(unittest.TestCase):
                         max_body_chars=12345,
                         gmail=EmailProviderConfigurationRequest(
                             enabled=True,
-                            username_env="DMDAGENT_TEST_GMAIL_USER",
-                            password_env="DMDAGENT_TEST_GMAIL_PASSWORD",
-                            from_env="DMDAGENT_TEST_GMAIL_FROM",
+                            username_env="DMDCORE_TEST_GMAIL_USER",
+                            password_env="DMDCORE_TEST_GMAIL_PASSWORD",
+                            from_env="DMDCORE_TEST_GMAIL_FROM",
                             mailbox="Primary",
                         ),
                     ),
@@ -184,9 +184,9 @@ class DashboardControlsTest(unittest.TestCase):
 
         self.assertEqual(response["email"]["max_body_chars"], 12345)
         self.assertTrue(response["email"]["gmail"]["enabled"])
-        self.assertEqual(response["email"]["gmail"]["username_env"], "DMDAGENT_TEST_GMAIL_USER")
-        self.assertEqual(response["email"]["gmail"]["password_env"], "DMDAGENT_TEST_GMAIL_PASSWORD")
-        self.assertEqual(response["email"]["gmail"]["from_env"], "DMDAGENT_TEST_GMAIL_FROM")
+        self.assertEqual(response["email"]["gmail"]["username_env"], "DMDCORE_TEST_GMAIL_USER")
+        self.assertEqual(response["email"]["gmail"]["password_env"], "DMDCORE_TEST_GMAIL_PASSWORD")
+        self.assertEqual(response["email"]["gmail"]["from_env"], "DMDCORE_TEST_GMAIL_FROM")
         self.assertEqual(response["email"]["gmail"]["mailbox"], "Primary")
         self.assertTrue(config["tools"]["gmail.search"]["enabled"])
         self.assertTrue(config["tools"]["gmail.read_thread"]["enabled"])
@@ -195,13 +195,13 @@ class DashboardControlsTest(unittest.TestCase):
 
     def test_email_credentials_loader_sets_process_env_without_returning_secret(self) -> None:
         config = deepcopy(DEFAULT_CONFIG)
-        config["email"]["gmail"]["username_env"] = "DMDAGENT_TEST_GMAIL_USER"
-        config["email"]["gmail"]["password_env"] = "DMDAGENT_TEST_GMAIL_PASSWORD"
-        config["email"]["gmail"]["from_env"] = "DMDAGENT_TEST_GMAIL_FROM"
+        config["email"]["gmail"]["username_env"] = "DMDCORE_TEST_GMAIL_USER"
+        config["email"]["gmail"]["password_env"] = "DMDCORE_TEST_GMAIL_PASSWORD"
+        config["email"]["gmail"]["from_env"] = "DMDCORE_TEST_GMAIL_FROM"
         for key in (
-            "DMDAGENT_TEST_GMAIL_USER",
-            "DMDAGENT_TEST_GMAIL_PASSWORD",
-            "DMDAGENT_TEST_GMAIL_FROM",
+            "DMDCORE_TEST_GMAIL_USER",
+            "DMDCORE_TEST_GMAIL_PASSWORD",
+            "DMDCORE_TEST_GMAIL_FROM",
         ):
             os.environ.pop(key, None)
 
@@ -219,27 +219,27 @@ class DashboardControlsTest(unittest.TestCase):
             env_values = {
                 key: os.environ.pop(key, None)
                 for key in (
-                    "DMDAGENT_TEST_GMAIL_USER",
-                    "DMDAGENT_TEST_GMAIL_PASSWORD",
-                    "DMDAGENT_TEST_GMAIL_FROM",
+                    "DMDCORE_TEST_GMAIL_USER",
+                    "DMDCORE_TEST_GMAIL_PASSWORD",
+                    "DMDCORE_TEST_GMAIL_FROM",
                 )
             }
 
-        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_USER"], "sender@example.com")
-        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_PASSWORD"], "app-password")
-        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_FROM"], "from@example.com")
+        self.assertEqual(env_values["DMDCORE_TEST_GMAIL_USER"], "sender@example.com")
+        self.assertEqual(env_values["DMDCORE_TEST_GMAIL_PASSWORD"], "app-password")
+        self.assertEqual(env_values["DMDCORE_TEST_GMAIL_FROM"], "from@example.com")
         self.assertTrue(result["data"]["credentials_loaded"])
         self.assertNotIn("app-password", str(result))
 
     def test_email_credentials_loader_normalizes_app_password_copy_paste_whitespace(self) -> None:
         config = deepcopy(DEFAULT_CONFIG)
-        config["email"]["gmail"]["username_env"] = "DMDAGENT_TEST_GMAIL_USER"
-        config["email"]["gmail"]["password_env"] = "DMDAGENT_TEST_GMAIL_PASSWORD"
-        config["email"]["gmail"]["from_env"] = "DMDAGENT_TEST_GMAIL_FROM"
+        config["email"]["gmail"]["username_env"] = "DMDCORE_TEST_GMAIL_USER"
+        config["email"]["gmail"]["password_env"] = "DMDCORE_TEST_GMAIL_PASSWORD"
+        config["email"]["gmail"]["from_env"] = "DMDCORE_TEST_GMAIL_FROM"
         for key in (
-            "DMDAGENT_TEST_GMAIL_USER",
-            "DMDAGENT_TEST_GMAIL_PASSWORD",
-            "DMDAGENT_TEST_GMAIL_FROM",
+            "DMDCORE_TEST_GMAIL_USER",
+            "DMDCORE_TEST_GMAIL_PASSWORD",
+            "DMDCORE_TEST_GMAIL_FROM",
         ):
             os.environ.pop(key, None)
 
@@ -257,14 +257,14 @@ class DashboardControlsTest(unittest.TestCase):
             env_values = {
                 key: os.environ.pop(key, None)
                 for key in (
-                    "DMDAGENT_TEST_GMAIL_USER",
-                    "DMDAGENT_TEST_GMAIL_PASSWORD",
-                    "DMDAGENT_TEST_GMAIL_FROM",
+                    "DMDCORE_TEST_GMAIL_USER",
+                    "DMDCORE_TEST_GMAIL_PASSWORD",
+                    "DMDCORE_TEST_GMAIL_FROM",
                 )
             }
 
-        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_USER"], "sender@example.com")
-        self.assertEqual(env_values["DMDAGENT_TEST_GMAIL_PASSWORD"], "abcdefghijklmnop")
+        self.assertEqual(env_values["DMDCORE_TEST_GMAIL_USER"], "sender@example.com")
+        self.assertEqual(env_values["DMDCORE_TEST_GMAIL_PASSWORD"], "abcdefghijklmnop")
         self.assertTrue(result["data"]["credentials_loaded"])
         self.assertNotIn("abcdefghijklmnop", str(result))
 
@@ -281,7 +281,7 @@ class DashboardControlsTest(unittest.TestCase):
                     redirect_uri="http://127.0.0.1:8765/v1/email/oauth/google/callback",
                 ),
             )
-            with mock.patch("dmdagent4all.server.load_email_secret", return_value="stored-secret"):
+            with mock.patch("dmdcore.server.load_email_secret", return_value="stored-secret"):
                 response = _configuration_response(paths, config)
 
         gmail = response["email"]["gmail"]
@@ -327,8 +327,8 @@ class DashboardControlsTest(unittest.TestCase):
                 workspace_root=root / "workspace",
                 config=config,
             )
-            with mock.patch("dmdagent4all.tools.email_connector.load_email_secret", return_value="secret"):
-                with mock.patch("dmdagent4all.tools.email_connector.refresh_google_access_token", return_value="access-token") as refresh:
+            with mock.patch("dmdcore.tools.email_connector.load_email_secret", return_value="secret"):
+                with mock.patch("dmdcore.tools.email_connector.refresh_google_access_token", return_value="access-token") as refresh:
                     settings = _settings("gmail", context)
 
         self.assertIsNotNone(settings)
@@ -410,8 +410,8 @@ class DashboardControlsTest(unittest.TestCase):
             )
             registry = build_builtin_registry()
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
                 draft = registry.execute(
@@ -423,7 +423,7 @@ class DashboardControlsTest(unittest.TestCase):
                     },
                     context,
                 )
-                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FakeSMTP):
                     FakeSMTP.sent_messages.clear()
                     sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
 
@@ -444,8 +444,8 @@ class DashboardControlsTest(unittest.TestCase):
             )
             registry = build_builtin_registry()
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "\u00a0sender@example.com\u00a0",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "abcd\u00a0efgh ijkl\tmnop",
+                "DMDCORE_GMAIL_USERNAME": "\u00a0sender@example.com\u00a0",
+                "DMDCORE_GMAIL_APP_PASSWORD": "abcd\u00a0efgh ijkl\tmnop",
             }
             with mock.patch.dict(os.environ, env):
                 draft = registry.execute(
@@ -457,7 +457,7 @@ class DashboardControlsTest(unittest.TestCase):
                     },
                     context,
                 )
-                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", RecordingSMTP):
+                with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", RecordingSMTP):
                     RecordingSMTP.login_credentials.clear()
                     sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
 
@@ -476,8 +476,8 @@ class DashboardControlsTest(unittest.TestCase):
             )
             registry = build_builtin_registry()
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
                 draft = registry.execute(
@@ -489,7 +489,7 @@ class DashboardControlsTest(unittest.TestCase):
                     },
                     context,
                 )
-                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", UnicodeEncodingSMTP):
+                with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", UnicodeEncodingSMTP):
                     result = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
 
         self.assertEqual(result["status"], "authentication_failed")
@@ -509,8 +509,8 @@ class DashboardControlsTest(unittest.TestCase):
             )
             registry = build_builtin_registry()
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
                 draft = registry.execute(
@@ -522,7 +522,7 @@ class DashboardControlsTest(unittest.TestCase):
                     },
                     context,
                 )
-                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FakeSMTP):
                     FakeSMTP.sent_messages.clear()
                     sent = registry.execute("gmail.send_draft", {"draft_id": draft["draft_id"]}, context)
 
@@ -548,8 +548,8 @@ class DashboardControlsTest(unittest.TestCase):
                 config=config,
             )
             registry = build_builtin_registry()
-            with mock.patch("dmdagent4all.tools.email_connector.load_email_secret", return_value="secret"):
-                with mock.patch("dmdagent4all.tools.email_connector.refresh_google_access_token", return_value="access-token"):
+            with mock.patch("dmdcore.tools.email_connector.load_email_secret", return_value="secret"):
+                with mock.patch("dmdcore.tools.email_connector.refresh_google_access_token", return_value="access-token"):
                     draft = registry.execute(
                         "gmail.create_draft",
                         {
@@ -559,7 +559,7 @@ class DashboardControlsTest(unittest.TestCase):
                         },
                         context,
                     )
-                    with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeOAuthSMTP):
+                    with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FakeOAuthSMTP):
                         FakeOAuthSMTP.sent_messages.clear()
                         FakeOAuthSMTP.auth_commands.clear()
                         FakeOAuthSMTP.login_called = False
@@ -583,8 +583,8 @@ class DashboardControlsTest(unittest.TestCase):
             )
             registry = build_builtin_registry()
             env = {
-                "DMDAGENT_OUTLOOK_USERNAME": "sender@outlook.com",
-                "DMDAGENT_OUTLOOK_APP_PASSWORD": "app-password",
+                "DMDCORE_OUTLOOK_USERNAME": "sender@outlook.com",
+                "DMDCORE_OUTLOOK_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
                 draft = registry.execute(
@@ -596,7 +596,7 @@ class DashboardControlsTest(unittest.TestCase):
                     },
                     context,
                 )
-                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
+                with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
                     result = registry.execute("outlook.send_draft", {"draft_id": draft["draft_id"]}, context)
 
         self.assertEqual(result["status"], "authentication_failed")
@@ -615,11 +615,11 @@ class DashboardControlsTest(unittest.TestCase):
                 config=config,
             )
             env = {
-                "DMDAGENT_OUTLOOK_USERNAME": "sender@outlook.com",
-                "DMDAGENT_OUTLOOK_APP_PASSWORD": "app-password",
+                "DMDCORE_OUTLOOK_USERNAME": "sender@outlook.com",
+                "DMDCORE_OUTLOOK_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
-                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                with mock.patch("dmdcore.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
                     result = build_builtin_registry().execute(
                         "outlook.summarize_inbox",
                         {"query": "subject:Invoice", "limit": 1},
@@ -641,11 +641,11 @@ class DashboardControlsTest(unittest.TestCase):
                 config=config,
             )
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@gmail.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@gmail.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
-                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                with mock.patch("dmdcore.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
                     result = build_builtin_registry().execute(
                         "gmail.read_thread",
                         {"latest": True},
@@ -667,12 +667,12 @@ class DashboardControlsTest(unittest.TestCase):
                 config=config,
             )
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@gmail.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@gmail.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
-                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
-                    with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                with mock.patch("dmdcore.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                    with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FakeSMTP):
                         result = test_email_connection("gmail", context)
 
         self.assertEqual(result["status"], "ok")
@@ -691,12 +691,12 @@ class DashboardControlsTest(unittest.TestCase):
                 config=config,
             )
             env = {
-                "DMDAGENT_OUTLOOK_USERNAME": "sender@outlook.com",
-                "DMDAGENT_OUTLOOK_APP_PASSWORD": "app-password",
+                "DMDCORE_OUTLOOK_USERNAME": "sender@outlook.com",
+                "DMDCORE_OUTLOOK_APP_PASSWORD": "app-password",
             }
             with mock.patch.dict(os.environ, env):
-                with mock.patch("dmdagent4all.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
-                    with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
+                with mock.patch("dmdcore.tools.email_connector.imaplib.IMAP4_SSL", FakeIMAP):
+                    with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FailingAuthSMTP):
                         result = test_email_connection("outlook", context)
 
         self.assertEqual(result["status"], "connection_failed")

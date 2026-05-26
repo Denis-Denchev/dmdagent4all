@@ -11,8 +11,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     XDG_DATA_HOME=/data \
-    DMDAGENT_STATIC_DIR=/app/frontend/dist \
-    DMDAGENT_WORKSPACE=/workspace
+    DMDCORE_STATIC_DIR=/app/frontend/dist \
+    DMDCORE_WORKSPACE=/workspace
 
 WORKDIR /app
 
@@ -23,14 +23,14 @@ RUN apt-get update \
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY config ./config
-COPY scripts/docker-entrypoint.sh /usr/local/bin/dmdagent-docker-entrypoint
+COPY scripts/docker-entrypoint.sh /usr/local/bin/dmdcore-docker-entrypoint
 COPY --from=dashboard /app/frontend/dist ./frontend/dist
 
-RUN sed -i 's/\r$//' /usr/local/bin/dmdagent-docker-entrypoint \
-    && chmod +x /usr/local/bin/dmdagent-docker-entrypoint \
+RUN sed -i 's/\r$//' /usr/local/bin/dmdcore-docker-entrypoint \
+    && chmod +x /usr/local/bin/dmdcore-docker-entrypoint \
     && pip install --no-cache-dir .
 
 EXPOSE 8765
 
-ENTRYPOINT ["dmdagent-docker-entrypoint"]
+ENTRYPOINT ["dmdcore-docker-entrypoint"]
 CMD ["serve"]

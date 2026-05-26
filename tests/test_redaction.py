@@ -1,6 +1,6 @@
 import unittest
 
-from dmdagent4all.security import redact_text
+from dmdcore.security import redact_text
 
 
 class RedactionTest(unittest.TestCase):

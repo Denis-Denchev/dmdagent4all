@@ -34,10 +34,10 @@ echo "Installing package in editable mode"
 
 echo ""
 echo "Initializing local data"
-.venv/bin/dmdagent init
+.venv/bin/dmdcore init
 
 echo ""
-.venv/bin/dmdagent wizard
+.venv/bin/dmdcore wizard
 
 echo ""
 echo "Install complete."

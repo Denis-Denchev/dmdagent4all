@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$ROOT_DIR/.venv"
 PYTHON_BIN="$VENV_DIR/bin/python"
-DMDAGENT_BIN="$VENV_DIR/bin/dmdagent"
+DMDCORE_BIN="$VENV_DIR/bin/dmdcore"
 
 cd "$ROOT_DIR"
 
@@ -46,7 +46,7 @@ ensure_venv() {
 
 ensure_package() {
   ensure_venv
-  if [ ! -x "$DMDAGENT_BIN" ]; then
+  if [ ! -x "$DMDCORE_BIN" ]; then
     echo "Installing DMD Agent locally..."
     "$PYTHON_BIN" -m pip install --upgrade pip
     "$PYTHON_BIN" -m pip install -e .
@@ -61,23 +61,23 @@ install_shell_command() {
     shell_rc="${HOME}/.bashrc"
   fi
 
-  local begin_marker="# >>> dmdagent4all start command >>>"
-  local end_marker="# <<< dmdagent4all start command <<<"
+  local begin_marker="# >>> dmdcore start command >>>"
+  local end_marker="# <<< dmdcore start command <<<"
 
   touch "$shell_rc"
   if grep -Fq "$begin_marker" "$shell_rc"; then
     local tmp_file
     tmp_file="$(mktemp)"
     awk '
-      /# >>> dmdagent4all start command >>>/ { skip=1; next }
-      /# <<< dmdagent4all start command <<</ { skip=0; next }
+      /# >>> dmdcore start command >>>/ { skip=1; next }
+      /# <<< dmdcore start command <<</ { skip=0; next }
       skip != 1 { print }
     ' "$shell_rc" > "$tmp_file"
     mv "$tmp_file" "$shell_rc"
   fi
   cat >>"$shell_rc" <<'EOF'
 
-# >>> dmdagent4all start command >>>
+# >>> dmdcore start command >>>
 start() {
   if [ -x "./start" ]; then
     case "${1:-session}" in
@@ -89,7 +89,7 @@ start() {
   fi
   command start "$@"
 }
-# <<< dmdagent4all start command <<<
+# <<< dmdcore start command <<<
 EOF
   echo "Installed shell shortcut in $shell_rc"
 
@@ -115,26 +115,26 @@ case "$command_name" in
     ;;
   session|chat)
     ensure_package
-    exec "$DMDAGENT_BIN" chat "$@"
+    exec "$DMDCORE_BIN" chat "$@"
     ;;
   ask)
     ensure_package
-    exec "$DMDAGENT_BIN" ask "$@"
+    exec "$DMDCORE_BIN" ask "$@"
     ;;
   web|dashboard)
     ensure_package
-    exec "$DMDAGENT_BIN" start "$@"
+    exec "$DMDCORE_BIN" start "$@"
     ;;
   model)
     ensure_package
-    exec "$DMDAGENT_BIN" model "$@"
+    exec "$DMDCORE_BIN" model "$@"
     ;;
   doctor|status|open)
     ensure_package
-    exec "$DMDAGENT_BIN" "$command_name" "$@"
+    exec "$DMDCORE_BIN" "$command_name" "$@"
     ;;
   *)
     ensure_package
-    exec "$DMDAGENT_BIN" "$command_name" "$@"
+    exec "$DMDCORE_BIN" "$command_name" "$@"
     ;;
 esac

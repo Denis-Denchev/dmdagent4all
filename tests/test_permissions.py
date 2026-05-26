@@ -1,7 +1,7 @@
 import unittest
 
-from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
-from dmdagent4all.tools import load_builtin_manifests
+from dmdcore.permissions import PermissionContext, PermissionEngine, ToolRequest
+from dmdcore.tools import load_builtin_manifests
 
 
 class PermissionEngineTest(unittest.TestCase):

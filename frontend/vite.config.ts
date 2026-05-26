@@ -6,8 +6,8 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      '/v1': process.env.DMDAGENT_API_URL ?? 'http://127.0.0.1:8765',
-      '/health': process.env.DMDAGENT_API_URL ?? 'http://127.0.0.1:8765',
+      '/v1': process.env.DMDCORE_API_URL ?? 'http://127.0.0.1:8765',
+      '/health': process.env.DMDCORE_API_URL ?? 'http://127.0.0.1:8765',
     },
   },
 })

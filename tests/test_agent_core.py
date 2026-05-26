@@ -8,15 +8,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from dmdagent4all.agent import AgentCore
-from dmdagent4all.agent.planner import PlanResult, PlannerError
-from dmdagent4all.agent.router import ConversationRouter
-from dmdagent4all.audit import AuditStore
-from dmdagent4all.memory import MemoryManager
-from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
-from dmdagent4all.tools import build_builtin_registry
-from dmdagent4all.tools.base import ToolRuntimeContext
-from dmdagent4all.tools.web import FetchedPage
+from dmdcore.agent import AgentCore
+from dmdcore.agent.planner import PlanResult, PlannerError
+from dmdcore.agent.router import ConversationRouter
+from dmdcore.audit import AuditStore
+from dmdcore.memory import MemoryManager
+from dmdcore.permissions import PermissionContext, PermissionEngine, ToolRequest
+from dmdcore.tools import build_builtin_registry
+from dmdcore.tools.base import ToolRuntimeContext
+from dmdcore.tools.web import FetchedPage
 
 
 class FakePlanner:
@@ -487,7 +487,7 @@ class AgentCoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(
                 Path(tmp),
-                FailingPlanner(RuntimeError("openai requires an API key in DMDAGENT_OPENAI_API_KEY.")),
+                FailingPlanner(RuntimeError("openai requires an API key in DMDCORE_OPENAI_API_KEY.")),
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -502,7 +502,7 @@ class AgentCoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             core = _build_core(
                 Path(tmp),
-                FailingPlanner(RuntimeError("openai requires an API key in DMDAGENT_OPENAI_API_KEY.")),
+                FailingPlanner(RuntimeError("openai requires an API key in DMDCORE_OPENAI_API_KEY.")),
                 config={"llm": {"provider": "openai", "response_language": "auto"}},
                 permission_context=PermissionContext(cloud_model_active=True),
             )
@@ -511,7 +511,7 @@ class AgentCoreTest(unittest.TestCase):
 
             self.assertEqual(response.status, "ok")
             self.assertIn("API key is not loaded", response.message)
-            self.assertIn("DMDAGENT_OPENAI_API_KEY", response.message)
+            self.assertIn("DMDCORE_OPENAI_API_KEY", response.message)
             self.assertEqual(response.data, {"planner": "deterministic", "fallback": "missing_api_key"})
 
     def test_planner_unavailable_mode_mentions_context_aware_tasks(self) -> None:
@@ -765,7 +765,7 @@ class AgentCoreTest(unittest.TestCase):
                 bytes_read=1024,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 response = core.handle_text("scrape first 2 articles from news.example.test")
 
             self.assertEqual(response.status, "ok")
@@ -917,7 +917,7 @@ class AgentCoreTest(unittest.TestCase):
                 bytes_read=512,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 pending = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
 
             approval = audit.list_approvals(status="pending")[0]
@@ -974,7 +974,7 @@ class AgentCoreTest(unittest.TestCase):
                 bytes_read=512,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 pending = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
             approved = core.approve_and_execute(pending.data["approval_id"])
 
@@ -1062,8 +1062,8 @@ class AgentCoreTest(unittest.TestCase):
             source = workspace / "report.md"
             source.write_text("Project report body\n", encoding="utf-8")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -1163,7 +1163,7 @@ class AgentCoreTest(unittest.TestCase):
                 bytes_read=256,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 response = core.handle_text("scrape dmdflow.com and place the results in .env")
 
             self.assertEqual(response.status, "denied")
@@ -1245,7 +1245,7 @@ class AgentCoreTest(unittest.TestCase):
                     granted_permissions=frozenset({"browser.read"}),
                 ),
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page") as fetch:
+            with mock.patch("dmdcore.tools.web.fetch_page") as fetch:
                 response = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
 
             self.assertEqual(response.status, "denied")
@@ -1410,7 +1410,7 @@ class AgentCoreTest(unittest.TestCase):
 
             with (
                 mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}),
-                mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page),
+                mock.patch("dmdcore.tools.web.fetch_page", return_value=page),
             ):
                 response = core.handle_tool_request(
                     ToolRequest(
@@ -1463,7 +1463,7 @@ class AgentCoreTest(unittest.TestCase):
 
             with (
                 mock.patch.dict(os.environ, {"LOCAL_DEV_AUTONOMY": "true"}),
-                mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page),
+                mock.patch("dmdcore.tools.web.fetch_page", return_value=page),
             ):
                 response = core.handle_text("scrape dmdflow.com and place the results in readme123.md")
 
@@ -3087,8 +3087,8 @@ and this is the knowlage
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             enabled_tools = frozenset(
                 {
@@ -3137,8 +3137,8 @@ and this is the knowlage
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3180,8 +3180,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3231,8 +3231,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3283,8 +3283,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3333,8 +3333,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3371,7 +3371,7 @@ and this is the knowlage
                     decision_reason="Tool manifest requires approval.",
                 )
                 FakeSMTP.sent_messages.clear()
-                with mock.patch("dmdagent4all.tools.email_connector.smtplib.SMTP", FakeSMTP):
+                with mock.patch("dmdcore.tools.email_connector.smtplib.SMTP", FakeSMTP):
                     response = core.approve_and_execute(approval_id)
 
             self.assertEqual(response.status, "ok")
@@ -3385,8 +3385,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             enabled_tools = frozenset(
                 {
@@ -3453,8 +3453,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             planner_body = (
                 "Здравейте,\n\n"
@@ -3523,8 +3523,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3564,8 +3564,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,
@@ -3603,8 +3603,8 @@ and this is the knowlage
             root = Path(tmp)
             audit = AuditStore(root / "audit.db")
             env = {
-                "DMDAGENT_GMAIL_USERNAME": "sender@example.com",
-                "DMDAGENT_GMAIL_APP_PASSWORD": "app-password",
+                "DMDCORE_GMAIL_USERNAME": "sender@example.com",
+                "DMDCORE_GMAIL_APP_PASSWORD": "app-password",
             }
             core = _build_core(
                 root,

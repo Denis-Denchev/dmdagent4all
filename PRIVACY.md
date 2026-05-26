@@ -32,7 +32,7 @@ The model receives only sanitized tool results.
 Local memory is stored as Markdown files under the app data directory:
 
 ```text
-~/.local/share/dmdagent4all/memory/
+~/.local/share/dmdcore/memory/
   profile.md
   preferences.md
   people/
@@ -61,7 +61,7 @@ Allow once / Always allow for this tool / Cancel
 Default local data path:
 
 ```text
-~/.local/share/dmdagent4all/
+~/.local/share/dmdcore/
   config.yaml
   memory/
   workspace/

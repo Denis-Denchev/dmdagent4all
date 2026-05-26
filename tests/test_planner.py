@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from dmdagent4all.agent.planner import (
+from dmdcore.agent.planner import (
     LLMPlanner,
     PlannerError,
     REPAIR_PROMPT,
@@ -9,7 +9,7 @@ from dmdagent4all.agent.planner import (
     is_low_relevance_plan,
     parse_plan_response,
 )
-from dmdagent4all.llm.base import LLMMessage, LLMResponse
+from dmdcore.llm.base import LLMMessage, LLMResponse
 
 
 class PlannerTest(unittest.TestCase):

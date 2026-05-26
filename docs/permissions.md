@@ -46,9 +46,9 @@ safety denial cannot be bypassed by approval.
 When a tool requires approval, the backend stores the exact pending request:
 
 ```text
-dmdagent approvals list
-dmdagent approvals approve <id>
-dmdagent approvals deny <id>
+dmdcore approvals list
+dmdcore approvals approve <id>
+dmdcore approvals deny <id>
 ```
 
 Approving a request executes that stored request once. Approval does not bypass tool enablement or missing connector permissions.
@@ -116,13 +116,13 @@ Allowed terminal execution must use:
 Operational flow:
 
 ```bash
-dmdagent terminal status
-dmdagent terminal workspace /path/to/dmdagent4all
-dmdagent terminal allow git status
-dmdagent terminal enable --tool --grant-permission
-dmdagent terminal run -- git status
-dmdagent approvals approve <id>
-dmdagent terminal auto-approve on
+dmdcore terminal status
+dmdcore terminal workspace /path/to/dmdcore
+dmdcore terminal allow git status
+dmdcore terminal enable --tool --grant-permission
+dmdcore terminal run -- git status
+dmdcore approvals approve <id>
+dmdcore terminal auto-approve on
 ```
 
 `terminal.run` is a risk 5 tool. Enabling the terminal policy, enabling the

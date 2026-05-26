@@ -4,8 +4,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from dmdagent4all.app_paths import AppPaths
-from dmdagent4all.server import (
+from dmdcore.app_paths import AppPaths
+from dmdcore.server import (
     _configuration_response,
     _read_workspace_text_preview,
     _resolve_workspace_file,
@@ -18,7 +18,7 @@ from dmdagent4all.server import (
 class WorkspaceFilesApiTest(unittest.TestCase):
     def test_lists_and_reads_only_allowed_download_folders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "dmdagent4all"
+            root = Path(tmp) / "dmdcore"
             paths_config = AppPaths(
                 root=root,
                 config=root / "config.yaml",
@@ -54,7 +54,7 @@ class WorkspaceFilesApiTest(unittest.TestCase):
 
     def test_downloads_root_can_be_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "dmdagent4all"
+            root = Path(tmp) / "dmdcore"
             custom_downloads = Path(tmp) / "internet-files"
             paths_config = AppPaths(
                 root=root,
@@ -83,7 +83,7 @@ class WorkspaceFilesApiTest(unittest.TestCase):
 
     def test_system_prompt_overrides_are_exposed_with_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "dmdagent4all"
+            root = Path(tmp) / "dmdcore"
             paths_config = AppPaths(
                 root=root,
                 config=root / "config.yaml",

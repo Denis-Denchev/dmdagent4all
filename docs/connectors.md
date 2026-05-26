@@ -23,17 +23,17 @@ into SMTP without sending a message.
 Gmail env vars:
 
 ```text
-DMDAGENT_GMAIL_USERNAME
-DMDAGENT_GMAIL_APP_PASSWORD
-DMDAGENT_GMAIL_FROM optional
+DMDCORE_GMAIL_USERNAME
+DMDCORE_GMAIL_APP_PASSWORD
+DMDCORE_GMAIL_FROM optional
 ```
 
 Outlook env vars:
 
 ```text
-DMDAGENT_OUTLOOK_USERNAME
-DMDAGENT_OUTLOOK_APP_PASSWORD
-DMDAGENT_OUTLOOK_FROM optional
+DMDCORE_OUTLOOK_USERNAME
+DMDCORE_OUTLOOK_APP_PASSWORD
+DMDCORE_OUTLOOK_FROM optional
 ```
 
 Enable provider config:
@@ -167,7 +167,7 @@ is used.
 
 Operational notes:
 
-- The bot token is read from `DMDAGENT_TELEGRAM_BOT_TOKEN` by default, or from
+- The bot token is read from `DMDCORE_TELEGRAM_BOT_TOKEN` by default, or from
   the current API process environment when it has been pasted in the dashboard.
 - The token is not stored in `config.yaml`, persisted by the dashboard, or sent
   to the model.

@@ -136,7 +136,7 @@ Providers are isolated behind a common interface:
 
 - Ollama provider for local models
 - OpenAI-compatible provider for OpenAI-style cloud or local API servers
-- DeepSeek provider via `https://api.deepseek.com` and `DMDAGENT_DEEPSEEK_API_KEY`
+- DeepSeek provider via `https://api.deepseek.com` and `DMDCORE_DEEPSEEK_API_KEY`
 - Cloud-provider stubs for providers that still need explicit implementation
 
 Default:
@@ -232,7 +232,7 @@ workspace is the host `./workspace` folder mounted into the app container.
 Default path:
 
 ```text
-~/.local/share/dmdagent4all/
+~/.local/share/dmdcore/
   config.yaml
   memory/
   workspace/

@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dmdagent4all.memory.manager import MemoryManager, MemoryPathError
+from dmdcore.memory.manager import MemoryManager, MemoryPathError
 
 
 class MemoryManagerTest(unittest.TestCase):

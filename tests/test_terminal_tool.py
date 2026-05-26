@@ -2,11 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dmdagent4all.agent import AgentCore
-from dmdagent4all.audit import AuditStore
-from dmdagent4all.permissions import PermissionContext, PermissionEngine, ToolRequest
-from dmdagent4all.tools import build_builtin_registry
-from dmdagent4all.tools.base import ToolRuntimeContext
+from dmdcore.agent import AgentCore
+from dmdcore.audit import AuditStore
+from dmdcore.permissions import PermissionContext, PermissionEngine, ToolRequest
+from dmdcore.tools import build_builtin_registry
+from dmdcore.tools.base import ToolRuntimeContext
 
 
 class TerminalToolTest(unittest.TestCase):

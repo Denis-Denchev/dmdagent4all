@@ -30,7 +30,7 @@ DMD Agent intentionally stays more conservative:
 
 `docker-compose.yml` starts:
 
-- `dmdagent`: FastAPI backend plus built React dashboard
+- `dmdcore`: FastAPI backend plus built React dashboard
 - `ollama`: local model runtime
 
 The app is available at:

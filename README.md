@@ -163,9 +163,9 @@ email leaves the machine.
 Relevant backend logic is in:
 
 ```text
-src/dmdagent4all/agent/core.py
-src/dmdagent4all/tools/email_connector.py
-src/dmdagent4all/server.py
+src/dmdcore/agent/core.py
+src/dmdcore/tools/email_connector.py
+src/dmdcore/server.py
 ```
 
 Relevant frontend preview rendering is in:
@@ -189,8 +189,8 @@ auth. This prevents hidden NBSP characters from breaking SMTP login.
 Relevant code:
 
 ```text
-src/dmdagent4all/tools/email_connector.py
-src/dmdagent4all/server.py
+src/dmdcore/tools/email_connector.py
+src/dmdcore/server.py
 tests/test_dashboard_controls.py
 ```
 
@@ -202,9 +202,9 @@ Gmail OAuth flow.
 Important files:
 
 ```text
-src/dmdagent4all/email_oauth.py
-src/dmdagent4all/server.py
-src/dmdagent4all/tools/email_connector.py
+src/dmdcore/email_oauth.py
+src/dmdcore/server.py
+src/dmdcore/tools/email_connector.py
 ```
 
 Important endpoints:
@@ -355,7 +355,7 @@ User response
 Main backend package:
 
 ```text
-src/dmdagent4all/
+src/dmdcore/
 ```
 
 Main frontend package:
@@ -370,7 +370,7 @@ This is the normal request path when a user types into the dashboard chat.
 
 1. User submits text in `frontend/src/App.tsx`.
 2. Frontend calls `POST /v1/chat` or `POST /v1/chat/stream`.
-3. FastAPI route in `src/dmdagent4all/server.py` forwards the message to
+3. FastAPI route in `src/dmdcore/server.py` forwards the message to
    `AgentCore`.
 4. `AgentCore` checks minimal deterministic controls first:
    - approve/deny
@@ -412,7 +412,7 @@ This section explains the important files and folders.
 ├── docs/
 ├── frontend/
 ├── scripts/
-├── src/dmdagent4all/
+├── src/dmdcore/
 └── tests/
 ```
 
@@ -426,7 +426,7 @@ This file. It is the main project handoff document.
 
 Python package metadata. It defines:
 
-- package name: `dmdagent4all`
+- package name: `dmdcore`
 - version: `1.0.0`
 - Python requirement: `>=3.11`
 - runtime dependencies:
@@ -436,13 +436,13 @@ Python package metadata. It defines:
 - optional browser dependency:
   - Playwright
 - console script:
-  - `dmdagent = dmdagent4all.cli:main`
+  - `dmdcore = dmdcore.cli:main`
 
 `start`
 
 macOS/Linux convenience launcher. It creates `.venv` if needed, installs the
 package in editable mode if needed, and forwards friendly commands to
-`dmdagent`.
+`dmdcore`.
 
 Examples:
 
@@ -475,7 +475,7 @@ Builds the production container. It:
 
 Runs:
 
-- `dmdagent` container
+- `dmdcore` container
 - `ollama` container
 
 It mounts `./workspace` as the safe user workspace and stores application data
@@ -563,35 +563,35 @@ Install and bootstrap scripts:
 - `scripts/bootstrap.ps1`
 - `scripts/docker-entrypoint.sh`
 
-### `src/dmdagent4all/`
+### `src/dmdcore/`
 
 Main Python package.
 
 Important files and folders:
 
 ```text
-src/dmdagent4all/__init__.py
-src/dmdagent4all/app_paths.py
-src/dmdagent4all/audit.py
-src/dmdagent4all/autonomy.py
-src/dmdagent4all/cli.py
-src/dmdagent4all/config.py
-src/dmdagent4all/doctor.py
-src/dmdagent4all/email_oauth.py
-src/dmdagent4all/model_presets.py
-src/dmdagent4all/runtime.py
-src/dmdagent4all/server.py
-src/dmdagent4all/workspace.py
-src/dmdagent4all/agent/
-src/dmdagent4all/interfaces/
-src/dmdagent4all/llm/
-src/dmdagent4all/manifests/tools/
-src/dmdagent4all/memory/
-src/dmdagent4all/permissions/
-src/dmdagent4all/sandbox/
-src/dmdagent4all/secrets/
-src/dmdagent4all/security/
-src/dmdagent4all/tools/
+src/dmdcore/__init__.py
+src/dmdcore/app_paths.py
+src/dmdcore/audit.py
+src/dmdcore/autonomy.py
+src/dmdcore/cli.py
+src/dmdcore/config.py
+src/dmdcore/doctor.py
+src/dmdcore/email_oauth.py
+src/dmdcore/model_presets.py
+src/dmdcore/runtime.py
+src/dmdcore/server.py
+src/dmdcore/workspace.py
+src/dmdcore/agent/
+src/dmdcore/interfaces/
+src/dmdcore/llm/
+src/dmdcore/manifests/tools/
+src/dmdcore/memory/
+src/dmdcore/permissions/
+src/dmdcore/sandbox/
+src/dmdcore/secrets/
+src/dmdcore/security/
+src/dmdcore/tools/
 ```
 
 `app_paths.py`
@@ -609,7 +609,7 @@ Autonomy mode definitions and safety invariants.
 
 `cli.py`
 
-Command-line interface. This file defines `dmdagent` commands.
+Command-line interface. This file defines `dmdcore` commands.
 
 `config.py`
 
@@ -731,16 +731,16 @@ workspace file APIs.
 Default local data lives under:
 
 ```text
-~/.local/share/dmdagent4all/
+~/.local/share/dmdcore/
 ```
 
 Important runtime files/directories:
 
 ```text
-~/.local/share/dmdagent4all/config.yaml
-~/.local/share/dmdagent4all/memory/
-~/.local/share/dmdagent4all/workspace/
-~/.local/share/dmdagent4all/audit.db
+~/.local/share/dmdcore/config.yaml
+~/.local/share/dmdcore/memory/
+~/.local/share/dmdcore/workspace/
+~/.local/share/dmdcore/audit.db
 ```
 
 The code should treat these as local user data, not repository files.
@@ -757,13 +757,13 @@ Docker mode is the easiest path for non-developers.
 macOS/Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash -s -- --docker
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.sh | bash -s -- --docker
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
 ```
 
 Open:
@@ -791,8 +791,8 @@ workspace access narrow.
 macOS/Linux:
 
 ```bash
-git clone https://github.com/Denis-Denchev/dmdagent4all.git
-cd dmdagent4all
+git clone https://github.com/Denis-Denchev/dmdcore.git
+cd dmdcore
 ./scripts/install.sh
 ```
 
@@ -807,8 +807,8 @@ The launcher creates `.venv` and installs the package if needed.
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/Denis-Denchev/dmdagent4all.git
-cd dmdagent4all
+git clone https://github.com/Denis-Denchev/dmdcore.git
+cd dmdcore
 .\start.ps1 session
 ```
 
@@ -870,7 +870,7 @@ Ctrl+C
 Backend only:
 
 ```bash
-.venv/bin/dmdagent serve
+.venv/bin/dmdcore serve
 ```
 
 Frontend only:
@@ -889,7 +889,7 @@ npm run build
 
 ## CLI Cheat Sheet
 
-The `./start` launcher forwards to `dmdagent`.
+The `./start` launcher forwards to `dmdcore`.
 
 Everyday commands:
 
@@ -905,84 +905,84 @@ Everyday commands:
 Direct CLI commands:
 
 ```bash
-dmdagent
-dmdagent chat
-dmdagent ask "Show my local memory files"
-dmdagent start
-dmdagent open
-dmdagent status
-dmdagent doctor
-dmdagent doctor --json
-dmdagent wizard
+dmdcore
+dmdcore chat
+dmdcore ask "Show my local memory files"
+dmdcore start
+dmdcore open
+dmdcore status
+dmdcore doctor
+dmdcore doctor --json
+dmdcore wizard
 ```
 
 Model commands:
 
 ```bash
-dmdagent model
-dmdagent model light --pull
-dmdagent model fast --pull
-dmdagent model use qwen3:8b --pull
-dmdagent models list
-dmdagent models set-mode light
-dmdagent models set qwen3:8b
-dmdagent models provider ollama
-dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --base-url https://api.openai.com/v1 --model gpt-4o-mini
-dmdagent models provider deepseek --api-key-env DMDAGENT_DEEPSEEK_API_KEY --base-url https://api.deepseek.com --model deepseek-v4-flash
-dmdagent models provider lmstudio --base-url http://localhost:1234/v1
+dmdcore model
+dmdcore model light --pull
+dmdcore model fast --pull
+dmdcore model use qwen3:8b --pull
+dmdcore models list
+dmdcore models set-mode light
+dmdcore models set qwen3:8b
+dmdcore models provider ollama
+dmdcore models provider openai --api-key-env DMDCORE_OPENAI_API_KEY --base-url https://api.openai.com/v1 --model gpt-4o-mini
+dmdcore models provider deepseek --api-key-env DMDCORE_DEEPSEEK_API_KEY --base-url https://api.deepseek.com --model deepseek-v4-flash
+dmdcore models provider lmstudio --base-url http://localhost:1234/v1
 ```
 
 Tools and permissions:
 
 ```bash
-dmdagent tools list
-dmdagent tools enable memory.write
-dmdagent tools disable memory.write
-dmdagent permissions list
-dmdagent permissions grant gmail.readonly
-dmdagent permissions revoke gmail.readonly
+dmdcore tools list
+dmdcore tools enable memory.write
+dmdcore tools disable memory.write
+dmdcore permissions list
+dmdcore permissions grant gmail.readonly
+dmdcore permissions revoke gmail.readonly
 ```
 
 Terminal:
 
 ```bash
-dmdagent terminal status
-dmdagent terminal workspace /path/to/project
-dmdagent terminal allow git status
-dmdagent terminal remove git status
-dmdagent terminal enable --tool --grant-permission
-dmdagent terminal disable
-dmdagent terminal auto-approve on
-dmdagent terminal run -- git status
+dmdcore terminal status
+dmdcore terminal workspace /path/to/project
+dmdcore terminal allow git status
+dmdcore terminal remove git status
+dmdcore terminal enable --tool --grant-permission
+dmdcore terminal disable
+dmdcore terminal auto-approve on
+dmdcore terminal run -- git status
 ```
 
 Memory:
 
 ```bash
-dmdagent memory path
-dmdagent memory list
-dmdagent memory read profile.md
-dmdagent memory open
+dmdcore memory path
+dmdcore memory list
+dmdcore memory read profile.md
+dmdcore memory open
 ```
 
 Approvals:
 
 ```bash
-dmdagent approvals list
-dmdagent approvals approve <id>
-dmdagent approvals deny <id>
+dmdcore approvals list
+dmdcore approvals approve <id>
+dmdcore approvals deny <id>
 ```
 
 Telegram:
 
 ```bash
-dmdagent telegram status
-dmdagent telegram allow <telegram_user_id>
-dmdagent telegram remove <telegram_user_id>
-dmdagent telegram enable
-dmdagent telegram disable
-dmdagent telegram run
-dmdagent telegram run --once
+dmdcore telegram status
+dmdcore telegram allow <telegram_user_id>
+dmdcore telegram remove <telegram_user_id>
+dmdcore telegram enable
+dmdcore telegram disable
+dmdcore telegram run
+dmdcore telegram run --once
 ```
 
 ## Dashboard v2 Cockpit UI
@@ -1138,13 +1138,13 @@ Each row has:
 Runtime config is loaded from local app data:
 
 ```text
-~/.local/share/dmdagent4all/config.yaml
+~/.local/share/dmdcore/config.yaml
 ```
 
 Defaults are defined in:
 
 ```text
-src/dmdagent4all/config.py
+src/dmdcore/config.py
 config/default.yaml
 ```
 
@@ -1234,22 +1234,22 @@ OpenAI-compatible providers are opt-in.
 OpenAI example:
 
 ```bash
-export DMDAGENT_OPENAI_API_KEY="sk-..."
-dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --base-url https://api.openai.com/v1 --model gpt-4o-mini
+export DMDCORE_OPENAI_API_KEY="sk-..."
+dmdcore models provider openai --api-key-env DMDCORE_OPENAI_API_KEY --base-url https://api.openai.com/v1 --model gpt-4o-mini
 ```
 
 DeepSeek example:
 
 ```bash
-export DMDAGENT_DEEPSEEK_API_KEY="sk-..."
-dmdagent models provider deepseek --api-key-env DMDAGENT_DEEPSEEK_API_KEY --base-url https://api.deepseek.com --model deepseek-v4-flash
+export DMDCORE_DEEPSEEK_API_KEY="sk-..."
+dmdcore models provider deepseek --api-key-env DMDCORE_DEEPSEEK_API_KEY --base-url https://api.deepseek.com --model deepseek-v4-flash
 ```
 
 LM Studio example:
 
 ```bash
-dmdagent models provider lmstudio --base-url http://localhost:1234/v1
-dmdagent models set local-model-name
+dmdcore models provider lmstudio --base-url http://localhost:1234/v1
+dmdcore models set local-model-name
 ```
 
 Important:
@@ -1264,7 +1264,7 @@ Important:
 Every tool has a manifest in:
 
 ```text
-src/dmdagent4all/manifests/tools/
+src/dmdcore/manifests/tools/
 ```
 
 Each manifest declares:
@@ -1377,9 +1377,9 @@ the codebase.
 Environment variables:
 
 ```text
-DMDAGENT_GMAIL_USERNAME
-DMDAGENT_GMAIL_APP_PASSWORD
-DMDAGENT_GMAIL_FROM optional
+DMDCORE_GMAIL_USERNAME
+DMDCORE_GMAIL_APP_PASSWORD
+DMDCORE_GMAIL_FROM optional
 ```
 
 Dashboard setup:
@@ -1418,8 +1418,8 @@ http://127.0.0.1:8765/v1/email/oauth/google/callback
 OAuth secret env names:
 
 ```text
-DMDAGENT_GMAIL_OAUTH_CLIENT_SECRET
-DMDAGENT_GMAIL_OAUTH_REFRESH_TOKEN
+DMDCORE_GMAIL_OAUTH_CLIENT_SECRET
+DMDCORE_GMAIL_OAUTH_REFRESH_TOKEN
 ```
 
 ### Send Flow
@@ -1513,12 +1513,12 @@ Terminal setup controls:
 CLI controls:
 
 ```bash
-dmdagent telegram status
-dmdagent telegram allow <telegram_user_id>
-dmdagent telegram remove <telegram_user_id>
-dmdagent telegram enable
-dmdagent telegram disable
-dmdagent telegram run
+dmdcore telegram status
+dmdcore telegram allow <telegram_user_id>
+dmdcore telegram remove <telegram_user_id>
+dmdcore telegram enable
+dmdcore telegram disable
+dmdcore telegram run
 ```
 
 Dashboard controls:
@@ -1550,17 +1550,17 @@ Rules:
 Example setup:
 
 ```bash
-dmdagent terminal workspace /path/to/project
-dmdagent terminal allow git status
-dmdagent terminal enable --tool --grant-permission
-dmdagent terminal run -- git status
-dmdagent approvals approve <id>
+dmdcore terminal workspace /path/to/project
+dmdcore terminal allow git status
+dmdcore terminal enable --tool --grant-permission
+dmdcore terminal run -- git status
+dmdcore approvals approve <id>
 ```
 
 Auto-approval is only for exact allowlist matches:
 
 ```bash
-dmdagent terminal auto-approve on
+dmdcore terminal auto-approve on
 ```
 
 Never replace this with broad shell access.
@@ -1661,7 +1661,7 @@ Memory is local Markdown storage.
 Default location:
 
 ```text
-~/.local/share/dmdagent4all/memory/
+~/.local/share/dmdcore/memory/
 ```
 
 Memory tools:
@@ -1689,9 +1689,9 @@ Terminal chat helpers:
 CLI:
 
 ```bash
-dmdagent memory list
-dmdagent memory read profile.md
-dmdagent memory open
+dmdcore memory list
+dmdcore memory read profile.md
+dmdcore memory open
 ```
 
 ## Reminders
@@ -1771,7 +1771,7 @@ POST /v1/emergency/reset
 FastAPI routes live in:
 
 ```text
-src/dmdagent4all/server.py
+src/dmdcore/server.py
 ```
 
 Health:
@@ -2136,10 +2136,10 @@ Check:
 Useful commands:
 
 ```bash
-dmdagent tools list
-dmdagent permissions list
-dmdagent approvals list
-dmdagent doctor
+dmdcore tools list
+dmdcore permissions list
+dmdcore approvals list
+dmdcore doctor
 ```
 
 ### Email will not send
@@ -2167,7 +2167,7 @@ Approvals are one-time stored actions.
 Check:
 
 ```bash
-dmdagent approvals list
+dmdcore approvals list
 ```
 
 If emergency stop is active, reset it only when safe.
@@ -2177,9 +2177,9 @@ If emergency stop is active, reset it only when safe.
 Check:
 
 ```bash
-dmdagent terminal status
-dmdagent terminal allow git status
-dmdagent terminal enable --tool --grant-permission
+dmdcore terminal status
+dmdcore terminal allow git status
+dmdcore terminal enable --tool --grant-permission
 ```
 
 Remember: command matching is exact.
@@ -2193,15 +2193,15 @@ For local Ollama:
 ```bash
 ollama list
 ollama pull qwen3:8b
-dmdagent doctor
+dmdcore doctor
 ```
 
 For cloud/API provider:
 
 ```bash
-echo "$DMDAGENT_OPENAI_API_KEY"
-dmdagent status
-dmdagent doctor
+echo "$DMDCORE_OPENAI_API_KEY"
+dmdcore status
+dmdcore doctor
 ```
 
 ## How To Add A New Tool
@@ -2211,7 +2211,7 @@ Use this process for new tools.
 1. Add a manifest in:
 
 ```text
-src/dmdagent4all/manifests/tools/
+src/dmdcore/manifests/tools/
 ```
 
 2. Pick a risk level.
@@ -2235,7 +2235,7 @@ Example:
 }
 ```
 
-4. Implement the handler in `src/dmdagent4all/tools/`.
+4. Implement the handler in `src/dmdcore/tools/`.
 
 5. Register the handler in the tool registry/runtime path.
 

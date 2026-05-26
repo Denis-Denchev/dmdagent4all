@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dmdagent4all.app_paths import AppPaths
-from dmdagent4all.config import DEFAULT_CONFIG
-from dmdagent4all.doctor import doctor_summary, run_doctor
+from dmdcore.app_paths import AppPaths
+from dmdcore.config import DEFAULT_CONFIG
+from dmdcore.doctor import doctor_summary, run_doctor
 
 
 class DoctorTest(unittest.TestCase):

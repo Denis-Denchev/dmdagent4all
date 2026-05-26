@@ -5,7 +5,7 @@ import os
 import sys
 from unittest import mock
 
-from dmdagent4all.sandbox import TerminalPolicy, run_workspace_command
+from dmdcore.sandbox import TerminalPolicy, run_workspace_command
 
 
 class TerminalPolicyTest(unittest.TestCase):
@@ -75,11 +75,11 @@ class TerminalPolicyTest(unittest.TestCase):
             root = Path(tmp)
             script = root / "env_check.py"
             script.write_text(
-                "import os\nprint(os.environ.get('DMDAGENT_DEEPSEEK_API_KEY', 'missing'))\n",
+                "import os\nprint(os.environ.get('DMDCORE_DEEPSEEK_API_KEY', 'missing'))\n",
                 encoding="utf-8",
             )
 
-            with mock.patch.dict(os.environ, {"DMDAGENT_DEEPSEEK_API_KEY": "secret-value"}):
+            with mock.patch.dict(os.environ, {"DMDCORE_DEEPSEEK_API_KEY": "secret-value"}):
                 result = run_workspace_command(
                     [sys.executable, "env_check.py"],
                     workspace=root,

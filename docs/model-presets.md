@@ -32,25 +32,25 @@ The assistant response language defaults to `auto`. It can answer in any languag
 List modes:
 
 ```bash
-dmdagent models list
+dmdcore models list
 ```
 
 Switch modes:
 
 ```bash
-dmdagent model light --pull
-dmdagent model fast --pull
-dmdagent model balanced --pull
-dmdagent model power --pull
+dmdcore model light --pull
+dmdcore model fast --pull
+dmdcore model balanced --pull
+dmdcore model power --pull
 ```
 
 The longer equivalent commands are:
 
 ```bash
-dmdagent models set-mode light
-dmdagent models set-mode fast
-dmdagent models set-mode balanced
-dmdagent models set-mode power
+dmdcore models set-mode light
+dmdcore models set-mode fast
+dmdcore models set-mode balanced
+dmdcore models set-mode power
 ```
 
 Changing mode updates both the default assistant model and the planner model. This keeps tool routing fast on smaller machines.
@@ -58,7 +58,7 @@ Changing mode updates both the default assistant model and the planner model. Th
 Set a custom model:
 
 ```bash
-dmdagent model use phi4-mini --pull
+dmdcore model use phi4-mini --pull
 ```
 
 ## API-Key And Compatible Providers
@@ -66,29 +66,29 @@ dmdagent model use phi4-mini --pull
 Local Ollama remains the default:
 
 ```bash
-dmdagent models provider ollama
+dmdcore models provider ollama
 ```
 
 OpenAI-compatible providers are opt-in. The config stores only the environment
 variable name, not the API key value:
 
 ```bash
-export DMDAGENT_OPENAI_API_KEY="sk-..."
-dmdagent models provider openai --api-key-env DMDAGENT_OPENAI_API_KEY --model gpt-4o-mini
+export DMDCORE_OPENAI_API_KEY="sk-..."
+dmdcore models provider openai --api-key-env DMDCORE_OPENAI_API_KEY --model gpt-4o-mini
 ```
 
 DeepSeek uses its OpenAI-compatible API endpoint:
 
 ```bash
-export DMDAGENT_DEEPSEEK_API_KEY="sk-..."
-dmdagent models provider deepseek --api-key-env DMDAGENT_DEEPSEEK_API_KEY --model deepseek-v4-flash
+export DMDCORE_DEEPSEEK_API_KEY="sk-..."
+dmdcore models provider deepseek --api-key-env DMDCORE_DEEPSEEK_API_KEY --model deepseek-v4-flash
 ```
 
 For local compatible servers:
 
 ```bash
-dmdagent models provider lmstudio --base-url http://localhost:1234/v1
-dmdagent models provider vllm --base-url http://localhost:8000/v1
+dmdcore models provider lmstudio --base-url http://localhost:1234/v1
+dmdcore models provider vllm --base-url http://localhost:8000/v1
 ```
 
-Run `dmdagent doctor` after changing providers.
+Run `dmdcore doctor` after changing providers.

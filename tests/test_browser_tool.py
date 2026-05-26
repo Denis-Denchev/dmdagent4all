@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from dmdagent4all.tools.base import ToolRuntimeContext
-from dmdagent4all.tools.browser_automation import browser_click
-from dmdagent4all.tools.web import (
+from dmdcore.tools.base import ToolRuntimeContext
+from dmdcore.tools.browser_automation import browser_click
+from dmdcore.tools.web import (
     FetchedPage,
     assert_public_http_url,
     browser_extract_text,
@@ -58,7 +58,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=64,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_extract_text({"url": "https://example.com"}, context)
 
         self.assertIn("api_key=[REDACTED_SECRET]", result["text"])
@@ -97,7 +97,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=512,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_scrape_markdown(
                     {
                         "url": "https://example.com/posts",
@@ -149,7 +149,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=256,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_scrape_markdown({"url": "https://example.com"}, context)
 
         self.assertIn("# JS App", result["markdown"])
@@ -176,7 +176,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=128,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_scrape_markdown({"url": "https://example.com"}, context)
 
         self.assertTrue(str(result["path"]).startswith(str(downloads_root.resolve())))
@@ -227,7 +227,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=2048,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_scrape_markdown(
                     {
                         "url": "https://news.example.test",
@@ -290,7 +290,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=1024,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_scrape_markdown(
                     {
                         "url": "https://another.example.test",
@@ -331,7 +331,7 @@ class BrowserToolTest(unittest.TestCase):
                 bytes_read=512,
                 truncated=False,
             )
-            with mock.patch("dmdagent4all.tools.web.fetch_page", return_value=page):
+            with mock.patch("dmdcore.tools.web.fetch_page", return_value=page):
                 result = browser_scrape_markdown(
                     {
                         "url": "https://directory.example.test",
@@ -357,7 +357,7 @@ class BrowserToolTest(unittest.TestCase):
                 workspace_root=Path(tmp) / "workspace",
                 config={"browser": {"timeout_seconds": 1}},
             )
-            with mock.patch("dmdagent4all.tools.browser_automation._load_playwright", return_value=None):
+            with mock.patch("dmdcore.tools.browser_automation._load_playwright", return_value=None):
                 result = browser_click(
                     {"url": "https://example.com", "selector": "a"},
                     context,

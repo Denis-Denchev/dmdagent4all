@@ -53,9 +53,9 @@ email:
     imap_port: 993
     smtp_host: smtp.gmail.com
     smtp_port: 587
-    username_env: DMDAGENT_GMAIL_USERNAME
-    password_env: DMDAGENT_GMAIL_APP_PASSWORD
-    from_env: DMDAGENT_GMAIL_FROM
+    username_env: DMDCORE_GMAIL_USERNAME
+    password_env: DMDCORE_GMAIL_APP_PASSWORD
+    from_env: DMDCORE_GMAIL_FROM
     mailbox: INBOX
     archive_mailbox: "[Gmail]/All Mail"
   outlook:
@@ -64,9 +64,9 @@ email:
     imap_port: 993
     smtp_host: smtp.office365.com
     smtp_port: 587
-    username_env: DMDAGENT_OUTLOOK_USERNAME
-    password_env: DMDAGENT_OUTLOOK_APP_PASSWORD
-    from_env: DMDAGENT_OUTLOOK_FROM
+    username_env: DMDCORE_OUTLOOK_USERNAME
+    password_env: DMDCORE_OUTLOOK_APP_PASSWORD
+    from_env: DMDCORE_OUTLOOK_FROM
     mailbox: INBOX
     archive_mailbox: Archive
 
@@ -96,7 +96,7 @@ interfaces:
   telegram:
     enabled: false
     allowed_user_ids: []
-    bot_token_env: DMDAGENT_TELEGRAM_BOT_TOKEN
+    bot_token_env: DMDCORE_TELEGRAM_BOT_TOKEN
     polling_timeout_seconds: 30
   whatsapp:
     enabled: false

@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvPython = Join-Path $RootDir ".venv\Scripts\python.exe"
-$DmdAgent = Join-Path $RootDir ".venv\Scripts\dmdagent.exe"
+$DmdCore = Join-Path $RootDir ".venv\Scripts\dmdcore.exe"
 
 function Get-PythonCommand {
     $candidates = @(
@@ -50,7 +50,7 @@ function Ensure-Package {
         Write-Host "Creating local Python environment..."
         Invoke-BasePython $PythonCommand @("-m", "venv", ".venv")
     }
-    if (-not (Test-Path $DmdAgent)) {
+    if (-not (Test-Path $DmdCore)) {
         Write-Host "Installing DMD Agent locally..."
         & $VenvPython -m pip install --upgrade pip
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -93,32 +93,32 @@ switch ($CommandName) {
     }
     { $_ -in @("session", "chat") } {
         Ensure-Package
-        & $DmdAgent chat @Rest
+        & $DmdCore chat @Rest
         exit $LASTEXITCODE
     }
     "ask" {
         Ensure-Package
-        & $DmdAgent ask @Rest
+        & $DmdCore ask @Rest
         exit $LASTEXITCODE
     }
     { $_ -in @("web", "dashboard") } {
         Ensure-Package
-        & $DmdAgent start @Rest
+        & $DmdCore start @Rest
         exit $LASTEXITCODE
     }
     "model" {
         Ensure-Package
-        & $DmdAgent model @Rest
+        & $DmdCore model @Rest
         exit $LASTEXITCODE
     }
     { $_ -in @("doctor", "status", "open") } {
         Ensure-Package
-        & $DmdAgent $CommandName @Rest
+        & $DmdCore $CommandName @Rest
         exit $LASTEXITCODE
     }
     default {
         Ensure-Package
-        & $DmdAgent $CommandName @Rest
+        & $DmdCore $CommandName @Rest
         exit $LASTEXITCODE
     }
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${DMDAGENT_REPO_URL:-https://github.com/Denis-Denchev/dmdagent4all.git}"
-INSTALL_DIR="${DMDAGENT_INSTALL_DIR:-dmdagent4all}"
+REPO_URL="${DMDCORE_REPO_URL:-https://github.com/Denis-Denchev/dmdcore.git}"
+INSTALL_DIR="${DMDCORE_INSTALL_DIR:-dmdcore}"
 USE_DOCKER=0
 DETACHED=0
 
@@ -64,7 +64,7 @@ PY
   return 1
 }
 
-if [ -f "pyproject.toml" ] && [ -f "start" ] && [ -d "src/dmdagent4all" ]; then
+if [ -f "pyproject.toml" ] && [ -f "start" ] && [ -d "src/dmdcore" ]; then
   PROJECT_DIR="$(pwd)"
 else
   if ! command -v git >/dev/null 2>&1; then
@@ -74,7 +74,7 @@ else
     info "Updating existing checkout: $INSTALL_DIR"
     git -C "$INSTALL_DIR" pull --ff-only
   elif [ -e "$INSTALL_DIR" ]; then
-    fail "$INSTALL_DIR already exists and is not a git checkout. Choose another folder with DMDAGENT_INSTALL_DIR."
+    fail "$INSTALL_DIR already exists and is not a git checkout. Choose another folder with DMDCORE_INSTALL_DIR."
   else
     info "Cloning $REPO_URL into $INSTALL_DIR"
     git clone "$REPO_URL" "$INSTALL_DIR"
@@ -119,7 +119,7 @@ info "Installing Python package dependencies"
 .venv/bin/python -m pip install -e .
 
 info "Initializing local app data"
-.venv/bin/dmdagent init
+.venv/bin/dmdcore init
 
 if [ -d "frontend" ]; then
   if command -v npm >/dev/null 2>&1; then
@@ -130,12 +130,12 @@ if [ -d "frontend" ]; then
   fi
 fi
 
-if [ "${DMDAGENT_SKIP_WIZARD:-0}" != "1" ]; then
+if [ "${DMDCORE_SKIP_WIZARD:-0}" != "1" ]; then
   info "Running first-time setup wizard"
-  .venv/bin/dmdagent wizard
+  .venv/bin/dmdcore wizard
 fi
 
-if [ "${DMDAGENT_INSTALL_SHORTCUT:-1}" != "0" ] && [ -x "./start" ]; then
+if [ "${DMDCORE_INSTALL_SHORTCUT:-1}" != "0" ] && [ -x "./start" ]; then
   info "Installing optional shell shortcut: start"
   ./start install-command || true
 fi

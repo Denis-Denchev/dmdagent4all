@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from dmdagent4all.cli import main
-from dmdagent4all.config import DEFAULT_CONFIG, load_config
+from dmdcore.cli import main
+from dmdcore.config import DEFAULT_CONFIG, load_config
 
 
 class CliTest(unittest.TestCase):
@@ -88,7 +88,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(openai_result, 0)
         self.assertEqual(openai_config["llm"]["provider"], "openai")
         self.assertEqual(openai_config["llm"]["model"], "gpt-4o-mini")
-        self.assertEqual(openai_config["llm"]["api_key_env"], "DMDAGENT_OPENAI_API_KEY")
+        self.assertEqual(openai_config["llm"]["api_key_env"], "DMDCORE_OPENAI_API_KEY")
         self.assertEqual(local_result, 0)
         self.assertEqual(local_config["llm"]["provider"], "ollama")
         self.assertEqual(local_config["llm"]["model"], "qwen3:8b")
@@ -116,7 +116,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(deepseek_config["llm"]["provider"], "deepseek")
         self.assertEqual(deepseek_config["llm"]["model"], "deepseek-v4-pro")
         self.assertEqual(deepseek_config["llm"]["base_url"], "https://api.deepseek.com")
-        self.assertEqual(deepseek_config["llm"]["api_key_env"], "DMDAGENT_DEEPSEEK_API_KEY")
+        self.assertEqual(deepseek_config["llm"]["api_key_env"], "DMDCORE_DEEPSEEK_API_KEY")
         self.assertEqual(local_result, 0)
         self.assertEqual(local_config["llm"]["provider"], "ollama")
         self.assertEqual(local_config["llm"]["model"], "qwen3:8b")
@@ -143,7 +143,7 @@ class CliTest(unittest.TestCase):
             try:
                 with (
                     contextlib.redirect_stdout(io.StringIO()) as output,
-                    mock.patch("dmdagent4all.cli.build_agent_core") as build_core,
+                    mock.patch("dmdcore.cli.build_agent_core") as build_core,
                 ):
                     result = main(["ask", "--no-ollama", "set", "up", "telegram", "bot"])
             finally:
@@ -163,11 +163,11 @@ class CliTest(unittest.TestCase):
                 with (
                     contextlib.redirect_stdout(io.StringIO()) as output,
                     mock.patch("builtins.input", side_effect=["DMD", "Test User", "1", "1", EOFError]),
-                    mock.patch("dmdagent4all.cli._ensure_ollama", return_value=None),
+                    mock.patch("dmdcore.cli._ensure_ollama", return_value=None),
                 ):
                     result = main(["chat", "--no-ollama"])
                 with open(
-                    os.path.join(tmp, "dmdagent4all", "memory", "long-term", "profile.md"),
+                    os.path.join(tmp, "dmdcore", "memory", "long-term", "profile.md"),
                     encoding="utf-8",
                 ) as profile_file:
                     profile = profile_file.read()
@@ -189,9 +189,9 @@ class CliTest(unittest.TestCase):
                 with (
                     contextlib.redirect_stdout(io.StringIO()) as output,
                     mock.patch("builtins.input", side_effect=EOFError),
-                    mock.patch("dmdagent4all.cli._ensure_ollama", return_value=None),
+                    mock.patch("dmdcore.cli._ensure_ollama", return_value=None),
                     mock.patch(
-                        "dmdagent4all.cli._run_terminal_onboarding",
+                        "dmdcore.cli._run_terminal_onboarding",
                         return_value={
                             **DEFAULT_CONFIG,
                             "setup": {
@@ -230,7 +230,7 @@ class CliTest(unittest.TestCase):
                             EOFError,
                         ],
                     ),
-                    mock.patch("dmdagent4all.cli._ensure_ollama", return_value=None),
+                    mock.patch("dmdcore.cli._ensure_ollama", return_value=None),
                 ):
                     result = main(["chat", "--no-ollama"])
             finally:
@@ -252,9 +252,9 @@ class CliTest(unittest.TestCase):
             try:
                 with (
                     contextlib.redirect_stdout(io.StringIO()) as output,
-                    mock.patch("dmdagent4all.cli._ensure_api", return_value=None),
-                    mock.patch("dmdagent4all.cli._ensure_dashboard", return_value=None),
-                    mock.patch("dmdagent4all.cli._http_json", return_value={"polling": True}) as http_json,
+                    mock.patch("dmdcore.cli._ensure_api", return_value=None),
+                    mock.patch("dmdcore.cli._ensure_dashboard", return_value=None),
+                    mock.patch("dmdcore.cli._http_json", return_value={"polling": True}) as http_json,
                 ):
                     result = main(["start", "--no-open", "--no-ollama"])
             finally:
@@ -274,9 +274,9 @@ class CliTest(unittest.TestCase):
             try:
                 with (
                     contextlib.redirect_stdout(io.StringIO()),
-                    mock.patch("dmdagent4all.cli._ensure_api", return_value=None),
-                    mock.patch("dmdagent4all.cli._ensure_dashboard", return_value=None),
-                    mock.patch("dmdagent4all.cli._http_json") as http_json,
+                    mock.patch("dmdcore.cli._ensure_api", return_value=None),
+                    mock.patch("dmdcore.cli._ensure_dashboard", return_value=None),
+                    mock.patch("dmdcore.cli._http_json") as http_json,
                 ):
                     result = main(["start", "--no-open", "--no-ollama", "--no-telegram"])
             finally:

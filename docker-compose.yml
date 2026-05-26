@@ -1,25 +1,25 @@
 services:
-  dmdagent:
+  dmdcore:
     build:
       context: .
-    image: dmdagent4all:local
+    image: dmdcore:local
     ports:
       - "8765:8765"
     environment:
       XDG_DATA_HOME: /data
-      DMDAGENT_STATIC_DIR: /app/frontend/dist
-      DMDAGENT_WORKSPACE: /workspace
-      DMDAGENT_OLLAMA_BASE_URL: http://ollama:11434
-      DMDAGENT_OLLAMA_MODEL: ${DMDAGENT_OLLAMA_MODEL:-qwen3:4b}
-      DMDAGENT_PULL_MODEL: ${DMDAGENT_PULL_MODEL:-1}
-      DMDAGENT_GMAIL_USERNAME: ${DMDAGENT_GMAIL_USERNAME:-}
-      DMDAGENT_GMAIL_APP_PASSWORD: ${DMDAGENT_GMAIL_APP_PASSWORD:-}
-      DMDAGENT_GMAIL_FROM: ${DMDAGENT_GMAIL_FROM:-}
-      DMDAGENT_OUTLOOK_USERNAME: ${DMDAGENT_OUTLOOK_USERNAME:-}
-      DMDAGENT_OUTLOOK_APP_PASSWORD: ${DMDAGENT_OUTLOOK_APP_PASSWORD:-}
-      DMDAGENT_OUTLOOK_FROM: ${DMDAGENT_OUTLOOK_FROM:-}
+      DMDCORE_STATIC_DIR: /app/frontend/dist
+      DMDCORE_WORKSPACE: /workspace
+      DMDCORE_OLLAMA_BASE_URL: http://ollama:11434
+      DMDCORE_OLLAMA_MODEL: ${DMDCORE_OLLAMA_MODEL:-qwen3:4b}
+      DMDCORE_PULL_MODEL: ${DMDCORE_PULL_MODEL:-1}
+      DMDCORE_GMAIL_USERNAME: ${DMDCORE_GMAIL_USERNAME:-}
+      DMDCORE_GMAIL_APP_PASSWORD: ${DMDCORE_GMAIL_APP_PASSWORD:-}
+      DMDCORE_GMAIL_FROM: ${DMDCORE_GMAIL_FROM:-}
+      DMDCORE_OUTLOOK_USERNAME: ${DMDCORE_OUTLOOK_USERNAME:-}
+      DMDCORE_OUTLOOK_APP_PASSWORD: ${DMDCORE_OUTLOOK_APP_PASSWORD:-}
+      DMDCORE_OUTLOOK_FROM: ${DMDCORE_OUTLOOK_FROM:-}
     volumes:
-      - dmdagent_data:/data
+      - dmdcore_data:/data
       - ./workspace:/workspace
     depends_on:
       - ollama
@@ -32,5 +32,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  dmdagent_data:
+  dmdcore_data:
   ollama_data:

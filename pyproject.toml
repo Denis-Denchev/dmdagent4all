@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dmdagent4all"
+name = "dmdcore"
 version = "1.0.0"
 description = "Local-first AI control center with explicit tool permissions."
 readme = "README.md"
@@ -24,14 +24,14 @@ browser = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Denis-Denchev/dmdagent4all"
-Repository = "https://github.com/Denis-Denchev/dmdagent4all"
+Homepage = "https://github.com/Denis-Denchev/dmdcore"
+Repository = "https://github.com/Denis-Denchev/dmdcore"
 
 [project.scripts]
-dmdagent = "dmdagent4all.cli:main"
+dmdcore = "dmdcore.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-dmdagent4all = ["manifests/tools/*.json"]
+dmdcore = ["manifests/tools/*.json"]

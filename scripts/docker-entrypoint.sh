@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="${DMDAGENT_OLLAMA_MODEL:-qwen3:4b}"
-BASE_URL="${DMDAGENT_OLLAMA_BASE_URL:-http://ollama:11434}"
-WORKSPACE="${DMDAGENT_WORKSPACE:-/workspace}"
+MODEL="${DMDCORE_OLLAMA_MODEL:-qwen3:4b}"
+BASE_URL="${DMDCORE_OLLAMA_BASE_URL:-http://ollama:11434}"
+WORKSPACE="${DMDCORE_WORKSPACE:-/workspace}"
 
-dmdagent init
+dmdcore init
 
 python - <<'PY'
 import os
 from pathlib import Path
 
-from dmdagent4all.app_paths import AppPaths
-from dmdagent4all.config import load_config, save_config
+from dmdcore.app_paths import AppPaths
+from dmdcore.config import load_config, save_config
 
 paths = AppPaths.default()
 config = load_config(paths.config)
 
-workspace = os.environ.get("DMDAGENT_WORKSPACE", "/workspace")
-model = os.environ.get("DMDAGENT_OLLAMA_MODEL", "qwen3:4b")
-base_url = os.environ.get("DMDAGENT_OLLAMA_BASE_URL", "http://ollama:11434")
+workspace = os.environ.get("DMDCORE_WORKSPACE", "/workspace")
+model = os.environ.get("DMDCORE_OLLAMA_MODEL", "qwen3:4b")
+base_url = os.environ.get("DMDCORE_OLLAMA_BASE_URL", "http://ollama:11434")
 
 llm = config.setdefault("llm", {})
 llm["provider"] = "ollama"
@@ -39,7 +39,7 @@ Path(workspace).mkdir(parents=True, exist_ok=True)
 save_config(config, paths.config)
 PY
 
-if [ "${DMDAGENT_PULL_MODEL:-1}" = "1" ]; then
+if [ "${DMDCORE_PULL_MODEL:-1}" = "1" ]; then
   python - <<'PY'
 import json
 import os
@@ -47,10 +47,10 @@ import time
 import urllib.error
 import urllib.request
 
-base_url = os.environ.get("DMDAGENT_OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-model = os.environ.get("DMDAGENT_OLLAMA_MODEL", "qwen3:4b")
+base_url = os.environ.get("DMDCORE_OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+model = os.environ.get("DMDCORE_OLLAMA_MODEL", "qwen3:4b")
 
-deadline = time.time() + int(os.environ.get("DMDAGENT_OLLAMA_WAIT_SECONDS", "300"))
+deadline = time.time() + int(os.environ.get("DMDCORE_OLLAMA_WAIT_SECONDS", "300"))
 while time.time() < deadline:
     try:
         urllib.request.urlopen(f"{base_url}/api/tags", timeout=5).read()
@@ -70,7 +70,7 @@ request = urllib.request.Request(
     method="POST",
 )
 try:
-    urllib.request.urlopen(request, timeout=int(os.environ.get("DMDAGENT_OLLAMA_PULL_TIMEOUT", "1800"))).read()
+    urllib.request.urlopen(request, timeout=int(os.environ.get("DMDCORE_OLLAMA_PULL_TIMEOUT", "1800"))).read()
 except (OSError, urllib.error.URLError) as exc:
     print(f"Model pull failed: {exc}", flush=True)
 PY
@@ -78,7 +78,7 @@ fi
 
 case "${1:-serve}" in
   serve)
-    exec uvicorn dmdagent4all.server:app --host 0.0.0.0 --port "${DMDAGENT_PORT:-8765}"
+    exec uvicorn dmdcore.server:app --host 0.0.0.0 --port "${DMDCORE_PORT:-8765}"
     ;;
   *)
     exec "$@"

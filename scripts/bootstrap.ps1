@@ -1,6 +1,6 @@
 param(
-    [string]$InstallDir = $(if ($env:DMDAGENT_INSTALL_DIR) { $env:DMDAGENT_INSTALL_DIR } else { "dmdagent4all" }),
-    [string]$RepoUrl = $(if ($env:DMDAGENT_REPO_URL) { $env:DMDAGENT_REPO_URL } else { "https://github.com/Denis-Denchev/dmdagent4all.git" }),
+    [string]$InstallDir = $(if ($env:DMDCORE_INSTALL_DIR) { $env:DMDCORE_INSTALL_DIR } else { "dmdcore" }),
+    [string]$RepoUrl = $(if ($env:DMDCORE_REPO_URL) { $env:DMDCORE_REPO_URL } else { "https://github.com/Denis-Denchev/dmdcore.git" }),
     [switch]$Docker,
     [switch]$Detached
 )
@@ -50,7 +50,7 @@ function Invoke-BasePython {
 }
 
 $Current = Get-Location
-if ((Test-Path "pyproject.toml") -and (Test-Path "src/dmdagent4all")) {
+if ((Test-Path "pyproject.toml") -and (Test-Path "src/dmdcore")) {
     $ProjectDir = $Current.Path
 } else {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -61,7 +61,7 @@ if ((Test-Path "pyproject.toml") -and (Test-Path "src/dmdagent4all")) {
         git -C $InstallDir pull --ff-only
         if ($LASTEXITCODE -ne 0) { Fail "git pull failed." }
     } elseif (Test-Path $InstallDir) {
-        Fail "$InstallDir already exists and is not a git checkout. Choose another folder with DMDAGENT_INSTALL_DIR."
+        Fail "$InstallDir already exists and is not a git checkout. Choose another folder with DMDCORE_INSTALL_DIR."
     } else {
         Write-Step "Cloning $RepoUrl into $InstallDir"
         git clone $RepoUrl $InstallDir
@@ -101,7 +101,7 @@ Write-Step "Using Python:"
 Invoke-BasePython $PythonCommand @("-c", "import sys; print(sys.version.split()[0])")
 
 $VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
-$DmdAgent = Join-Path $ProjectDir ".venv\Scripts\dmdagent.exe"
+$DmdCore = Join-Path $ProjectDir ".venv\Scripts\dmdcore.exe"
 
 if (-not (Test-Path $VenvPython)) {
     Write-Step "Creating local Python environment: .venv"
@@ -115,8 +115,8 @@ if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed." }
 if ($LASTEXITCODE -ne 0) { Fail "Python package install failed." }
 
 Write-Step "Initializing local app data"
-& $DmdAgent init
-if ($LASTEXITCODE -ne 0) { Fail "dmdagent init failed." }
+& $DmdCore init
+if ($LASTEXITCODE -ne 0) { Fail "dmdcore init failed." }
 
 if (Test-Path "frontend") {
     if (Get-Command npm -ErrorAction SilentlyContinue) {
@@ -130,9 +130,9 @@ if (Test-Path "frontend") {
     }
 }
 
-if ($env:DMDAGENT_SKIP_WIZARD -ne "1") {
+if ($env:DMDCORE_SKIP_WIZARD -ne "1") {
     Write-Step "Running first-time setup wizard"
-    & $DmdAgent wizard
+    & $DmdCore wizard
 }
 
 Write-Step ""

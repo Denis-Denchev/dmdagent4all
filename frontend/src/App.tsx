@@ -247,9 +247,9 @@ function initialConfigDraft(): ConfigDraft {
     gmailImapPort: '993',
     gmailSmtpHost: 'smtp.gmail.com',
     gmailSmtpPort: '587',
-    gmailUsernameEnv: 'DMDAGENT_GMAIL_USERNAME',
-    gmailPasswordEnv: 'DMDAGENT_GMAIL_APP_PASSWORD',
-    gmailFromEnv: 'DMDAGENT_GMAIL_FROM',
+    gmailUsernameEnv: 'DMDCORE_GMAIL_USERNAME',
+    gmailPasswordEnv: 'DMDCORE_GMAIL_APP_PASSWORD',
+    gmailFromEnv: 'DMDCORE_GMAIL_FROM',
     gmailOauthClientId: '',
     gmailOauthRedirectUri: 'http://127.0.0.1:8765/v1/email/oauth/google/callback',
     gmailOauthEmail: '',
@@ -261,9 +261,9 @@ function initialConfigDraft(): ConfigDraft {
     outlookImapPort: '993',
     outlookSmtpHost: 'smtp.office365.com',
     outlookSmtpPort: '587',
-    outlookUsernameEnv: 'DMDAGENT_OUTLOOK_USERNAME',
-    outlookPasswordEnv: 'DMDAGENT_OUTLOOK_APP_PASSWORD',
-    outlookFromEnv: 'DMDAGENT_OUTLOOK_FROM',
+    outlookUsernameEnv: 'DMDCORE_OUTLOOK_USERNAME',
+    outlookPasswordEnv: 'DMDCORE_OUTLOOK_APP_PASSWORD',
+    outlookFromEnv: 'DMDCORE_OUTLOOK_FROM',
     outlookMailbox: 'INBOX',
     outlookArchiveMailbox: 'Archive',
   }
@@ -433,7 +433,7 @@ export function App() {
 
   useEffect(() => {
     void refreshAll()
-    if (localStorage.getItem('dmdagent4all:tutorial-complete') !== '1') {
+    if (localStorage.getItem('dmdcore:tutorial-complete') !== '1') {
       setTourOpen(true)
       setTourStep(0)
       navigateTo(tourSteps[0].view, null, { replace: true })
@@ -1114,7 +1114,7 @@ export function App() {
   }
 
   function finishTour() {
-    localStorage.setItem('dmdagent4all:tutorial-complete', '1')
+    localStorage.setItem('dmdcore:tutorial-complete', '1')
     setTourOpen(false)
   }
 
@@ -2012,10 +2012,10 @@ export function App() {
               <section className="panel telegram-panel">
                 <div className="section-heading">
                   <strong>Bot Token</strong>
-                  <span>{telegram?.bot_token_env ?? 'DMDAGENT_TELEGRAM_BOT_TOKEN'}</span>
+                  <span>{telegram?.bot_token_env ?? 'DMDCORE_TELEGRAM_BOT_TOKEN'}</span>
                 </div>
                 <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void saveTelegramTokenEnv() }}>
-                  <input value={telegramTokenEnv} onChange={(event) => setTelegramTokenEnv(event.target.value)} placeholder="DMDAGENT_TELEGRAM_BOT_TOKEN" />
+                  <input value={telegramTokenEnv} onChange={(event) => setTelegramTokenEnv(event.target.value)} placeholder="DMDCORE_TELEGRAM_BOT_TOKEN" />
                   <button className="button button-secondary" type="submit" disabled={busy}>Save Env</button>
                 </form>
                 <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void loadTelegramToken() }}>

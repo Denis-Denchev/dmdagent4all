@@ -4,16 +4,16 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from dmdagent4all.agent import AgentResponse
-from dmdagent4all.audit import AuditStore
-from dmdagent4all.interfaces.telegram import (
+from dmdcore.agent import AgentResponse
+from dmdcore.audit import AuditStore
+from dmdcore.interfaces.telegram import (
     TelegramInterface,
     TelegramSettings,
     load_telegram_token,
     store_telegram_token,
 )
-from dmdagent4all.tools.base import ToolRuntimeContext
-from dmdagent4all.tools.reminders import create_reminder, list_reminders
+from dmdcore.tools.base import ToolRuntimeContext
+from dmdcore.tools.reminders import create_reminder, list_reminders
 
 
 class FakeTelegramAPI:
@@ -335,7 +335,7 @@ class TelegramInterfaceTest(unittest.TestCase):
         settings = TelegramSettings(
             enabled=True,
             allowed_user_ids=frozenset({100}),
-            bot_token_env="DMDAGENT_TEST_TELEGRAM_TOKEN",
+            bot_token_env="DMDCORE_TEST_TELEGRAM_TOKEN",
         )
         os.environ.pop(settings.bot_token_env, None)
 

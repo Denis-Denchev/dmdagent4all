@@ -12,13 +12,13 @@ Recommended Docker mode for normal users:
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash -s -- --docker
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.sh | bash -s -- --docker
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
 ```
 
 Open:
@@ -38,16 +38,16 @@ This starts Docker Compose with:
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.sh | bash
-cd dmdagent4all
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.sh | bash
+cd dmdcore
 ./start web
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Denis-Denchev/dmdagent4all/main/scripts/bootstrap.ps1 | iex"
-cd dmdagent4all
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.ps1 | iex"
+cd dmdcore
 .\start.ps1 web
 ```
 
@@ -81,8 +81,8 @@ On Windows:
 ## Manual Local Development Install
 
 ```bash
-git clone https://github.com/Denis-Denchev/dmdagent4all.git
-cd dmdagent4all
+git clone https://github.com/Denis-Denchev/dmdcore.git
+cd dmdcore
 ./scripts/install.sh
 ```
 
@@ -92,7 +92,7 @@ The script:
 - creates `.venv`
 - installs the package in editable mode
 - creates local app directories
-- creates `~/.local/share/dmdagent4all/config.yaml`
+- creates `~/.local/share/dmdcore/config.yaml`
 - runs the hardware/model wizard
 
 After install:
@@ -198,7 +198,7 @@ start open
 Developer-only API start:
 
 ```bash
-dmdagent serve
+dmdcore serve
 ```
 
 Default URL:
