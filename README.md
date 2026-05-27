@@ -1,25 +1,28 @@
-# DMD Core
+# DMD Sentinel
 
 Open-source, local-first AI control center for personal computers, developer
 workstations, Mac minis, and small private servers.
+
+> Formerly known as **DMD Core**. The Python package and import paths remain
+> `dmdcore` for backwards compatibility; only the public brand and CLI changed.
 
 ## Quick Install (one line)
 
 **macOS / Linux** — open Terminal and paste:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmd-sentinel/main/install.sh | bash
 ```
 
 **Windows** — open PowerShell (any version) and paste:
 
 ```powershell
-irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Denis-Denchev/dmd-sentinel/main/install.ps1 | iex
 ```
 
 The installer auto-installs Python 3.13, Node.js LTS, Git, and Ollama if any
 are missing (via Homebrew on macOS, the native package manager on Linux,
-winget on Windows), clones the repo into `~/dmdcore`, runs the first-time
+winget on Windows), clones the repo into `~/dmd-sentinel`, runs the first-time
 setup wizard, and opens the dashboard in your browser.
 
 To skip the auto-launch or Ollama install, set `DMDCORE_SKIP_LAUNCH=1`
@@ -780,13 +783,13 @@ Docker mode is the easiest path for non-developers.
 macOS/Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.sh | bash -s -- --docker
+curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmd-sentinel/main/scripts/bootstrap.sh | bash -s -- --docker
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=irm https://raw.githubusercontent.com/Denis-Denchev/dmd-sentinel/main/scripts/bootstrap.ps1; & ([scriptblock]::Create($s)) -Docker"
 ```
 
 Open:
@@ -814,8 +817,8 @@ workspace access narrow.
 macOS/Linux:
 
 ```bash
-git clone https://github.com/Denis-Denchev/dmdcore.git
-cd dmdcore
+git clone https://github.com/Denis-Denchev/dmd-sentinel.git
+cd dmd-sentinel
 ./scripts/install.sh
 ```
 
@@ -830,8 +833,8 @@ The launcher creates `.venv` and installs the package if needed.
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/Denis-Denchev/dmdcore.git
-cd dmdcore
+git clone https://github.com/Denis-Denchev/dmd-sentinel.git
+cd dmd-sentinel
 .\start.ps1 session
 ```
 

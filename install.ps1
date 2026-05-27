@@ -1,10 +1,11 @@
-# DMD Core one-line installer for Windows.
+# DMD Sentinel one-line installer for Windows.
+# (Formerly DMD Core — Python package and env var names kept as `dmdcore` / `DMDCORE_*` for backwards compatibility.)
 #
 # Usage (PowerShell):
-#   irm https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Denis-Denchev/dmd-sentinel/main/install.ps1 | iex
 #
 # Optional environment variables:
-#   DMDCORE_INSTALL_DIR   Target install folder (default: $HOME\dmdcore)
+#   DMDCORE_INSTALL_DIR   Target install folder (default: $HOME\dmd-sentinel)
 #   DMDCORE_REPO_URL      Source git URL (default: official repo)
 #   DMDCORE_SKIP_OLLAMA   Set to 1 to skip Ollama installation
 #   DMDCORE_SKIP_LAUNCH   Set to 1 to skip auto-launching the dashboard
@@ -12,8 +13,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$RepoUrl    = if ($env:DMDCORE_REPO_URL) { $env:DMDCORE_REPO_URL } else { "https://github.com/Denis-Denchev/dmdcore.git" }
-$InstallDir = if ($env:DMDCORE_INSTALL_DIR) { $env:DMDCORE_INSTALL_DIR } else { Join-Path $HOME "dmdcore" }
+$RepoUrl    = if ($env:DMDCORE_REPO_URL) { $env:DMDCORE_REPO_URL } else { "https://github.com/Denis-Denchev/dmd-sentinel.git" }
+$InstallDir = if ($env:DMDCORE_INSTALL_DIR) { $env:DMDCORE_INSTALL_DIR } else { Join-Path $HOME "dmd-sentinel" }
 $SkipOllama = ($env:DMDCORE_SKIP_OLLAMA -eq "1")
 $SkipLaunch = ($env:DMDCORE_SKIP_LAUNCH -eq "1")
 

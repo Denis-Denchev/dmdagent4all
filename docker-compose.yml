@@ -1,8 +1,8 @@
 services:
-  dmdcore:
+  dmd-sentinel:
     build:
       context: .
-    image: dmdcore:local
+    image: dmd-sentinel:local
     ports:
       - "8765:8765"
     environment:

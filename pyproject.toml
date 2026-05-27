@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dmdcore"
+name = "dmd-sentinel"
 version = "1.0.0"
-description = "Local-first AI control center with explicit tool permissions."
+description = "DMD Sentinel — local-first AI control center with explicit tool permissions."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -24,10 +24,11 @@ browser = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Denis-Denchev/dmdcore"
-Repository = "https://github.com/Denis-Denchev/dmdcore"
+Homepage = "https://github.com/Denis-Denchev/dmd-sentinel"
+Repository = "https://github.com/Denis-Denchev/dmd-sentinel"
 
 [project.scripts]
+dmd-sentinel = "dmdcore.cli:main"
 dmdcore = "dmdcore.cli:main"
 
 [tool.setuptools.packages.find]

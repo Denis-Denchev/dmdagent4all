@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# DMD Core one-line installer for macOS and Linux.
+# DMD Sentinel one-line installer for macOS and Linux.
+# (Formerly DMD Core — Python package and env var names kept as `dmdcore` / `DMDCORE_*` for backwards compatibility.)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmdcore/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Denis-Denchev/dmd-sentinel/main/install.sh | bash
 #
 # Optional environment variables:
-#   DMDCORE_INSTALL_DIR   Target install folder (default: $HOME/dmdcore)
+#   DMDCORE_INSTALL_DIR   Target install folder (default: $HOME/dmd-sentinel)
 #   DMDCORE_REPO_URL      Source git URL (default: official repo)
 #   DMDCORE_SKIP_OLLAMA   Set to 1 to skip Ollama installation
 #   DMDCORE_SKIP_LAUNCH   Set to 1 to skip auto-launching the dashboard
@@ -13,8 +14,8 @@
 #   DMDCORE_NO_SUDO       Set to 1 to never attempt sudo (will fail on linux if root needed)
 set -euo pipefail
 
-REPO_URL="${DMDCORE_REPO_URL:-https://github.com/Denis-Denchev/dmdcore.git}"
-INSTALL_DIR="${DMDCORE_INSTALL_DIR:-$HOME/dmdcore}"
+REPO_URL="${DMDCORE_REPO_URL:-https://github.com/Denis-Denchev/dmd-sentinel.git}"
+INSTALL_DIR="${DMDCORE_INSTALL_DIR:-$HOME/dmd-sentinel}"
 SKIP_OLLAMA="${DMDCORE_SKIP_OLLAMA:-0}"
 SKIP_LAUNCH="${DMDCORE_SKIP_LAUNCH:-0}"
 NO_SUDO="${DMDCORE_NO_SUDO:-0}"
